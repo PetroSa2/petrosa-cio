@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+nats-py
+redis
+pydantic-settings
+petrosa-otel
+mongodb-client # For Audit Log
+motor
+pydantic>=2.0
