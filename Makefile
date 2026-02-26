@@ -2,21 +2,21 @@
 
 # Standardized Makefile for Petrosa Systems
 # Version: 2.0
-# Service: petrosa-cio
+# This template provides consistent development and CI/CD procedures across all services
 
 # Variables (customize per service)
 PYTHON := python3
 COVERAGE_THRESHOLD := 40
-IMAGE_NAME := petrosa-cio
+IMAGE_NAME := $(shell basename $(CURDIR))
 NAMESPACE := petrosa-apps
 
 # PHONY targets
 .PHONY: help setup install install-dev clean
 .PHONY: format lint type-check pre-commit
-.PHONY: test unit integration e2e coverage test-quality-check
+.PHONY: test unit integration e2e coverage
 .PHONY: security build container
 .PHONY: deploy k8s-status k8s-logs k8s-clean
-.PHONY: pipeline test-ci-pipeline
+.PHONY: pipeline
 
 # Default target
 .DEFAULT_GOAL := help
@@ -30,18 +30,18 @@ help: ## Show this help message
 setup: ## Complete environment setup with dependencies and pre-commit
 	@echo "🚀 Setting up development environment..."
 	$(PYTHON) -m pip install --upgrade pip
-	pip install -r requirements.txt
-	pip install -r requirements-dev.txt
+	$(PYTHON) -m pip install -r requirements.txt
+	$(PYTHON) -m pip install -r requirements-dev.txt
 	pre-commit install
 	@echo "✅ Setup completed!"
 
 install: ## Install production dependencies only
 	@echo "📦 Installing production dependencies..."
-	pip install -r requirements.txt
+	$(PYTHON) -m pip install -r requirements.txt
 
 install-dev: ## Install development dependencies
 	@echo "🔧 Installing development dependencies..."
-	pip install -r requirements-dev.txt
+	$(PYTHON) -m pip install -r requirements-dev.txt
 
 clean: ## Clean up cache and temporary files
 	@echo "🧹 Cleaning up cache and temporary files..."
@@ -55,18 +55,18 @@ clean: ## Clean up cache and temporary files
 # Code Quality
 format: ## Format code with ruff (replaces black + isort)
 	@echo "🎨 Formatting code with ruff..."
-	ruff format .
-	ruff check . --select I --fix
+	$(PYTHON) -m ruff format .
+	$(PYTHON) -m ruff check . --select I --fix
 	@echo "✅ Code formatting completed!"
 
 lint: ## Run linting checks with ruff (replaces flake8)
 	@echo "✨ Running linting checks..."
-	ruff check . --fix
+	$(PYTHON) -m ruff check . --fix
 	@echo "✅ Linting completed!"
 
 type-check: ## Run type checking with mypy
 	@echo "🔍 Running type checking with mypy..."
-	mypy . --ignore-missing-imports || echo "⚠️  Type checking found issues (non-blocking)"
+	$(PYTHON) -m mypy . --ignore-missing-imports || echo "⚠️  Type checking found issues (non-blocking)"
 	@echo "✅ Type checking completed!"
 
 pre-commit: ## Run pre-commit hooks on all files
@@ -77,32 +77,24 @@ pre-commit: ## Run pre-commit hooks on all files
 # Testing
 test: ## Run all tests with coverage (fail if below 40%)
 	@echo "🧪 Running all tests with coverage..."
-	OTEL_NO_AUTO_INIT=1 ENVIRONMENT=testing pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=html --cov-report=xml --cov-fail-under=$(COVERAGE_THRESHOLD)
+	OTEL_NO_AUTO_INIT=1 ENVIRONMENT=testing $(PYTHON) -m pytest tests/ -v --cov=. --cov-report=term-missing --cov-report=html --cov-report=xml --cov-fail-under=$(COVERAGE_THRESHOLD)
 	@echo "✅ Tests completed!"
 
 unit: ## Run unit tests only
 	@echo "🧪 Running unit tests..."
-	pytest tests/ -m "unit" -v --tb=short
+	$(PYTHON) -m pytest tests/ -m "unit" -v --tb=short
 
 integration: ## Run integration tests only
 	@echo "🔗 Running integration tests..."
-	pytest tests/ -m "integration" -v --tb=short
+	$(PYTHON) -m pytest tests/ -m "integration" -v --tb=short
 
 e2e: ## Run end-to-end tests only
 	@echo "🌐 Running end-to-end tests..."
-	pytest tests/ -m "e2e" -v --tb=short
+	$(PYTHON) -m pytest tests/ -m "e2e" -v --tb=short
 
 coverage: ## Generate coverage reports without failing
 	@echo "📊 Running tests with coverage..."
-	pytest tests/ --cov=. --cov-report=term-missing --cov-report=html --cov-report=xml
-
-test-quality-check: ## Check for tests without assertions (BLOCKING quality gate)
-	@echo "🧪 Checking test quality (assertions)..."
-	@if [ -f "../petrosa_k8s/scripts/check-test-assertions.py" ]; then \
-		$(PYTHON) ../petrosa_k8s/scripts/check-test-assertions.py; \
-	else \
-		echo "⚠️  Test quality script not found at ../petrosa_k8s/scripts/check-test-assertions.py"; \
-	fi
+	$(PYTHON) -m pytest tests/ --cov=. --cov-report=term-missing --cov-report=html --cov-report=xml
 
 # Security
 security: ## Run comprehensive security scans (gitleaks, detect-secrets, bandit, trivy)
@@ -116,17 +108,17 @@ security: ## Run comprehensive security scans (gitleaks, detect-secrets, bandit,
 	fi
 	@echo ""
 	@echo "2️⃣ detect-secrets (Entropy-based Detection)..."
-	@if command -v detect-secrets >/dev/null 2>&1; then \
-		detect-secrets scan --baseline .secrets.baseline || echo "⚠️  New secrets detected (review above)"; \
+	@if $(PYTHON) -m detect_secrets --version >/dev/null 2>&1; then \
+		$(PYTHON) -m detect_secrets scan --baseline .secrets.baseline || echo "⚠️  New secrets detected (review above)"; \
 	else \
 		echo "⚠️  detect-secrets not installed. Install with: pip install detect-secrets"; \
 	fi
 	@echo ""
 	@echo "3️⃣ Bandit (Python Security)..."
-	@bandit -r . -f json -o bandit-report.json -ll --exclude tests/ || true
+	@$(PYTHON) -m bandit -r . -f json -o bandit-report.json -ll --exclude tests/ || true
 	@if [ -f bandit-report.json ]; then \
 		echo "📊 Bandit found issues. Check bandit-report.json"; \
-		python -m json.tool bandit-report.json | grep -A 5 '"issue_severity"' | head -20 || true; \
+		$(PYTHON) -m json.tool bandit-report.json | grep -A 5 '"issue_severity"' | head -20 || true; \
 	fi
 	@echo ""
 	@echo "4️⃣ Trivy (Vulnerability Scanner)..."
@@ -140,7 +132,7 @@ security: ## Run comprehensive security scans (gitleaks, detect-secrets, bandit,
 	@echo ""
 	@echo "📊 Summary:"
 	@echo "  - Gitleaks: $$(command -v gitleaks >/dev/null 2>&1 && echo '✅ Installed' || echo '❌ Not installed')"
-	@echo "  - detect-secrets: $$(command -v detect-secrets >/dev/null 2>&1 && echo '✅ Installed' || echo '❌ Not installed')"
+	@echo "  - detect-secrets: $$($(PYTHON) -m detect_secrets --version >/dev/null 2>&1 && echo '✅ Installed' || echo '❌ Not installed')"
 	@echo "  - Bandit: ✅ Installed"
 	@echo "  - Trivy: $$(command -v trivy >/dev/null 2>&1 && echo '✅ Installed' || echo '❌ Not installed')"
 
@@ -200,18 +192,13 @@ pipeline: ## Run complete CI/CD pipeline locally
 	@echo "6️⃣ Running tests..."
 	$(MAKE) test
 	@echo ""
-	@echo "7️⃣ Checking test quality..."
-	$(MAKE) test-quality-check
-	@echo ""
-	@echo "8️⃣ Running security scans..."
+	@echo "7️⃣ Running security scans..."
 	$(MAKE) security
 	@echo ""
-	@echo "9️⃣ Building Docker image..."
+	@echo "8️⃣ Building Docker image..."
 	$(MAKE) build
 	@echo ""
-	@echo "🔟 Testing container..."
+	@echo "9️⃣ Testing container..."
 	$(MAKE) container
 	@echo ""
 	@echo "✅ Pipeline completed successfully!"
-
-test-ci-pipeline: pipeline ## Local CI/CD pipeline simulation

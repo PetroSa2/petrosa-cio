@@ -393,7 +393,7 @@ make k8s-logs
 
 **Tip**: For more logs, use kubectl directly:
 ```bash
-kubectl --kubeconfig=k8s/kubeconfig.yaml logs -n petrosa-apps -l app=petrosa-cio --tail=100 -f
+kubectl --kubeconfig=k8s/kubeconfig.yaml logs -n petrosa-apps -l app=SERVICE_NAME --tail=100 -f
 ```
 
 #### `make k8s-clean`
@@ -580,4 +580,3 @@ kubectl --kubeconfig=k8s/kubeconfig.yaml cluster-info
 - [CI/CD Pipeline](./CI_CD_PIPELINE.md)
 - [Testing Guide](./TESTING.md)
 - [Quick Reference](./QUICK_REFERENCE.md)
-

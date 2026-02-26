@@ -1,0 +1,72 @@
+# Standardized Ruff Configuration for Petrosa Services
+# Version: 2.0 - All-in-one Tool
+# Replaces: black, isort, flake8
+# This file should be named 'ruff.toml' in project root
+
+target-version = "py311"
+line-length = 88
+indent-width = 4
+
+# Linting rules
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort (import sorting)
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+]
+
+extend-ignore = [
+    "E501",    # line too long (ruff format handles this)
+    "E722",    # bare except (sometimes needed)
+    "B008",    # function calls in argument defaults
+    "B007",    # Loop control variable not used (sometimes intentional)
+    "C401",    # Unnecessary generator (style preference)
+    "C416",    # Unnecessary dict comprehension (style preference)
+    "C901",    # complexity (would require refactoring)
+    "UP007",   # Use X | Y syntax (Python 3.10+, optional)
+    "UP035",   # typing.Dict/List deprecated (Python 3.9+, optional)
+    "UP038",   # Use X | Y in isinstance (Python 3.10+, optional)
+    "B904",    # Exception chaining (best practice but not critical)
+    "F401",    # Unused imports (often intentional in __init__.py)
+    "F811",    # Redefinition (sometimes needed for overloads)
+    "F841",    # Unused variable (sometimes intentional)
+]
+
+# Exclude patterns
+exclude = [
+    ".venv",
+    "venv",
+    ".git",
+    "__pycache__",
+    "*.egg-info",
+    "htmlcov",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+]
+
+# Per-file ignores
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]           # Unused imports OK in __init__
+"tests/**/*" = ["B011", "B017"]    # Test-specific ignores
+"scripts/**/*" = ["E402"]          # Module level imports in scripts
+
+# Import sorting configuration (replaces isort)
+[lint.isort]
+force-single-line = false
+combine-as-imports = true
+force-wrap-aliases = true
+split-on-trailing-comma = true
+
+# Formatting configuration (replaces black)
+[format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = 88
