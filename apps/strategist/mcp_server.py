@@ -9,7 +9,7 @@ from functools import wraps
 from typing import Any
 
 from core.config_manager import ConfigManager
-from core.utils.schema_parser import generate_tools
+from core.utils.schema_parser import discover_schema_models, generate_tools
 
 
 def validate_thought_trace(
@@ -36,8 +36,25 @@ class MCPServer:
         config_manager: ConfigManager | None = None,
     ):
         self.module_path = module_path
+        self.models = discover_schema_models(module_path)
         self.config_manager = config_manager or ConfigManager()
+        self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
+        self.tools.append(
+            {
+                "name": "rollback_to_version",
+                "description": "Rollback configuration state to a previous audit version.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "audit_id": {"type": "string"},
+                        "reason": {"type": "string", "minLength": 3},
+                    },
+                    "required": ["audit_id", "reason"],
+                },
+                "mode": "write",
+            }
+        )
         self.tools_by_name = {tool["name"]: tool for tool in self.tools}
 
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -75,6 +92,8 @@ class MCPServer:
 
         if tool_name.startswith("set_"):
             return await self._handle_set(tool_name, arguments=arguments)
+        if tool_name == "rollback_to_version":
+            return await self._handle_rollback(arguments=arguments)
 
         raise ValueError(f"unsupported tool: {tool_name}")
 
@@ -103,6 +122,28 @@ class MCPServer:
             thought_trace=arguments["thought_trace"],
         )
         return {"model": model_name, "updated": True, "audit": audit}
+
+    async def _handle_rollback(self, *, arguments: dict[str, Any]) -> dict[str, Any]:
+        audit_id = str(arguments.get("audit_id", ""))
+        reason = str(arguments.get("reason", ""))
+        if not audit_id:
+            raise ValueError("audit_id is required")
+        if len(reason) < 3:
+            raise ValueError("reason must be at least 3 characters")
+
+        event = await self.config_manager.rollback_to_version(audit_id, reason=reason)
+        return {"rolled_back": True, "event": event}
+
+    def _validate_model_payload(
+        self,
+        model_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        model = self.models.get(model_name)
+        if model is None:
+            raise ValueError(f"unknown model for validation: {model_name}")
+        validated = model(**payload)
+        return validated.model_dump()
 
     async def run_stdio(self) -> None:
         """Run JSON-RPC loop over stdin/stdout (one JSON request per line)."""

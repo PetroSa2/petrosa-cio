@@ -10,6 +10,8 @@ This document describes MCP tools exposed by `apps/strategist/mcp_server.py`.
 - Every model produces:
   - `get_<ModelName>`
   - `set_<ModelName>`
+- Additional control tool:
+  - `rollback_to_version`
 
 ## Write Guard (`thought_trace`)
 All write tools (`set_*`) require:
@@ -27,6 +29,13 @@ Every successful `set_*` call persists an audit document through `ConfigManager`
 - `updated_at`
 
 When configured with Mongo collection, this audit document is stored for retrospective reviews.
+
+`rollback_to_version` also emits an audited event with:
+- `event_type: config_rollback`
+- `rolled_back_to_audit_id`
+- `rollback_reason`
+
+During rollback, the manager flushes Redis policy cache for the affected key (`policy:<ModelName>`).
 
 ## Example Call
 ```json

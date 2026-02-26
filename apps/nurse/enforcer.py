@@ -1,6 +1,7 @@
 """Deterministic Nurse policy enforcement."""
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from apps.nurse.guard import RegimeGuard
@@ -13,6 +14,30 @@ class EnforcerResult:
     approved: bool
     reason: str | None = None
     metadata: dict[str, Any] | None = None
+
+
+class ConfigSnapshotter:
+    """Stores pre-change snapshots for rollback workflows."""
+
+    def __init__(self, history_collection: Any | None = None):
+        self.history_collection = history_collection
+
+    async def snapshot(
+        self,
+        *,
+        model_name: str,
+        payload: dict[str, Any],
+        source_audit_id: str | None = None,
+    ) -> dict[str, Any]:
+        document = {
+            "model": model_name,
+            "payload": payload,
+            "source_audit_id": source_audit_id,
+            "snapshot_at": datetime.now(UTC).isoformat(),
+        }
+        if self.history_collection is not None:
+            await self.history_collection.insert_one(document)
+        return document
 
 
 class NurseEnforcer:
