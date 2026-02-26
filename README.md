@@ -1,115 +1,114 @@
-# Petrosa CIO (Centralized Orchestrator)
+# Petrosa CIO
 
-**Centralized Orchestrator & Sovereign Gatekeeper for the Petrosa Fund**
+**Sovereign Gatekeeper and Strategy Controller for the Petrosa Fund**
 
-The CIO service acts as the "Brain" and "Enforcer" for the entire Petrosa ecosystem. It provides high-stakes governance through a dual-layered architecture: the **Nurse** (a sub-50ms reactive safety gate) and the **Strategist** (an asynchronous LLM-driven policy generator). 
+The CIO (Chief Investment Officer) service acts as the central intelligence and risk management layer. It orchestrates strategy execution, monitors fund health (via the Nurse), and ensures all trading signals align with the fund's risk mandates.
 
 ---
 
-## 🌐 PETROSA ECOSYSTEM OVERVIEW
+## 🌐 Overview
 
-Maintaining consistency across the fund's distributed infrastructure.
+Petrosa CIO is responsible for:
+* **Strategy Orchestration**: Managing the lifecycle of trading strategies (Strategist).
+* **Fund Health Monitoring**: Real-time risk and performance oversight (Nurse).
+* **Signal Validation**: Ensuring all intents-to-trade are valid and authorized.
+* **Drift Calibration**: Continuous shadow validation against market reality (Probe).
+* **Sovereign Gatekeeping**: Final authority on all execution signals.
 
-### Services in the Ecosystem
+---
 
-| Service | Purpose | Input | Output | Status |
-|---------|---------|-------|--------|--------|
-| **petrosa-cio** | Centralized orchestrator & gatekeeper | NATS: `intent.>` | NATS: `signals.trading` | **YOU ARE HERE** |
-| **petrosa-socket-client** | Real-time WebSocket data ingestion | Binance WebSocket API | NATS: `binance.websocket.data` | Real-time Processing |
-| **petrosa-binance-data-extractor** | Historical data extraction & gap filling | Binance REST API | MySQL (klines, funding rates, trades) | Batch Processing |
-| **petrosa-bot-ta-analysis** | Technical analysis (28 strategies) | Data Manager API | NATS: `signals.trading` | Signal Generation |
-| **petrosa-realtime-strategies** | Real-time signal generation | NATS: `binance.websocket.data` | NATS: `signals.trading` | Live Processing |
-| **petrosa-tradeengine** | Order execution & trade management | NATS: `signals.trading` | Binance Orders API, MongoDB audit | Order Execution |
-| **petrosa-data-manager** | Data integrity and analytics hub | Multi-source | Unified Data API | Data Hub |
+## 🏗️ Architecture
 
-### Data Flow Pipeline (Interception Pattern)
+### Core Components
 
-```text
-┌──────────────────┐      ┌──────────────────┐
-│   Strategies     │      │   TA Bot         │
-│ (Real-time/Live) │      │ (Batch Signals)  │
-└────┬─────────────┘      └────┬─────────────┘
-     │                         │
-     │   NATS: intent.trading.*│
-     └─────────────┬───────────┘
-                   │
-                   ▼
-┌──────────────────────────────────────────────┐
-│                petrosa-cio                   │
-│   (THIS SERVICE - THE GATEKEEPER)            │
-│                                              │
-│  ┌──────────────────┐    ┌────────────────┐  │
-│  │      NURSE       │    │   STRATEGIST   │  │
-│  │ (Safety Enforcer)│◄───┤ (AI Reasoning) │  │
-│  │                  │    │                │  │
-│  │ • Redis Policy   │    │ • LLM Policy   │  │
-│  │ • Pydantic Gate  │    │ • Regime Sync  │  │
-│  │ • Semantic Veto  │    │ • MCP Gateway  │  │
-│  └────────┬─────────┘    └────────────────┘  │
-└───────────┼──────────────────────────────────┘
-            │
-            │ Approved Signal (Promoted)
-            ▼
-┌──────────────────┐      ┌──────────────────┐
-│   TradeEngine    │      │    Audit Log     │
-│ (Order Execution)│      │  (MongoDB Atlas) │
-└──────────────────┘      └──────────────────┘
+| Component | Purpose |
+|-----------|---------|
+| **Strategist** (`apps/strategist`) | High-level strategy execution and coordination. |
+| **Nurse** (`apps/nurse`) | Real-time health monitoring, risk checks, and alerting. |
+| **Probe** (`core/probe.py`) | Shadow validation probe for read-only Binance connectivity. |
+| **Alerting** (`core/alerting`) | Centralized alerting and notification system. |
+| **NATS** (`core/nats`) | High-performance event bus for internal communication. |
+| **DB** (`core/db`) | Persistent storage for state and history. |
+
+### Data Flow
+
+```
+Trade Engine / External Signals
+  ↓ (Signal Intent)
+Petrosa CIO (Strategist)
+  ↓ (Risk Check / Validation)
+Nurse (Health Verification)
+  ↓ (Authorized Signal)
+Execution Layer
 ```
 
 ---
 
-## 🔧 CIO - DETAILED DOCUMENTATION
+## 📚 Documentation Structure
 
-### 1. The Nurse (Enforcement Layer)
-- **Latency**: < 50ms P95.
-- **Goal**: Hard-stop any trade that violates fund policy or market regime.
-- **Logic**: Subscribes to `intent.>`, validates against Pydantic models in Redis, and publishes to `signals.trading` if approved.
-
-### 2. The Strategist (Reasoning Layer)
-- **Goal**: Generate and mutate trading policies based on portfolio performance and market regimes.
-- **Interface**: Exposes ecosystem-wide configuration schemas via **Model Context Protocol (MCP)** tools.
-- **Governance**: Requires a `thought_trace` for all configuration updates.
-
-### 3. Core Infrastructure
-- **Redis (Async)**: High-speed policy storage.
-- **NATS (Asyncio)**: Low-latency signal promotion.
-- **MongoDB Atlas**: Immutable storage for "Traces" (Telemetry) and "Thoughts" (AI Reasoning).
-- **Petrosa-Otel**: End-to-end trace propagation.
+Core documentation:
+- `README.md` - Project overview and quick start
+- `CI_CD_PIPELINE.md` - CI/CD reference
+- `TESTING.md` - Testing procedures
+- `MAKEFILE.md` - Makefile commands
 
 ---
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+* Python 3.11+
+* Docker
+* Gitleaks & Trivy (for full security scanning)
+
+### Installation
+
 ```bash
-# Setup dependencies (Poetry v1.5+)
+# Complete setup
 make setup
 
-# Run the CIO service locally
-make run
+# Or manually
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
 
-# Run security scan
+---
+
+## 🧪 Development
+
+### Code Quality
+
+```bash
+# Run linters
+make lint
+
+# Format code
+make format
+
+# Run tests
+make test
+
+# Security scan
 make security
+```
 
-# Execute complete pipeline (Lint, Test, Security)
+### Complete Pipeline
+
+```bash
+# Run all checks
 make pipeline
 ```
 
-### Key Make Commands (v2.0)
-- `make format`: Ruff formatting & imports.
-- `make lint`: Strict type-checking & linting.
-- `make test`: Pytest with 40% coverage threshold.
-- `make build`: Multi-stage Docker build.
+---
+
+## 📝 License
+
+MIT License - Petrosa Systems
 
 ---
 
-## 📚 Documentation Links
-- [**Architecture Overview**](docs/ARCHITECTURE.md)
-- [**The implementation Plan**](docs/IMPLEMENTATION_PLAN.md)
-- [**Product Requirements (PRD)**](docs/PRD.md)
-- [**Epic Breakdown**](docs/EPICS.md)
-- [**CI/CD Pipeline**](docs/CI_CD_PIPELINE.md)
-- [**Testing Standards**](docs/TESTING.md)
+## 👥 Authors
 
----
-
-**Production Status:** 🔄 **BOOTSTRAPPING** - Active implementation of safety gates and MCP tools.
+Petrosa Systems - Trading Infrastructure Team

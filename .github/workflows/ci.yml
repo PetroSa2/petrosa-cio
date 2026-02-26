@@ -1,0 +1,145 @@
+name: CI Checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-venv-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-venv-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run linting
+        run: make lint
+
+      - name: Run type check
+        run: make type-check
+        continue-on-error: true  # Allow type check failures initially
+
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache virtual environment
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: ${{ runner.os }}-venv-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-venv-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Run tests with coverage
+        run: make test
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: PetroSa2/petrosa-cio
+          file: ./coverage.xml
+          flags: unittests
+          fail_ci_if_error: false
+
+  test-quality:
+    name: Test Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check test assertions
+        run: |
+          chmod +x scripts/check-test-assertions.py
+          ./scripts/check-test-assertions.py
+          if [ $? -ne 0 ]; then
+            echo "❌ Test quality gate FAILED - tests without assertions detected"
+            echo ""
+            echo "💡 All test functions must contain at least one assertion."
+            echo "   Common patterns:"
+            echo "   - assert statements"
+            echo "   - pytest.raises(...) with variable assignment"
+            echo "   - unittest assertions (assertEqual, assertTrue, etc.)"
+            echo "   - pytest.fail()"
+            echo ""
+            echo "📖 See docs/TEST_QUALITY_CHECK_INTEGRATION.md for details and override process."
+            exit 1
+          fi
+        # NO continue-on-error - MUST pass (blocking quality gate)
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          exit-code: '0'
+          ignore-unfixed: true
+
+  pipeline:
+    name: pipeline
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-quality, security]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: Validate upstream job results
+        run: |
+          echo "lint=${{ needs.lint.result }}"
+          echo "test=${{ needs.test.result }}"
+          echo "test-quality=${{ needs.test-quality.result }}"
+          echo "security=${{ needs.security.result }}"
+
+          [[ "${{ needs.lint.result }}" == "success" ]]
+          [[ "${{ needs.test.result }}" == "success" ]]
+          [[ "${{ needs.test-quality.result }}" == "success" ]]
+          [[ "${{ needs.security.result }}" == "success" ]]

@@ -112,7 +112,7 @@ make format lint test
 
 - **Minimum**: 40%
 - **Enforced**: Yes (CI will fail below threshold)
-- **Tracked**: Codecov (https://codecov.io/gh/PetroSa2/petrosa-cio)
+- **Tracked**: Codecov (https://codecov.io/gh/PetroSa2/REPO_NAME)
 - **Reports**: Generated in `htmlcov/` directory locally
 
 **How to check coverage locally:**
@@ -188,12 +188,12 @@ make k8s-logs
 
 ### Check specific deployment
 ```bash
-kubectl --kubeconfig=k8s/kubeconfig.yaml get deployment petrosa-cio -n petrosa-apps
+kubectl --kubeconfig=k8s/kubeconfig.yaml get deployment DEPLOYMENT_NAME -n petrosa-apps
 ```
 
 ### Rollback if needed
 ```bash
-kubectl --kubeconfig=k8s/kubeconfig.yaml rollout undo deployment/petrosa-cio -n petrosa-apps
+kubectl --kubeconfig=k8s/kubeconfig.yaml rollout undo deployment/DEPLOYMENT_NAME -n petrosa-apps
 ```
 
 ## Troubleshooting

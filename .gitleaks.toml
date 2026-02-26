@@ -1,0 +1,86 @@
+# Gitleaks Configuration for Petrosa Services
+# Detects secrets, credentials, and sensitive data
+
+title = "Petrosa Security Configuration"
+
+[extend]
+useDefault = true
+
+# Additional custom rules for Petrosa-specific patterns
+[[rules]]
+id = "petrosa-api-key"
+description = "Petrosa API Key"
+regex = '''(?i)(petrosa[_-]?api[_-]?key)\s*[:=]\s*['"]?([a-zA-Z0-9]{32,})['"]?'''
+keywords = ["petrosa_api_key", "PETROSA_API_KEY"]
+
+[[rules]]
+id = "binance-api-key"
+description = "Binance API Key"
+regex = '''(?i)(binance[_-]?api[_-]?key)\s*[:=]\s*['"]?([a-zA-Z0-9]{64})['"]?'''
+keywords = ["BINANCE_API_KEY", "binance_api_key"]
+
+[[rules]]
+id = "binance-api-secret"
+description = "Binance API Secret"
+regex = '''(?i)(binance[_-]?api[_-]?secret)\s*[:=]\s*['"]?([a-zA-Z0-9]{64})['"]?'''
+keywords = ["BINANCE_API_SECRET", "binance_api_secret"]
+
+[[rules]]
+id = "mongodb-connection-string"
+description = "MongoDB Connection String with credentials"
+regex = '''mongodb(\+srv)?://[^:]+:[^@]+@'''
+keywords = ["mongodb://", "mongodb+srv://"]
+
+[[rules]]
+id = "jwt-secret"
+description = "JWT Secret Key"
+regex = '''(?i)(jwt[_-]?secret)[_-]?key\s*[:=]\s*['"]?([a-zA-Z0-9+/=]{32,})['"]?'''
+keywords = ["jwt_secret", "JWT_SECRET"]
+
+[[rules]]
+id = "dockerhub-token"
+description = "Docker Hub Token"
+regex = '''(?i)(dockerhub[_-]?token)\s*[:=]\s*['"]?([a-zA-Z0-9-]{36,})['"]?'''
+keywords = ["DOCKERHUB_TOKEN", "dockerhub_token"]
+
+[[rules]]
+id = "kubernetes-token"
+description = "Kubernetes Token"
+regex = '''(?i)(kube[_-]?token|k8s[_-]?token)\s*[:=]\s*['"]?([a-zA-Z0-9._-]{100,})['"]?'''
+keywords = ["KUBE_TOKEN", "K8S_TOKEN"]
+
+# Allowlist - paths that should be ignored
+[allowlist]
+description = "Allowlisted files and patterns"
+paths = [
+    '''\.backup$''',
+    '''\.md$''',
+    '''\.example$''',
+    '''env\.example$''',
+    '''\.template$''',
+    '''test_.*\.py$''',
+    '''.*/tests/.*''',
+    '''docs/.*''',
+]
+
+# Allowlist specific patterns that are false positives
+regexes = [
+    '''VERSION_PLACEHOLDER''',
+    '''example\.com''',
+    '''localhost''',
+    '''127\.0\.0\.1''',
+    '''test[_-]?(api|secret|key)''',
+    '''fake[_-]?(api|secret|key)''',
+    '''mock[_-]?(api|secret|key)''',
+    '''dummy[_-]?(api|secret|key)''',
+]
+
+# Stop words - ignore these patterns
+stopwords = [
+    "test",
+    "example",
+    "mock",
+    "fake",
+    "dummy",
+    "placeholder",
+]
