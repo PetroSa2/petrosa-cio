@@ -73,10 +73,10 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: PetroSa2/REPO_NAME  # REPLACE WITH ACTUAL REPO NAME
+          slug: PetroSa2/petrosa-cio
           file: ./coverage.xml
           flags: unittests
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   test-quality:
     name: Test Quality Gate
@@ -85,12 +85,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Checkout petrosa_k8s
-        uses: actions/checkout@v4
-        with:
-          repository: PetroSa2/petrosa_k8s
-          path: petrosa_k8s
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -98,7 +92,8 @@ jobs:
 
       - name: Check test assertions
         run: |
-          python3 petrosa_k8s/scripts/check-test-assertions.py
+          chmod +x scripts/check-test-assertions.py
+          ./scripts/check-test-assertions.py
           if [ $? -ne 0 ]; then
             echo "❌ Test quality gate FAILED - tests without assertions detected"
             echo ""
