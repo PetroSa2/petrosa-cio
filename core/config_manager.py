@@ -7,6 +7,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from apps.nurse.enforcer import ConfigSnapshotter
+from apps.strategist.memory import InstitutionalMemoryService
 
 PayloadValidator = Callable[[str, dict[str, Any]], dict[str, Any]]
 
@@ -20,11 +21,13 @@ class ConfigManager:
         history_collection: Any | None = None,
         redis_client: Any | None = None,
         payload_validator: PayloadValidator | None = None,
+        memory_service: InstitutionalMemoryService | None = None,
     ):
         self.audit_collection = audit_collection
         self.snapshotter = ConfigSnapshotter(history_collection=history_collection)
         self.redis_client = redis_client
         self.payload_validator = payload_validator
+        self.memory_service = memory_service
         self._configs: dict[str, dict[str, Any]] = {}
         self._audit_events: list[dict[str, Any]] = []
 
@@ -38,6 +41,8 @@ class ConfigManager:
         self._audit_events.append(document)
         if self.audit_collection is not None:
             await self.audit_collection.insert_one(document)
+        if self.memory_service is not None:
+            await self.memory_service.index_audit_event(document)
 
     def _validate(self, model_name: str, payload: dict[str, Any]) -> dict[str, Any]:
         if self.payload_validator is None:

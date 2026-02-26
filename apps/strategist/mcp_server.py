@@ -9,6 +9,7 @@ from functools import wraps
 from typing import Any
 
 from apps.nurse.roi_engine import ShadowROIEngine
+from apps.strategist.memory import InstitutionalMemoryService
 from core.config_manager import ConfigManager
 from core.utils.schema_parser import discover_schema_models, generate_tools
 
@@ -36,11 +37,13 @@ class MCPServer:
         module_path: str = "apps.strategist.defaults",
         config_manager: ConfigManager | None = None,
         roi_engine: ShadowROIEngine | None = None,
+        memory_service: InstitutionalMemoryService | None = None,
     ):
         self.module_path = module_path
         self.models = discover_schema_models(module_path)
         self.config_manager = config_manager or ConfigManager()
         self.roi_engine = roi_engine or ShadowROIEngine()
+        self.memory_service = memory_service or InstitutionalMemoryService()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
         self.tools.append(
@@ -71,6 +74,21 @@ class MCPServer:
                             "maximum": 2160,
                         }
                     },
+                },
+                "mode": "read",
+            }
+        )
+        self.tools.append(
+            {
+                "name": "search_knowledge_base",
+                "description": "Semantic retrieval over indexed reasoning traces.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "minLength": 3},
+                        "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+                    },
+                    "required": ["query"],
                 },
                 "mode": "read",
             }
@@ -111,6 +129,8 @@ class MCPServer:
             if tool_name == "get_earnings_summary":
                 return await self._handle_earnings_summary(arguments=arguments)
             return await self._handle_get(tool_name)
+        if tool_name == "search_knowledge_base":
+            return await self._handle_search_knowledge_base(arguments=arguments)
 
         if tool_name.startswith("set_"):
             return await self._handle_set(tool_name, arguments=arguments)
@@ -165,6 +185,15 @@ class MCPServer:
         if window_hours <= 0:
             raise ValueError("window_hours must be a positive integer")
         return await self.roi_engine.get_earnings_summary(window_hours=window_hours)
+
+    async def _handle_search_knowledge_base(
+        self,
+        *,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        query = str(arguments.get("query", "")).strip()
+        top_k = int(arguments.get("top_k", 5))
+        return await self.memory_service.search_knowledge_base(query=query, top_k=top_k)
 
     def _validate_model_payload(
         self,

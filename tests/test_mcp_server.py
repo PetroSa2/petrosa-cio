@@ -32,9 +32,26 @@ class FakeRoiEngine:
         }
 
 
+class FakeMemoryService:
+    async def search_knowledge_base(self, query: str, top_k: int = 5):
+        return {
+            "query": query,
+            "top_k": top_k,
+            "results_count": 1,
+            "results": [
+                {
+                    "id": "mem-1",
+                    "thought_trace": "past trace",
+                    "similarity": 0.92,
+                    "metadata": {"outcome": "failure"},
+                }
+            ],
+        }
+
+
 @pytest.mark.asyncio
 async def test_mcp_server_lists_tools_from_defaults_models():
-    server = MCPServer(roi_engine=FakeRoiEngine())
+    server = MCPServer(roi_engine=FakeRoiEngine(), memory_service=FakeMemoryService())
 
     response = await server.handle_request(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -46,11 +63,12 @@ async def test_mcp_server_lists_tools_from_defaults_models():
     assert "set_RiskLimits" in names
     assert "rollback_to_version" in names
     assert "get_earnings_summary" in names
+    assert "search_knowledge_base" in names
 
 
 @pytest.mark.asyncio
 async def test_get_earnings_summary_tool_returns_roi_snapshot():
-    server = MCPServer(roi_engine=FakeRoiEngine())
+    server = MCPServer(roi_engine=FakeRoiEngine(), memory_service=FakeMemoryService())
 
     response = await server.handle_request(
         {
@@ -68,6 +86,28 @@ async def test_get_earnings_summary_tool_returns_roi_snapshot():
     assert response["result"]["window_hours"] == 72
     assert response["result"]["actual_pnl"] == pytest.approx(10.0)
     assert response["result"]["shadow_roi"] == pytest.approx(5.0)
+
+
+@pytest.mark.asyncio
+async def test_search_knowledge_base_tool_returns_semantic_matches():
+    server = MCPServer(roi_engine=FakeRoiEngine(), memory_service=FakeMemoryService())
+
+    response = await server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": {
+                "name": "search_knowledge_base",
+                "arguments": {"query": "find similar failure", "top_k": 3},
+            },
+        }
+    )
+
+    assert "result" in response
+    assert response["result"]["query"] == "find similar failure"
+    assert response["result"]["top_k"] == 3
+    assert response["result"]["results_count"] == 1
 
 
 @pytest.mark.asyncio
