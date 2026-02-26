@@ -206,11 +206,14 @@ def setup_telemetry(
     # 2. Manual attributes (deployment.environment, service.instance.id)
     # 3. Detected attributes (process, OTEL)
     # Resource.merge() gives precedence to the caller (left side)
-    # Use Resource.empty() if no attributes parsed for consistency
+    # Resource.empty() is not available in some OpenTelemetry versions.
+    # Fall back to creating an empty resource for cross-version compatibility.
     if otel_resource_attrs:
         base_resource = Resource.create(otel_resource_attrs)
     else:
-        base_resource = Resource.empty()
+        base_resource = (
+            Resource.empty() if hasattr(Resource, "empty") else Resource.create({})
+        )
 
     resource = (
         base_resource.merge(manual_resource)
