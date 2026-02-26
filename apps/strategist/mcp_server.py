@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from apps.nurse.roi_engine import ShadowROIEngine
 from core.config_manager import ConfigManager
 from core.utils.schema_parser import discover_schema_models, generate_tools
 
@@ -34,10 +35,12 @@ class MCPServer:
         *,
         module_path: str = "apps.strategist.defaults",
         config_manager: ConfigManager | None = None,
+        roi_engine: ShadowROIEngine | None = None,
     ):
         self.module_path = module_path
         self.models = discover_schema_models(module_path)
         self.config_manager = config_manager or ConfigManager()
+        self.roi_engine = roi_engine or ShadowROIEngine()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
         self.tools.append(
@@ -53,6 +56,23 @@ class MCPServer:
                     "required": ["audit_id", "reason"],
                 },
                 "mode": "write",
+            }
+        )
+        self.tools.append(
+            {
+                "name": "get_earnings_summary",
+                "description": "Return governance summary with Actual PnL and Shadow ROI.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "window_hours": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 2160,
+                        }
+                    },
+                },
+                "mode": "read",
             }
         )
         self.tools_by_name = {tool["name"]: tool for tool in self.tools}
@@ -88,6 +108,8 @@ class MCPServer:
             raise ValueError(f"unknown tool: {tool_name}")
 
         if tool_name.startswith("get_"):
+            if tool_name == "get_earnings_summary":
+                return await self._handle_earnings_summary(arguments=arguments)
             return await self._handle_get(tool_name)
 
         if tool_name.startswith("set_"):
@@ -133,6 +155,16 @@ class MCPServer:
 
         event = await self.config_manager.rollback_to_version(audit_id, reason=reason)
         return {"rolled_back": True, "event": event}
+
+    async def _handle_earnings_summary(
+        self,
+        *,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        window_hours = int(arguments.get("window_hours", 24 * 7))
+        if window_hours <= 0:
+            raise ValueError("window_hours must be a positive integer")
+        return await self.roi_engine.get_earnings_summary(window_hours=window_hours)
 
     def _validate_model_payload(
         self,

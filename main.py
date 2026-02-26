@@ -8,6 +8,7 @@ import os
 from fastapi import FastAPI
 from nats import connect as nats_connect
 
+from apps.nurse.roi_engine import ShadowROIEngine
 from core.nats.heartbeat import HeartbeatService
 from otel_init import attach_logging_handler, instrument_fastapi_app, setup_telemetry
 
@@ -23,6 +24,7 @@ app = FastAPI(
 )
 app.state.nats_client = None
 app.state.heartbeat_service = None
+app.state.roi_engine = None
 
 
 @app.on_event("startup")
@@ -32,6 +34,8 @@ async def startup_event():
     instrument_fastapi_app(app)
     attach_logging_handler()
     app.state.heartbeat_service = HeartbeatService(version=app.version)
+    app.state.roi_engine = ShadowROIEngine()
+    await app.state.roi_engine.start()
 
     nats_url = os.getenv("NATS_URL")
     if nats_url:
@@ -50,6 +54,8 @@ async def shutdown_event():
     """Graceful shutdown for optional NATS connection."""
     if app.state.nats_client is not None:
         await app.state.nats_client.close()
+    if app.state.roi_engine is not None:
+        await app.state.roi_engine.stop()
 
 
 @app.get("/health/liveness")
@@ -68,6 +74,14 @@ async def readiness():
 async def root():
     """Root endpoint."""
     return {"service": "petrosa-cio", "version": "1.0.0", "status": "operational"}
+
+
+@app.get("/api/governance/earnings-summary")
+async def get_earnings_summary(window_hours: int = 24 * 7):
+    """Return governance earnings summary (Actual PnL vs Shadow ROI)."""
+    if app.state.roi_engine is None:
+        app.state.roi_engine = ShadowROIEngine()
+    return await app.state.roi_engine.get_earnings_summary(window_hours=window_hours)
 
 
 if __name__ == "__main__":

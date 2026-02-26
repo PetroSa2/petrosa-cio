@@ -22,9 +22,19 @@ class FakeRedis:
         self.deleted_keys.append(key)
 
 
+class FakeRoiEngine:
+    async def get_earnings_summary(self, window_hours: int = 168):
+        return {
+            "window_hours": window_hours,
+            "actual_pnl": 10.0,
+            "shadow_roi": 5.0,
+            "governance_status": "ACTIVE",
+        }
+
+
 @pytest.mark.asyncio
 async def test_mcp_server_lists_tools_from_defaults_models():
-    server = MCPServer()
+    server = MCPServer(roi_engine=FakeRoiEngine())
 
     response = await server.handle_request(
         {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
@@ -35,6 +45,29 @@ async def test_mcp_server_lists_tools_from_defaults_models():
     assert "get_RiskLimits" in names
     assert "set_RiskLimits" in names
     assert "rollback_to_version" in names
+    assert "get_earnings_summary" in names
+
+
+@pytest.mark.asyncio
+async def test_get_earnings_summary_tool_returns_roi_snapshot():
+    server = MCPServer(roi_engine=FakeRoiEngine())
+
+    response = await server.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": 99,
+            "method": "tools/call",
+            "params": {
+                "name": "get_earnings_summary",
+                "arguments": {"window_hours": 72},
+            },
+        }
+    )
+
+    assert "result" in response
+    assert response["result"]["window_hours"] == 72
+    assert response["result"]["actual_pnl"] == pytest.approx(10.0)
+    assert response["result"]["shadow_roi"] == pytest.approx(5.0)
 
 
 @pytest.mark.asyncio
