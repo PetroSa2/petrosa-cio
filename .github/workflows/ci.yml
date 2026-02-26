@@ -125,3 +125,21 @@ jobs:
           output: 'trivy-results.sarif'
           exit-code: '0'
           ignore-unfixed: true
+
+  pipeline:
+    name: pipeline
+    runs-on: ubuntu-latest
+    needs: [lint, test, test-quality, security]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: Validate upstream job results
+        run: |
+          echo "lint=${{ needs.lint.result }}"
+          echo "test=${{ needs.test.result }}"
+          echo "test-quality=${{ needs.test-quality.result }}"
+          echo "security=${{ needs.security.result }}"
+
+          [[ "${{ needs.lint.result }}" == "success" ]]
+          [[ "${{ needs.test.result }}" == "success" ]]
+          [[ "${{ needs.test-quality.result }}" == "success" ]]
+          [[ "${{ needs.security.result }}" == "success" ]]
