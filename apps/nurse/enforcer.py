@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+from apps.nurse.guard import RegimeGuard
+
 
 @dataclass(slots=True)
 class EnforcerResult:
@@ -10,12 +12,23 @@ class EnforcerResult:
 
     approved: bool
     reason: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class NurseEnforcer:
     """Simple deterministic validation gate for incoming intent payloads."""
 
     VALID_ACTIONS = {"buy", "sell", "hold", "close"}
+
+    def __init__(self, regime_guard: RegimeGuard | None = None):
+        self.regime_guard = regime_guard or RegimeGuard()
+
+    @staticmethod
+    def scale_position_size(
+        intent_payload: dict[str, Any], scale_factor: float
+    ) -> float:
+        quantity = float(intent_payload.get("quantity", 0.0))
+        return quantity * scale_factor
 
     async def enforce(self, intent_payload: dict[str, Any]) -> EnforcerResult:
         action = str(intent_payload.get("action", "")).lower()
@@ -31,4 +44,22 @@ class NurseEnforcer:
             if not 0.0 <= confidence_value <= 1.0:
                 return EnforcerResult(approved=False, reason="invalid_confidence")
 
-        return EnforcerResult(approved=True)
+        guard_decision = await self.regime_guard.evaluate(intent_payload)
+        metadata = dict(guard_decision.metadata)
+        metadata["saved_capital"] = guard_decision.saved_capital
+
+        if guard_decision.scale_factor < 1.0:
+            metadata["scaled_quantity"] = self.scale_position_size(
+                intent_payload, guard_decision.scale_factor
+            )
+            metadata["scale_factor"] = guard_decision.scale_factor
+
+        if not guard_decision.approved:
+            metadata["veto_type"] = "semantic"
+            return EnforcerResult(
+                approved=False,
+                reason=guard_decision.veto_reason,
+                metadata=metadata,
+            )
+
+        return EnforcerResult(approved=True, metadata=metadata)

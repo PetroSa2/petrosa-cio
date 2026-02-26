@@ -45,16 +45,32 @@ class NurseInterceptor:
         result: EnforcerResult = await self.enforcer.enforce(payload)
 
         promoted_payload = dict(payload)
+        if result.metadata and "scaled_quantity" in result.metadata:
+            promoted_payload["quantity"] = result.metadata["scaled_quantity"]
         if traceparent:
             promoted_payload["_otel_trace_context"] = {"traceparent": traceparent}
 
         status = "Approved" if result.approved else "Blocked"
+        result_metadata = result.metadata or {}
         audit_document = {
             "status": status,
             "reason": result.reason,
             "subject_source": payload.get("_subject", "cio.intent"),
             "subject_target": self.target_subject,
             "potential_pnl": self._extract_potential_pnl(payload),
+            "pnl_metadata": {
+                "potential_pnl": self._extract_potential_pnl(payload),
+                "saved_capital": float(result_metadata.get("saved_capital", 0.0)),
+            },
+            "veto_type": result_metadata.get("veto_type"),
+            "regime_metadata": {
+                "current_regime": result_metadata.get("current_regime"),
+                "vol_threshold_breach": result_metadata.get("vol_threshold_breach"),
+                "drawdown_limit_exceeded": result_metadata.get(
+                    "drawdown_limit_exceeded"
+                ),
+                "scale_factor": result_metadata.get("scale_factor"),
+            },
             "payload": payload,
             "traceparent": traceparent,
         }
