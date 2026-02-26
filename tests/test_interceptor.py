@@ -23,12 +23,15 @@ class FakeNatsClient:
 
 
 class FakeEnforcer:
-    def __init__(self, approved=True, reason=None):
+    def __init__(self, approved=True, reason=None, metadata=None):
         self.approved = approved
         self.reason = reason
+        self.metadata = metadata
 
     async def enforce(self, payload):
-        return EnforcerResult(approved=self.approved, reason=self.reason)
+        return EnforcerResult(
+            approved=self.approved, reason=self.reason, metadata=self.metadata
+        )
 
 
 class FakeRoiLogger:
@@ -109,6 +112,43 @@ async def test_blocked_intent_does_not_publish_and_is_audited():
     assert roi_logger.documents[0]["status"] == "Blocked"
     assert roi_logger.documents[0]["reason"] == "policy_block"
     assert roi_logger.documents[0]["potential_pnl"] == pytest.approx(11.2)
+
+
+@pytest.mark.asyncio
+async def test_semantic_veto_is_logged_with_regime_and_saved_capital_metadata():
+    client = FakeNatsClient()
+    roi_logger = FakeRoiLogger()
+    interceptor = NurseInterceptor(
+        nats_client=client,
+        enforcer=FakeEnforcer(
+            approved=False,
+            reason="drawdown_limit_exceeded",
+            metadata={
+                "veto_type": "semantic",
+                "current_regime": "bearish",
+                "drawdown_limit_exceeded": True,
+                "vol_threshold_breach": False,
+                "saved_capital": 12.4,
+            },
+        ),
+        roi_logger=roi_logger,
+    )
+
+    result = await interceptor.handle_intent(
+        json.dumps(
+            {"symbol": "BTCUSDT", "action": "buy", "expected_pnl": 2.5}
+        ).encode(),
+        headers={},
+    )
+
+    assert result["approved"] is False
+    assert client.published == []
+    audit = roi_logger.documents[0]
+    assert audit["veto_type"] == "semantic"
+    assert audit["regime_metadata"]["current_regime"] == "bearish"
+    assert audit["regime_metadata"]["drawdown_limit_exceeded"] is True
+    assert audit["pnl_metadata"]["potential_pnl"] == pytest.approx(2.5)
+    assert audit["pnl_metadata"]["saved_capital"] == pytest.approx(12.4)
 
 
 @pytest.mark.asyncio
