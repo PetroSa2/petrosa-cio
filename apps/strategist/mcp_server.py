@@ -14,7 +14,6 @@ from apps.strategist.memory import InstitutionalMemoryService
 from core.config_manager import ConfigManager
 from core.utils.schema_parser import discover_schema_models, generate_tools
 
-
 try:
     from core.llm import CIO_LLM_Client
     LLM_AVAILABLE = True
@@ -55,7 +54,7 @@ class MCPServer:
         self.memory_service = memory_service or InstitutionalMemoryService()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
-        
+
         use_llm = os.getenv("MCP_USE_LLM", "false").lower() == "true"
         if use_llm and llm_client is None:
             if LLM_AVAILABLE:
@@ -238,15 +237,15 @@ class MCPServer:
     ) -> dict[str, Any]:
         if not self._llm_client:
             raise ValueError("LLM client not available")
-        
+
         prompt = str(arguments.get("prompt", ""))
         system_context = str(arguments.get("system_context", "You are a helpful trading assistant."))
-        
+
         messages = [
             {"role": "system", "content": system_context},
             {"role": "user", "content": prompt},
         ]
-        
+
         response = self._llm_client.complete(messages=messages)
         return {"response": response.content, "model": response.model}
 

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
+
 from apps.nurse.defaults import (
     get_default_parameters,
     merge_parameters,
@@ -179,10 +181,7 @@ class LLMEnforcementResult:
     risk_score: float
 
 
-from pydantic import BaseModel as PydanticBaseModel
-
-
-class LLMEnforcementResultModel(PydanticBaseModel):
+class LLMEnforcementResultModel(BaseModel):
     """Pydantic model for LLM enforcement response."""
 
     approved: bool

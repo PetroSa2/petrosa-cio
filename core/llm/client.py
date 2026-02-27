@@ -110,7 +110,7 @@ class CIO_LLM_Client:
     def complete_with_structure(
         self,
         messages: list[dict[str, str]],
-        response_model: Type[BaseModel],
+        response_model: type[BaseModel],
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> BaseModel:
