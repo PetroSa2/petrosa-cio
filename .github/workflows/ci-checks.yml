@@ -112,19 +112,57 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write  # Required for SARIF upload
+      actions: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret detection
 
-      - name: Run Trivy vulnerability scanner
+      - name: 🔐 Run Gitleaks (Secret Detection)
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 🐍 Run Bandit (Python Security)
+        continue-on-error: true
+        run: |
+          pip install bandit[toml]
+          bandit -r . \
+            --configfile .bandit \
+            --format json \
+            --output bandit-report.json
+          echo "📊 Bandit Results:"
+          python -m json.tool bandit-report.json | head -30 || echo "No issues found"
+
+      - name: 🗂️ Run Trivy (Vulnerability Scanner)
         uses: aquasecurity/trivy-action@master
+        continue-on-error: true
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
-          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'  # Fail if vulnerabilities found
           ignore-unfixed: true
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        with:
+          sarif_file: 'trivy-results.sarif'
+
 
   pipeline:
     name: pipeline
