@@ -115,7 +115,7 @@ security: ## Run comprehensive security scans (gitleaks, detect-secrets, bandit,
 	fi
 	@echo ""
 	@echo "3️⃣ Bandit (Python Security)..."
-	@$(PYTHON) -m bandit -r . -f json -o bandit-report.json -ll --exclude tests/ || true
+	@$(PYTHON) -m bandit -r . -f json -o bandit-report.json --configfile .bandit
 	@if [ -f bandit-report.json ]; then \
 		echo "📊 Bandit found issues. Check bandit-report.json"; \
 		$(PYTHON) -m json.tool bandit-report.json | grep -A 5 '"issue_severity"' | head -20 || true; \
