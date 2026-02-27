@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -16,6 +17,12 @@ from apps.nurse.guard import RegimeGuard
 from contracts.trading_config import TradingConfig, TradingConfigAudit
 
 logger = logging.getLogger(__name__)
+
+try:
+    from core.llm import CIO_LLM_Client
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
 
 
 @dataclass(slots=True)
@@ -56,8 +63,19 @@ class NurseEnforcer:
 
     VALID_ACTIONS = {"buy", "sell", "hold", "close"}
 
-    def __init__(self, regime_guard: RegimeGuard | None = None):
+    def __init__(
+        self,
+        regime_guard: RegimeGuard | None = None,
+        llm_client: Any | None = None,
+        use_llm_reasoning: bool = False,
+    ):
         self.regime_guard = regime_guard or RegimeGuard()
+        self._llm_client = llm_client
+        self._use_llm_reasoning = use_llm_reasoning or (
+            os.getenv("NURSE_USE_LLM_REASONING", "false").lower() == "true"
+        )
+        if self._use_llm_reasoning and not LLM_AVAILABLE:
+            logger.warning("LLM reasoning requested but litellm not available, falling back to deterministic")
 
     @staticmethod
     def scale_position_size(
@@ -99,6 +117,77 @@ class NurseEnforcer:
             )
 
         return EnforcerResult(approved=True, metadata=metadata)
+
+    async def enforce_with_llm(
+        self, intent_payload: dict[str, Any]
+    ) -> EnforcerResult:
+        """Enhanced enforcement with LLM-based policy reasoning."""
+        if not self._use_llm_reasoning:
+            return await self.enforce(intent_payload)
+
+        if self._llm_client is None:
+            if not LLM_AVAILABLE:
+                logger.warning("LLM not available, falling back to deterministic enforcement")
+                return await self.enforce(intent_payload)
+            from core.llm import CIO_LLM_Client
+            self._llm_client = CIO_LLM_Client()
+
+        action = intent_payload.get("action", "unknown")
+        symbol = intent_payload.get("symbol", "UNKNOWN")
+        quantity = intent_payload.get("quantity", 0)
+
+        system_prompt = """You are a trading policy enforcer. Analyze the intent payload and determine if it should be approved.
+Consider:
+1. Risk management principles
+2. Position sizing appropriateness
+3. Market conditions
+4. Strategy alignment
+
+Respond with JSON: {"approved": true/false, "reason": "explanation", "risk_score": 0-1}"""
+
+        user_prompt = f"""Analyze this trade intent:
+- Action: {action}
+- Symbol: {symbol}
+- Quantity: {quantity}
+- Intent payload: {intent_payload}
+
+Provide your policy decision as JSON."""
+
+        try:
+            result = self._llm_client.complete_with_structure(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_model=LLMEnforcementResultModel,
+            )
+            return EnforcerResult(
+                approved=result.approved,
+                reason=result.reason,
+                metadata={"risk_score": result.risk_score, "llm_reasoning": True},
+            )
+        except Exception as e:
+            logger.error(f"LLM enforcement failed: {e}, falling back to deterministic")
+            return await self.enforce(intent_payload)
+
+
+class LLMEnforcementResult:
+    """Pydantic model for LLM enforcement response."""
+
+    approved: bool
+    reason: str
+    risk_score: float
+
+
+from pydantic import BaseModel as PydanticBaseModel
+
+
+class LLMEnforcementResultModel(PydanticBaseModel):
+    """Pydantic model for LLM enforcement response."""
+
+    approved: bool
+    reason: str
+    risk_score: float
 
 
 class TradingConfigManager:
