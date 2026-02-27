@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
@@ -12,6 +13,12 @@ from apps.nurse.roi_engine import ShadowROIEngine
 from apps.strategist.memory import InstitutionalMemoryService
 from core.config_manager import ConfigManager
 from core.utils.schema_parser import discover_schema_models, generate_tools
+
+try:
+    from core.llm import CIO_LLM_Client
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
 
 
 def validate_thought_trace(
@@ -38,6 +45,7 @@ class MCPServer:
         config_manager: ConfigManager | None = None,
         roi_engine: ShadowROIEngine | None = None,
         memory_service: InstitutionalMemoryService | None = None,
+        llm_client: Any | None = None,
     ):
         self.module_path = module_path
         self.models = discover_schema_models(module_path)
@@ -46,6 +54,15 @@ class MCPServer:
         self.memory_service = memory_service or InstitutionalMemoryService()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
+
+        use_llm = os.getenv("MCP_USE_LLM", "false").lower() == "true"
+        if use_llm and llm_client is None:
+            if LLM_AVAILABLE:
+                llm_client = CIO_LLM_Client()
+            else:
+                use_llm = False
+        self._llm_client = llm_client
+        self._use_llm = use_llm
         self.tools.append(
             {
                 "name": "rollback_to_version",
@@ -93,6 +110,22 @@ class MCPServer:
                 "mode": "read",
             }
         )
+        if self._use_llm and self._llm_client:
+            self.tools.append(
+                {
+                    "name": "llm_reasoning",
+                    "description": "Use LLM for advanced reasoning on trading decisions.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "minLength": 10},
+                            "system_context": {"type": "string"},
+                        },
+                        "required": ["prompt"],
+                    },
+                    "mode": "read",
+                }
+            )
         self.tools_by_name = {tool["name"]: tool for tool in self.tools}
 
     async def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -136,6 +169,8 @@ class MCPServer:
             return await self._handle_set(tool_name, arguments=arguments)
         if tool_name == "rollback_to_version":
             return await self._handle_rollback(arguments=arguments)
+        if tool_name == "llm_reasoning":
+            return await self._handle_llm_reasoning(arguments=arguments)
 
         raise ValueError(f"unsupported tool: {tool_name}")
 
@@ -194,6 +229,25 @@ class MCPServer:
         query = str(arguments.get("query", "")).strip()
         top_k = int(arguments.get("top_k", 5))
         return await self.memory_service.search_knowledge_base(query=query, top_k=top_k)
+
+    async def _handle_llm_reasoning(
+        self,
+        *,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not self._llm_client:
+            raise ValueError("LLM client not available")
+
+        prompt = str(arguments.get("prompt", ""))
+        system_context = str(arguments.get("system_context", "You are a helpful trading assistant."))
+
+        messages = [
+            {"role": "system", "content": system_context},
+            {"role": "user", "content": prompt},
+        ]
+
+        response = self._llm_client.complete(messages=messages)
+        return {"response": response.content, "model": response.model}
 
     def _validate_model_payload(
         self,
