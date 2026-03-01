@@ -260,12 +260,20 @@ jobs:
     needs: [build-and-push, prepare-release]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
+      - name: Generate GitOps Bot Token
+        uses: tibdex/github-app-token@v2
+        id: generate-token
+        with:
+          app_id: ${{ secrets.GITOPS_APP_ID }}
+          installation_id: ${{ secrets.GITOPS_APP_INSTALLATION_ID }}
+          private_key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+
       - name: Checkout petrosa_k8s
         uses: actions/checkout@v4
         with:
           repository: PetroSa2/petrosa_k8s
           ref: main
-          token: ${{ secrets.GITOPS_BOT_TOKEN }}
+          token: ${{ steps.generate-token.outputs.token }}
           path: petrosa_k8s
 
       - name: Rebase on main
