@@ -1,0 +1,168 @@
+name: Manual Deployment with Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+        default: staging
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      reason:
+        description: 'Reason for deployment (audit trail)'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for tags
+
+      - name: Get current version
+        id: current_version
+        run: |
+          # Get latest tag, default to v0.0.0 if no tags exist
+          CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Current version: $CURRENT"
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          chmod +x scripts/bump-version.sh
+          NEW_VERSION=$(./scripts/bump-version.sh "${{ steps.current_version.outputs.version }}" "${{ inputs.version_bump }}")
+          echo "New version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.bump_version.outputs.new_version }}" -m "Manual deployment: ${{ inputs.reason }}"
+          git push origin "${{ steps.bump_version.outputs.new_version }}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:${{ steps.bump_version.outputs.new_version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Checkout petrosa_k8s
+        uses: actions/checkout@v4
+        with:
+          repository: PetroSa2/petrosa_k8s
+          ref: main
+          token: ${{ secrets.GITOPS_BOT_TOKEN }}
+          path: petrosa_k8s
+
+      - name: Rebase on main
+        run: ./scripts/gitops-rebase-main.sh
+        working-directory: petrosa_k8s
+
+      - name: Update cio image tag in GitOps manifests
+        run: |
+          VERSION="${{ steps.bump_version.outputs.new_version }}"
+          # Update the image tag in manifests
+          find petrosa_k8s/k8s/cio -name "*.yaml" -o -name "*.yml" | xargs sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
+
+          # Also update the version label if needed
+          find petrosa_k8s/k8s/cio -name "*.yaml" -o -name "*.yml" | xargs sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
+
+          echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
+
+      - name: Commit and push to petrosa_k8s
+        working-directory: petrosa_k8s
+        run: |
+          git config user.name "gitops-bot"
+          git config user.email "gitops-bot@users.noreply.github.com"
+          git add k8s/cio/
+          if git diff --staged --quiet; then
+            echo "No changes to commit (version might already be up to date)"
+          else
+            git commit -m "gitops: cio image ${{ steps.bump_version.outputs.new_version }}"
+            git push origin main
+          fi
+
+      - name: Create summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # GitOps Push Successful ✅
+
+          ## Details
+          - **Service**: \`cio\`
+          - **Environment**: \`${{ inputs.environment }}\`
+          - **Version**: \`${{ steps.current_version.outputs.version }}\` → \`${{ steps.bump_version.outputs.new_version }}\`
+          - **Bump Type**: \`${{ inputs.version_bump }}\`
+          - **Triggered by**: @${{ github.actor }}
+          - **Reason**: ${{ inputs.reason }}
+
+          ## GitOps Transition
+          The new image tag has been pushed to [PetroSa2/petrosa_k8s](https://github.com/PetroSa2/petrosa_k8s).
+
+          The centralized GitOps workflow in \`petrosa_k8s\` will now:
+          1. Detect the change in \`k8s/cio/\`
+          2. Validate the manifests
+          3. Apply the changes to the Kubernetes cluster
+
+          ## Verification
+
+          Monitor the apply progress here:
+          - [petrosa_k8s Actions](https://github.com/PetroSa2/petrosa_k8s/actions/workflows/apply-k8s-changes.yml)
+
+          Once the \`apply-k8s-changes\` workflow finishes, you can verify on the cluster:
+          \`\`\`bash
+          kubectl get pods -n petrosa-apps -l app=cio
+          \`\`\`
+          EOF
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Deployment Failed ❌
+
+          ## Details
+          - **Service**: \`cio\`
+          - **Environment**: \`${{ inputs.environment }}\`
+          - **Version**: \`${{ steps.bump_version.outputs.new_version }}\`
+          - **Triggered by**: @${{ github.actor }}
+
+          Please check the workflow logs for details.
+          EOF
