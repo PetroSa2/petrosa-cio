@@ -276,10 +276,10 @@ jobs:
         run: |
           VERSION="${{ needs.prepare-release.outputs.version }}"
           # Update the image tag in manifests
-          find petrosa_k8s/k8s/cio -name "*.yaml" -o -name "*.yml" | xargs sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
 
           # Also update the version label if needed
-          find petrosa_k8s/k8s/cio -name "*.yaml" -o -name "*.yml" | xargs sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
 
           echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
 
