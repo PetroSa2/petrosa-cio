@@ -2,14 +2,15 @@
 Petrosa CIO - Sovereign Gatekeeper and Strategy Controller
 """
 
-import asyncio
 import logging
 import os
+import asyncio
 
 from fastapi import FastAPI
 from nats import connect as nats_connect
 
 from apps.nurse.roi_engine import ShadowROIEngine
+from apps.nurse.roi_logger import RoiLogger
 from core.nats.heartbeat import HeartbeatService
 from core.nats.interceptor import NurseInterceptor
 from otel_init import attach_logging_handler, instrument_fastapi_app, setup_telemetry
@@ -44,29 +45,28 @@ async def startup_event():
     if nats_url:
         try:
             app.state.nats_client = await nats_connect(
-                nats_url,
+                nats_url, 
                 connect_timeout=5,
                 reconnect_time_wait=1,
-                max_reconnect_attempts=10,
+                max_reconnect_attempts=10
             )
-
+            
             # Start Heartbeat
             await app.state.heartbeat_service.start(app.state.nats_client)
             logger.info("NATS heartbeat listener active on subject cio.heartbeat")
-
-            # Start Interceptor
+            
+            # Start Interceptor with correct ROI logger
+            roi_logger = RoiLogger() # Default uses None collection for now
             app.state.interceptor = NurseInterceptor(
                 nats_client=app.state.nats_client,
-                roi_logger=app.state.roi_engine.roi_logger,
-                target_subject=os.getenv("NATS_TOPIC_SIGNALS", "signals.trading"),
+                roi_logger=roi_logger,
+                target_subject=os.getenv("NATS_TOPIC_SIGNALS", "signals.trading")
             )
             await app.state.interceptor.start()
-            logger.info("CIO Interceptor active on subject cio.intent.>")
-
+            logger.info(f"CIO Interceptor active on subject cio.intent.>")
+            
         except Exception as exc:
-            logger.error(
-                f"❌ Failed to initialize NATS components: {exc}", exc_info=True
-            )
+            logger.error(f"❌ Failed to initialize NATS components: {exc}", exc_info=True)
 
     logger.info("Petrosa CIO service started")
 
