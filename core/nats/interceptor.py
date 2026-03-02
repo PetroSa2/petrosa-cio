@@ -2,11 +2,13 @@
 
 import json
 import time
+import logging
 from typing import Any
 
 from apps.nurse.enforcer import EnforcerResult, NurseEnforcer
 from apps.nurse.roi_logger import RoiLogger
 
+logger = logging.getLogger(__name__)
 
 class NurseInterceptor:
     """Intercepts `cio.intent.>` events and promotes approved payloads."""
@@ -28,6 +30,7 @@ class NurseInterceptor:
     async def start(self) -> None:
         """Start subscription loop for all CIO intents."""
         await self.nats_client.subscribe("cio.intent.>", cb=self._on_message)
+        logger.info("NurseInterceptor started, listening on cio.intent.>")
 
     async def _on_message(self, msg: Any) -> None:
         headers = self._normalize_headers(getattr(msg, "headers", None))
@@ -51,6 +54,15 @@ class NurseInterceptor:
             promoted_payload["_otel_trace_context"] = {"traceparent": traceparent}
 
         status = "Approved" if result.approved else "Blocked"
+        
+        # Log the result for visibility
+        logger.info(
+            f"🛡️ Intent {status}: {payload.get('strategy_id', 'unknown')} | "
+            f"Symbol: {payload.get('symbol', 'unknown')} | "
+            f"Action: {payload.get('action', 'unknown')} | "
+            f"Reason: {result.reason}"
+        )
+
         result_metadata = result.metadata or {}
         audit_document = {
             "status": status,
@@ -81,6 +93,7 @@ class NurseInterceptor:
                 json.dumps(promoted_payload, separators=(",", ":")).encode(),
                 headers=headers,
             )
+            logger.info(f"📤 Promoted Signal to {self.target_subject}")
 
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         audit_document["processing_ms"] = elapsed_ms
