@@ -3,95 +3,104 @@ name: Deploy
 on:
   push:
     branches: [ 'main' ]
-  workflow_dispatch:
-    inputs:
-      version_bump:
-        description: 'Version bump type'
-        required: true
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
-        default: patch
-      reason:
-        description: 'Reason for deployment (audit trail)'
-        required: true
-        type: string
-        default: 'Automatic deployment on push'
+  pull_request:
+    branches: [ 'main' ]
+
+env:
+  NAMESPACE: petrosa-apps
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  deploy:
+  create-release:
+    name: Create Release
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      packages: write
-
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Fetch all history for tags
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Get current version
-        id: current_version
-        run: |
-          # Get latest tag, default to v0.0.0 if no tags exist
-          CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "Current version: $CURRENT"
-          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+    - name: Set version
+      id: version
+      run: |
+        # Fallback to default version as no pyproject.toml or VERSION file found
+        BASE_VERSION="v0.1.0"
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        VERSION="${BASE_VERSION}-r${{ github.run_number }}-${SHORT_SHA}"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Release version: $VERSION"
 
-      - name: Bump version
-        id: bump_version
-        run: |
-          chmod +x scripts/bump-version.sh
-          # Use input version_bump if available (manual), else default to patch (automatic)
-          BUMP_TYPE="${{ github.event.inputs.version_bump }}"
-          if [ -z "$BUMP_TYPE" ]; then
-            BUMP_TYPE="patch"
-          fi
-          NEW_VERSION=$(./scripts/bump-version.sh "${{ steps.current_version.outputs.version }}" "$BUMP_TYPE")
-          
-          # Add run number and sha suffix for non-tagged builds to ensure uniqueness
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          UNIQUE_VERSION="${NEW_VERSION}-r${{ github.run_number }}-${SHORT_SHA}"
-          
-          echo "New version: $NEW_VERSION"
-          echo "Unique version: $UNIQUE_VERSION"
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "unique_version=$UNIQUE_VERSION" >> $GITHUB_OUTPUT
+    - name: Create tag
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        git tag -a "$VERSION" -m "Release $VERSION"
+        git push origin "$VERSION"
 
-      - name: Create git tag
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${{ steps.bump_version.outputs.new_version }}" -m "Manual deployment: ${{ inputs.reason }}"
-          git push origin "${{ steps.bump_version.outputs.new_version }}"
+  build-and-push:
+    name: Build & Push
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Determine Version
+      id: version
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Using version: ${VERSION}"
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Extract Docker Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio
+        tags: |
+          type=raw,value=${{ steps.version.outputs.version }}
+    - name: Build and Push Docker Image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          VERSION=${{ steps.version.outputs.version }}
+          COMMIT_SHA=${{ github.sha }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:${{ steps.bump_version.outputs.unique_version }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
+  gitops-update:
+    name: GitOps Update
+    needs: [build-and-push, create-release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
       - name: Generate GitOps Bot Token
         uses: tibdex/github-app-token@v2
         id: generate-token
@@ -114,13 +123,10 @@ jobs:
 
       - name: Update cio image tag in GitOps manifests
         run: |
-          VERSION="${{ steps.bump_version.outputs.unique_version }}"
+          VERSION="${{ needs.build-and-push.outputs.version }}"
           # Update the image tag in manifests
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
-          
-          # Also update the version label if needed
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
-          
+
           echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
 
       - name: Commit and push to petrosa_k8s
@@ -132,17 +138,62 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit (version might already be up to date)"
           else
-            git commit -m "gitops: cio image ${{ steps.bump_version.outputs.unique_version }}"
+            git commit -m "gitops: cio image ${{ needs.build-and-push.outputs.version }}"
             git push origin main
           fi
 
-      - name: Create summary
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          # GitOps Push Successful ✅
+  notify:
+    name: notify
+    needs: [build-and-push, gitops-update, create-release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Create deployment record
+      run: |
+        mkdir -p deployments
+        VERSION="${{ needs.create-release.outputs.version }}"
+        TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        cat >> deployments/history.log << EOF
+        ========================================
+        Deployment Record
+        ========================================
+        Service: cio
+        Version: $VERSION
+        Triggered by: ${{ github.actor }}
+        Timestamp: $TIMESTAMP
+        Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        ========================================
+        EOF
 
-          ## Details
-          - **Service**: `cio`
-          - **Version**: `${{ steps.bump_version.outputs.unique_version }}`
-          - **Triggered by**: @${{ github.actor }}
-          EOF
+    - name: Upload deployment history artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: cio-deployment-history
+        path: deployments/history.log
+
+    - name: Notify Deployment Status
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+
+        if [ "${{ needs.gitops-update.result }}" == "success" ]; then
+          echo "✅ Build, Push, and GitOps Update successful!"
+          echo "📦 Version: ${VERSION}"
+          echo "🚀 Deployed via petrosa_k8s hub"
+        elif [ "${{ needs.gitops-update.result }}" == "skipped" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
+          echo "ℹ️ Pull Request: Build and Push successful (GitOps update skipped for PR)"
+          echo "📦 Version: ${VERSION}"
+        else
+          echo "❌ GitOps Update failed (or was unsuccessful)!"
+          echo "📦 Version: ${VERSION}"
+          echo "🐳 Image pushed, but manifest update in petrosa_k8s failed."
+        fi
+
+  cleanup:
+    name: cleanup
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Clean Up Old Images
+      run: |
+        echo "Cleaning up old Docker images..."
