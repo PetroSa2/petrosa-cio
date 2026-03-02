@@ -2,10 +2,12 @@ name: Manual Deployment with Version Bump
 
 on:
   workflow_dispatch:
+  workflow_dispatch:
     inputs:
 
       version_bump:
-        description: 'Version bump type'
+        description:
+  workflow_dispatch: 'Version bump type'
         required: true
         type: choice
         options:
@@ -14,13 +16,16 @@ on:
           - major
         default: patch
       reason:
-        description: 'Reason for deployment (audit trail)'
+  workflow_dispatch:
+        description:
+  workflow_dispatch: 'Reason for deployment (audit trail)'
         required: true
         type: string
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on:
+  workflow_dispatch: ubuntu-latest
     permissions:
       contents: write
       packages: write
@@ -36,7 +41,8 @@ jobs:
         run: |
           # Get latest tag, default to v0.0.0 if no tags exist
           CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          echo "Current version: $CURRENT"
+          echo "Current version:
+  workflow_dispatch: $CURRENT"
           echo "version=$CURRENT" >> $GITHUB_OUTPUT
 
       - name: Bump version
@@ -44,7 +50,8 @@ jobs:
         run: |
           chmod +x scripts/bump-version.sh
           NEW_VERSION=$(./scripts/bump-version.sh "${{ steps.current_version.outputs.version }}" "${{ inputs.version_bump }}")
-          echo "New version: $NEW_VERSION"
+          echo "New version:
+  workflow_dispatch: $NEW_VERSION"
           echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
       - name: Create git tag
@@ -104,7 +111,8 @@ jobs:
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
 
           # Also update the version label if needed
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/version:
+  workflow_dispatch: VERSION_PLACEHOLDER/version: $VERSION/g"
 
           echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
 
