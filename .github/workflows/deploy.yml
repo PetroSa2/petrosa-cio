@@ -1,0 +1,177 @@
+name: Deploy
+
+on:
+  push:
+    branches: [ 'main' ]
+  pull_request:
+    branches: [ 'main' ]
+
+env:
+  NAMESPACE: petrosa-apps
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set version
+      id: version
+      run: |
+        # Fallback to default version as no pyproject.toml or VERSION file found
+        BASE_VERSION="v0.1.0"
+        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+        VERSION="${BASE_VERSION}-r${{ github.run_number }}-${SHORT_SHA}"
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "Release version: $VERSION"
+
+    - name: Create tag
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        git config --global user.email "action@github.com"
+        git config --global user.name "GitHub Action"
+        git tag -a "$VERSION" -m "Release $VERSION"
+        git push origin "$VERSION"
+
+  build-and-push:
+    name: Build & Push
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Determine Version
+      id: version
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Using version: ${VERSION}"
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    - name: Log in to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Extract Docker Metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio
+        tags: |
+          type=raw,value=${{ steps.version.outputs.version }}
+    - name: Build and Push Docker Image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        platforms: linux/amd64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          VERSION=${{ steps.version.outputs.version }}
+          COMMIT_SHA=${{ github.sha }}
+
+  gitops-update:
+    name: GitOps Update
+    needs: [build-and-push, create-release]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Generate GitOps Bot Token
+        uses: tibdex/github-app-token@v2
+        id: generate-token
+        with:
+          app_id: ${{ secrets.GITOPS_APP_ID }}
+          installation_id: ${{ secrets.GITOPS_APP_INSTALLATION_ID }}
+          private_key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+
+      - name: Checkout petrosa_k8s
+        uses: actions/checkout@v4
+        with:
+          repository: PetroSa2/petrosa_k8s
+          ref: main
+          token: ${{ steps.generate-token.outputs.token }}
+          path: petrosa_k8s
+
+      - name: Rebase on main
+        run: ./scripts/gitops-rebase-main.sh
+        working-directory: petrosa_k8s
+
+      - name: Update cio image tag in GitOps manifests
+        run: |
+          VERSION="${{ needs.build-and-push.outputs.version }}"
+          # Update the image tag in manifests
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
+          
+          echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
+
+      - name: Commit and push to petrosa_k8s
+        working-directory: petrosa_k8s
+        run: |
+          git config user.name "gitops-bot"
+          git config user.email "gitops-bot@users.noreply.github.com"
+          git add k8s/cio/
+          if git diff --staged --quiet; then
+            echo "No changes to commit (version might already be up to date)"
+          else
+            git commit -m "gitops: cio image ${{ needs.build-and-push.outputs.version }}"
+            git push origin main
+          fi
+
+  notify:
+    name: notify
+    needs: [build-and-push, gitops-update, create-release]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Notify Deployment Status
+      run: |
+        VERSION="${{ needs.create-release.outputs.version }}"
+        IMAGE_TAG="${{ needs.build-and-push.outputs.version }}"
+        
+        if [ "${{ needs.gitops-update.result }}" == "success" ]; then
+          echo "✅ Build, Push, and GitOps Update successful!"
+          echo "📦 Version: ${VERSION}"
+          echo "🚀 Deployed via petrosa_k8s hub"
+        elif [ "${{ needs.gitops-update.result }}" == "skipped" ] && [ "${{ github.event_name }}" == "pull_request" ]; then
+          echo "ℹ️ Pull Request: Build and Push successful (GitOps update skipped for PR)"
+          echo "📦 Version: ${VERSION}"
+        else
+          echo "❌ GitOps Update failed (or was unsuccessful)!"
+          echo "📦 Version: ${VERSION}"
+          echo "🐳 Image pushed, but manifest update in petrosa_k8s failed."
+        fi
+
+  cleanup:
+    name: cleanup
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Clean Up Old Images
+      run: |
+        echo "Cleaning up old Docker images..."
