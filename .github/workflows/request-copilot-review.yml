@@ -1,0 +1,50 @@
+# Auto-request GitHub Copilot review for all pull requests
+# This ensures consistent automated code review across the repository
+#
+# Triggers: PR opened, reopened, or synchronized (new commits pushed)
+# Permissions: Requires pull-requests: write to request reviewers
+#
+# Related: Issue #54 - Auto-request Copilot review for all PRs
+
+name: Request Copilot Review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+jobs:
+  request-copilot-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Request Copilot Review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+
+            console.log(`🤖 Requesting Copilot review for PR #${pull_number}...`);
+
+            try {
+              await github.rest.pulls.requestReviewers({
+                owner,
+                repo,
+                pull_number,
+                reviewers: ['github-copilot']
+              });
+              console.log(`✅ Copilot review requested successfully for PR #${pull_number}`);
+            } catch (error) {
+              // Don't fail the workflow if Copilot is already requested or unavailable
+              // This ensures the workflow doesn't block PR operations
+              if (error.status === 422) {
+                console.log(`ℹ️ Copilot review already requested or reviewer unavailable for PR #${pull_number}`);
+              } else {
+                console.log(`⚠️ Could not request Copilot review: ${error.message}`);
+                console.log(`   This is non-blocking and the PR can proceed normally.`);
+              }
+            }
