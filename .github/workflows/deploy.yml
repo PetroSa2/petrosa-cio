@@ -139,10 +139,12 @@ jobs:
         run: |
           VERSION="${{ needs.build-and-push.outputs.version }}"
           # Update the image tag in manifests robustly (preserves registry/repo, only updates tag)
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s|(image:[[:space:]]*[^[:space:]]*/petrosa-cio):[^[:space:]]*|\1:$VERSION|g"
+          # Handles both qualified (e.g., repo/petrosa-cio:tag) and unqualified (petrosa-cio:tag) image names
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s|(image:[[:space:]]*)([^[:space:]]*/)?(petrosa-cio):[^[:space:]]*|\1\2\3:$VERSION|g"
           
           # Update version labels specifically (targets common label patterns)
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s/(version|app.kubernetes.io\/version):.*/\1: $VERSION/g"
+          # Anchored to start of line to prevent over-matching apiVersion
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s/^([[:space:]]*(version|app\.kubernetes\.io\/version)):.*/\1: $VERSION/g"
           
           # Also handle any lingering placeholders for backward compatibility
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
