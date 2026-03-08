@@ -77,10 +77,12 @@ async def main():
     vector_provider = os.getenv("VECTOR_PROVIDER", "mock").lower()
     if vector_provider == "qdrant":
         from cio.core.vector import QdrantVectorClient
+
         vector_client = QdrantVectorClient()
         logger.info("Initializing QdrantVectorClient for COLD path.")
     else:
         from cio.core.vector import MockVectorClient
+
         vector_client = MockVectorClient()
         logger.info("Initializing MockVectorClient for development/testing.")
 
@@ -88,7 +90,7 @@ async def main():
         data_manager_url=data_manager_url,
         tradeengine_url=tradeengine_url,
         strategy_api_url=strategy_api_url,
-        vector_client=vector_client
+        vector_client=vector_client,
     )
 
     orchestrator = Orchestrator(llm_client=llm_client, cache=cache)

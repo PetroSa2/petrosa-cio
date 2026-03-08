@@ -1,6 +1,8 @@
-import pytest
 import os
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 
 @pytest.fixture(autouse=True)
 def setup_test_env():
@@ -14,6 +16,7 @@ def setup_test_env():
     os.environ["STRATEGY_API_URL"] = "http://strategy-api"
     yield
 
+
 @pytest.fixture
 def mock_nats_client():
     """Mock for nats.aio.client.Client."""
@@ -22,6 +25,7 @@ def mock_nats_client():
     mock.subscribe = AsyncMock()
     return mock
 
+
 @pytest.fixture
 def mock_redis_cache():
     """Mock for AsyncRedisCache."""
@@ -29,6 +33,7 @@ def mock_redis_cache():
     mock.get = AsyncMock(return_value=None)
     mock.set = AsyncMock()
     return mock
+
 
 @pytest.fixture
 def mock_httpx_client():

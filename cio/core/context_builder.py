@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
@@ -39,7 +39,7 @@ class ContextBuilder:
         data_manager_url: str,
         tradeengine_url: str,
         strategy_api_url: str,
-        vector_client: Optional[VectorClientProtocol] = None,
+        vector_client: VectorClientProtocol | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
@@ -107,7 +107,9 @@ class ContextBuilder:
             volatility_level=regime.volatility_level,
             market_signals=MarketSignals(
                 signal_summary=payload.get("signal_summary", "Manual trigger"),
-                current_price=payload.get("current_price") or payload.get("price") or 0.0,
+                current_price=payload.get("current_price")
+                or payload.get("price")
+                or 0.0,
                 volatility_percentile=payload.get("volatility_percentile", 0.5),
                 trend_strength=payload.get("trend_strength", 0.0),
                 price_action_character=payload.get("price_action_character", "Neutral"),
@@ -185,7 +187,9 @@ class ContextBuilder:
                 },
             )
 
-    async def _fetch_strategy_data(self, strategy_id: str, correlation_id: str) -> tuple[StrategyStats, StrategyDefaults]:
+    async def _fetch_strategy_data(
+        self, strategy_id: str, correlation_id: str
+    ) -> tuple[StrategyStats, StrategyDefaults]:
         """Fetches strategy performance and config defaults."""
         try:
             url = f"{self.strategy_api_url}/strategy/{strategy_id}/config"

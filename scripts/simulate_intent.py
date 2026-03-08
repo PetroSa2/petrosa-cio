@@ -1,18 +1,20 @@
 import asyncio
 import json
-import os
-import uuid
 import logging
+import os
 import sys
+import uuid
+
 from nats.aio.client import Client as NATS
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stdout
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout,
 )
 logger = logging.getLogger("simulate-intent")
+
 
 async def run():
     # 1. Configuration
@@ -29,7 +31,7 @@ async def run():
         "signal_summary": "Strong breakout detected on 15m timeframe with high volume confirmation.",
         "volatility_percentile": 0.65,
         "trend_strength": 0.82,
-        "price_action_character": "Impulsive"
+        "price_action_character": "Impulsive",
     }
 
     # 3. Connect and Publish
@@ -40,20 +42,17 @@ async def run():
 
         # Send with correlation_id in header
         headers = {"correlation_id": correlation_id}
-        
+
         logger.info(f"Publishing intent to {topic} [ID: {correlation_id}]")
-        await nc.publish(
-            topic, 
-            json.dumps(payload).encode(),
-            headers=headers
-        )
-        
+        await nc.publish(topic, json.dumps(payload).encode(), headers=headers)
+
         logger.info("Intent published successfully.")
         await nc.flush()
     except Exception as e:
         logger.error(f"Failed to publish intent: {e}")
     finally:
         await nc.close()
+
 
 if __name__ == "__main__":
     asyncio.run(run())

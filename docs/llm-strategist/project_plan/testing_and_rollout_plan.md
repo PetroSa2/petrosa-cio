@@ -56,18 +56,16 @@ PYTHONPATH=. python3 scripts/verify_live_heartbeat.py
 
 ---
 
-## Phase 3: Cluster Shadow Rollout (The "Staging" Test)
-**Goal:** Observe real market data without any execution risk.
+## Phase 3: Cluster Shadow Rollout (The "Observation" Phase)
+**Goal:** Observe real market data without any execution risk via GitOps deployment.
 
-### 3.1 Deployment
-Apply the staged manifests from the `petrosa_k8s` repo:
-```bash
-kubectl apply -f k8s/shared/configmaps/petrosa-common-config.yaml
-kubectl apply -f k8s/shared/secrets/petrosa-sensitive-credentials.yaml
-kubectl apply -f k8s/cio/deployment.yaml
-```
+### 3.1 Pipeline Trigger
+Commit and push the staged changes in both `petrosa-cio` and `petrosa_k8s`. The automated CI/CD pipeline will:
+1. Build and push the `petrosa-cio:latest` image.
+2. Synchronize the shared ConfigMaps and Secrets.
+3. Deploy the `petrosa-cio` pod to the `petrosa-apps` namespace.
 
-### 3.2 Live Monitoring
+### 3.2 Live Monitoring & Verification
 1. **Log Audit:**
    ```bash
    kubectl logs -f deployment/petrosa-cio -n petrosa-apps

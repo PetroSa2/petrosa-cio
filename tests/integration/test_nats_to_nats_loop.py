@@ -1,15 +1,14 @@
 import json
-import pytest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-import httpx
-import os
 
+import httpx
+import pytest
+
+from cio.core.context_builder import ContextBuilder
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
-from cio.core.context_builder import ContextBuilder
 from cio.core.router import OutputRouter
-from cio.models import ActionType
+
 
 @pytest.mark.asyncio
 async def test_full_nats_to_nats_loop():
@@ -17,10 +16,10 @@ async def test_full_nats_to_nats_loop():
     Integration test for the full CIO reasoning loop with T-Junction logic.
     NATS Intent -> HTTP Gathers -> Code Engine -> Mock LLM -> NATS Legacy + Modern.
     """
-    
+
     # 1. Setup Mocks
     mock_nc = AsyncMock()
-    
+
     # Define the mock data payloads
     regime_data = {
         "pair": "BTCUSDT",
@@ -30,47 +29,44 @@ async def test_full_nats_to_nats_loop():
             "volatility_level": "medium",
             "volume_level": "high",
             "trend_direction": "up",
-            "confidence": "0.95"
+            "confidence": "0.95",
         },
-        "metadata": {
-            "timestamp": "2026-03-08T17:00:00Z",
-            "collection": "live"
-        }
+        "metadata": {"timestamp": "2026-03-08T17:00:00Z", "collection": "live"},
     }
-    
+
     tradeengine_data = {
         "portfolio": {
             "net_directional_exposure": 0.1,
             "same_asset_pct": 0.05,
-            "open_positions_count": 1
+            "open_positions_count": 1,
         },
         "risk_limits": {
             "max_drawdown_pct": 0.15,
             "max_orders_global": 50,
             "max_orders_per_symbol": 5,
-            "max_position_size_usd": 5000.0
+            "max_position_size_usd": 5000.0,
         },
         "env_stats": {
             "global_drawdown_pct": 0.02,
             "open_orders_global": 5,
             "open_orders_symbol": 0,
-            "available_capital_usd": 50000.0
-        }
+            "available_capital_usd": 50000.0,
+        },
     }
-    
+
     strategy_data = {
         "stats": {
             "win_rate": 0.65,
             "win_rate_delta": 0.05,
             "consecutive_losses": 0,
-            "recent_pnl_trend": "positive"
+            "recent_pnl_trend": "positive",
         },
         "defaults": {
             "stop_loss_pct": 0.02,
             "take_profit_pct": 0.06,
             "leverage": 1.0,
-            "max_hold_hours": 12.0
-        }
+            "max_hold_hours": 12.0,
+        },
     }
 
     # Helper to create a mock response
@@ -101,18 +97,18 @@ async def test_full_nats_to_nats_loop():
             builder = ContextBuilder(
                 data_manager_url="http://data-manager",
                 tradeengine_url="http://tradeengine",
-                strategy_api_url="http://strategy-api"
+                strategy_api_url="http://strategy-api",
             )
-            
+
             orchestrator = Orchestrator(cache=mock_cache)
             mock_vc = AsyncMock()
             router = OutputRouter(nats_client=mock_nc, vector_client=mock_vc)
-            
+
             listener = NATSListener(
                 nats_client=mock_nc,
                 orchestrator=orchestrator,
                 context_builder=builder,
-                router=router
+                router=router,
             )
 
             # 3. Create a dummy NATS message
@@ -144,7 +140,7 @@ async def test_full_nats_to_nats_loop():
             assert legacy_call[0][0] == "signals.trading"
             legacy_payload = json.loads(legacy_call[0][1].decode())
             assert legacy_payload["action"] == "buy"
-            # Verify quantity fix: size / price. 
+            # Verify quantity fix: size / price.
             # CodeEngine size ~ $5000 (capped), price 50000 -> qty 0.1
             assert legacy_payload["quantity"] == pytest.approx(0.1)
 
@@ -154,8 +150,8 @@ async def test_full_nats_to_nats_loop():
             modern_payload = json.loads(modern_call[0][1].decode())
             assert modern_payload["action"] == "execute"
             assert modern_payload["computed_position_size_usd"] == pytest.approx(5000.0)
-            
+
             # Verify Vector Upsert (Audit Path)
             mock_vc.upsert.assert_called_once()
-            
+
             await builder.close()

@@ -4,7 +4,7 @@ import os
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 from tenacity import (
@@ -72,13 +72,13 @@ class CIO_LLM_Client(ABC):
             return SAFE_DEFAULTS[prompt_id]
 
     @abstractmethod
-    async def get_cached(self, cache_key: str) -> Optional[str]:
+    async def get_cached(self, cache_key: str) -> str | None:
         """Retrieve a raw result from the cache if available."""
         pass
 
     @abstractmethod
     async def put_cached(
-        self, cache_key: str, data: str, ttl_seconds: Optional[int] = None
+        self, cache_key: str, data: str, ttl_seconds: int | None = None
     ):
         """Store a raw result in the cache."""
         pass
@@ -93,7 +93,7 @@ class LiteLLMClient(CIO_LLM_Client):
         self._last_failure_time = 0.0
         self._breaker_open_until = 0.0
 
-    def _check_circuit_breaker(self) -> Optional[str]:
+    def _check_circuit_breaker(self) -> str | None:
         """Check if the circuit breaker is open."""
         now = time.time()
         if self._breaker_open_until > now:
@@ -149,18 +149,20 @@ class LiteLLMClient(CIO_LLM_Client):
         primary_model = os.getenv("LLM_MODEL", "anthropic/claude-3-haiku-20240307")
         fallback_model = os.getenv("LLM_FALLBACK_MODEL", "openai/gpt-4o-mini")
         api_base = os.getenv("LLM_API_BASE")
-        
+
         # When using a proxy like Requesty, we prefix with 'openai/' to ensure
         # litellm uses the OpenAI-compatible route for all models.
         routing_primary = f"openai/{primary_model}" if api_base else primary_model
         routing_fallback = f"openai/{fallback_model}" if api_base else fallback_model
-        
+
         start_time = time.perf_counter()
 
         # 2. Retry Loop for Primary Model
         try:
             async for attempt in AsyncRetrying(
-                retry=retry_if_exception_type((RateLimitError, ServiceUnavailableError)),
+                retry=retry_if_exception_type(
+                    (RateLimitError, ServiceUnavailableError)
+                ),
                 wait=wait_random_exponential(multiplier=1, max=10),
                 stop=stop_after_attempt(3),
                 before_sleep=lambda retry_state: logger.warning(
@@ -181,7 +183,8 @@ class LiteLLMClient(CIO_LLM_Client):
                             {"role": "user", "content": json.dumps(user_context)},
                         ],
                         response_format={"type": "json_object"}
-                        if "json_object" in litellm.get_supported_openai_params(primary_model)
+                        if "json_object"
+                        in litellm.get_supported_openai_params(primary_model)
                         else None,
                     )
 
@@ -197,7 +200,7 @@ class LiteLLMClient(CIO_LLM_Client):
                 f"Primary LLM failed ({primary_model}), attempting fallback ({fallback_model})",
                 extra={"prompt_id": prompt_id, "error": str(primary_error)},
             )
-            
+
             try:
                 fallback_response = await litellm.acompletion(
                     model=routing_fallback,
@@ -207,14 +210,17 @@ class LiteLLMClient(CIO_LLM_Client):
                         {"role": "user", "content": json.dumps(user_context)},
                     ],
                     response_format={"type": "json_object"}
-                    if "json_object" in litellm.get_supported_openai_params(fallback_model)
+                    if "json_object"
+                    in litellm.get_supported_openai_params(fallback_model)
                     else None,
                 )
-                
+
                 # Success on fallback
                 self._record_success()
                 return self._process_response(
-                    prompt_id, fallback_response, int((time.perf_counter() - start_time) * 1000)
+                    prompt_id,
+                    fallback_response,
+                    int((time.perf_counter() - start_time) * 1000),
                 )
 
             except Exception as fallback_error:
@@ -236,11 +242,13 @@ class LiteLLMClient(CIO_LLM_Client):
                     timestamp=datetime.utcnow(),
                 )
 
-    def _process_response(self, prompt_id: str, response: Any, latency_ms: int) -> RawLLMResponse:
+    def _process_response(
+        self, prompt_id: str, response: Any, latency_ms: int
+    ) -> RawLLMResponse:
         """Helper to process a successful litellm response."""
         content = response.choices[0].message.content or ""
         usage = response.usage
-        
+
         cached_tokens = 0
         if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
             cached_tokens = getattr(usage.prompt_tokens_details, "cached_tokens", 0)
@@ -248,6 +256,7 @@ class LiteLLMClient(CIO_LLM_Client):
         # Record Metrics
         try:
             from cio.core.metrics import LLM_LATENCY, LLM_TOKENS
+
             LLM_LATENCY.labels(prompt_id=prompt_id, model=response.model).observe(
                 latency_ms / 1000.0
             )
@@ -275,12 +284,12 @@ class LiteLLMClient(CIO_LLM_Client):
             timestamp=datetime.utcnow(),
         )
 
-    async def get_cached(self, cache_key: str) -> Optional[str]:
+    async def get_cached(self, cache_key: str) -> str | None:
         """S5: Placeholder for Redis/Distributed cache."""
         return None
 
     async def put_cached(
-        self, cache_key: str, data: str, ttl_seconds: Optional[int] = None
+        self, cache_key: str, data: str, ttl_seconds: int | None = None
     ):
         """S5: Placeholder for Redis/Distributed cache."""
         pass
@@ -391,15 +400,20 @@ class MockLLMClient(CIO_LLM_Client):
         # 4. Record Metrics (Epic 5)
         try:
             from cio.core.metrics import LLM_LATENCY, LLM_TOKENS
+
             model = "mock-claude-3-haiku"
             LLM_LATENCY.labels(prompt_id=prompt_id, model=model).observe(
                 latency_ms / 1000.0
             )
-            LLM_TOKENS.labels(prompt_id=prompt_id, model=model, token_type="input").inc(150)
-            LLM_TOKENS.labels(prompt_id=prompt_id, model=model, token_type="output").inc(50)
-            LLM_TOKENS.labels(prompt_id=prompt_id, model=model, token_type="cached").inc(
-                240
+            LLM_TOKENS.labels(prompt_id=prompt_id, model=model, token_type="input").inc(
+                150
             )
+            LLM_TOKENS.labels(
+                prompt_id=prompt_id, model=model, token_type="output"
+            ).inc(50)
+            LLM_TOKENS.labels(
+                prompt_id=prompt_id, model=model, token_type="cached"
+            ).inc(240)
         except ImportError:
             pass
 
@@ -443,7 +457,7 @@ class MockLLMClient(CIO_LLM_Client):
                 {
                     "regime": regime,
                     "regime_confidence": conf,
-                    "volatility_level": "medium", # Mock default
+                    "volatility_level": "medium",  # Mock default
                     "primary_signal": f"mock_vol_{vol}_trend_{trend}",
                     "thought_trace": trace,
                 }
@@ -501,12 +515,12 @@ class MockLLMClient(CIO_LLM_Client):
 
         return "{}"
 
-    async def get_cached(self, cache_key: str) -> Optional[str]:
+    async def get_cached(self, cache_key: str) -> str | None:
         """Retrieves result from in-memory cache."""
         return self._cache.get(cache_key)
 
     async def put_cached(
-        self, cache_key: str, data: str, ttl_seconds: Optional[int] = None
+        self, cache_key: str, data: str, ttl_seconds: int | None = None
     ):
         """Stores result in in-memory cache."""
         self._cache[cache_key] = data
