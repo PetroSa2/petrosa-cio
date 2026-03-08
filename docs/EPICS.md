@@ -139,18 +139,68 @@ So that bots can fail-safely if the CIO becomes unreachable.
 - **Then** the CIO responds within 20ms confirming `GOVERNANCE_ACTIVE`.
 
 ## Epic 3: Semantic Guarding & Safety Gating
-**Goal:** Add "Logical Safety" on top of the existing Pydantic "Type Safety."
+**Goal:** Add "Logical Safety" on top of the existing Pydantic "Type Safety." The LLM must know market regime to make smart parameter decisions.
 
-### Story 3.1: Market Regime Semantic Guard
-As a PM,
-I want the Nurse to veto trades that violate current market regime logic (e.g., "Don't increase size in high vol"),
-So that hallucinations that are "type-valid" but "strategically insane" are blocked.
+### Story 3.1: Market Regime Auto-Detection
+As a System,
+I want the CIO to automatically detect market regime from price data,
+So that trading decisions are context-aware without manual intervention.
 
 **Acceptance Criteria:**
-- **Given** a valid `Signal` intent
-- **When** checked by the Semantic Guard
-- **Then** it cross-references the trade against the `RegimeStatus` (cached in Redis).
-- **And** it blocks the trade if it violates the current drawdown or volatility phase multipliers.
+- **Given** live price data (computed by petrosa-data-manager)
+- **When** CIO queries the data-manager regime endpoint
+- **Then** it retrieves the current regime classification
+- **And** writes it to Redis `policy:regime` for Nurse to use
+
+**Implementation:**
+- **USE EXISTING**: petrosa-data-manager already has:
+  - `RegimeClassifier` class in `data_manager/analytics/regime.py`
+  - 8 regime classifications: `turbulent_illiquidity`, `stable_accumulation`, `breakout_phase`, `consolidation`, `bullish_acceleration`, `bearish_acceleration`, `balanced_market`, `transitional`
+  - API endpoint: `GET /analysis/regime?pair=BTCUSDT`
+- **CIO Integration**: Add HTTP client to query data-manager's regime endpoint
+- **Caching**: Store regime in Redis with TTL for fast Nurse lookups
+
+**K8s Service:** `petrosa-data-manager-service` (verify actual service name)
+
+### Story 3.2: Market Regime MCP Override
+As a Strategist (LLM),
+I want to manually set the market regime via MCP,
+So that I can override auto-detection when I have superior information.
+
+**Acceptance Criteria:**
+- **Given** the LLM has information not in the price feed
+- **When** the LLM calls `set_market_regime` MCP tool
+- **Then** the regime in Redis is updated
+- **And** subsequent trades use the LLM-set regime
+- **And** the change is audit-trailed
+
+**MCP Tool Example:**
+```python
+{
+    "name": "set_market_regime",
+    "description": "Set current market regime. Use when you have information not reflected in price data.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "regime": {"type": "string", "enum": ["bull", "bear", "sideways", "high_vol", "low_vol"]},
+            "reason": {"type": "string"},
+            "thought_trace": {"type": "string", "minLength": 100}
+        },
+        "required": ["regime", "reason", "thought_trace"]
+    }
+}
+```
+
+### Story 3.3: Regime-Aware Parameter Recommendations
+As a Strategist (LLM),
+I want to receive parameter adjustment recommendations based on current regime,
+So that I can optimize strategy parameters contextually.
+
+**Acceptance Criteria:**
+- **Given** the current market regime (auto-detected or LLM-set)
+- **When** the LLM queries for regime context
+- **Then** it receives regime-specific parameter recommendations
+- **Example:** "In high_vol regime, consider reducing position size by 50%"
 
 ## Epic 4: Configuration Mastery (MCP Gateway)
 **Goal:** Expose the migrated risk configuration logic to the LLM via the MCP toolset.
@@ -175,6 +225,58 @@ So that we have constant "Undo" capability for any configuration experiment.
 - **When** the patch is applied
 - **Then** the CIO snapshots the pre-patch state.
 - **And** an MCP tool `rollback_to_version` is provided to the LLM.
+
+### Story 4.3: TA-Bot Strategy Management Integration
+As a Strategist (LLM),
+I want to view and modify TA-bot strategy parameters via MCP tools,
+So that I can dynamically adjust trading strategy configurations during live market conditions.
+
+**Acceptance Criteria:**
+- **Given** the CIO service is running with TA-bot connectivity
+- **When** the LLM queries for available TA-bot strategies
+- **Then** it receives a list of all 28 strategies with their current configuration status.
+- **And** it can view any strategy's full parameter set via `get_ta_bot_strategy_config`.
+- **And** it can modify parameters via `set_ta_bot_strategy_config` with audit trail.
+- **And** it can view configuration history via `get_ta_bot_strategy_audit`.
+
+**Technical Notes:**
+- Requires HTTP client connecting to `petrosa-ta-bot-service:80`
+- Endpoints: `/api/v1/strategies`, `/api/v1/strategies/{id}/config`, `/api/v1/strategies/{id}/audit`
+- Must handle service unavailable gracefully (circuit breaker)
+
+### Story 4.4: Realtime-Strategies Parameter Management
+As a Strategist (LLM),
+I want to view and modify realtime strategy parameters via MCP tools,
+So that I can adjust microstructure strategy behavior in real-time.
+
+**Acceptance Criteria:**
+- **Given** the CIO service is running with realtime-strategies connectivity
+- **When** the LLM queries for available realtime strategies
+- **Then** it receives a list of all 6 strategies with their current configuration.
+- **And** it can view and modify parameters similar to TA-bot integration.
+- **And** configuration changes are persisted and audit-trailed.
+
+**Technical Notes:**
+- Requires HTTP client connecting to `petrosa-realtime-strategies:80`
+- Same endpoint patterns as TA-bot
+- Consider shared base class for both HTTP clients
+
+### Story 4.5: Service-to-Service Authentication
+As a Security Engineer,
+I want service-to-service authentication for all internal API calls,
+So that unauthorized services cannot modify strategy parameters.
+
+**Acceptance Criteria:**
+- **Given** two internal Petrosa services
+- **When** Service A calls Service B's internal API
+- **Then** the request includes valid authentication credentials.
+- **And** invalid credentials result in 401 Unauthorized.
+- **And** all strategy config endpoints require authentication.
+
+**Technical Options:**
+- API Key via header (simplest)
+- mTLS (most secure)
+- Kubernetes service account tokens
 
 ## Epic 5: Resilient Alerts & Standalone Fail-Safes
 **Goal:** Worst-case scenario handling.
