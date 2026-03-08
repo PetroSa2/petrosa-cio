@@ -4,6 +4,8 @@ import os
 import signal
 import sys
 
+import uvicorn
+from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
 from cio.clients.factory import ClientFactory
@@ -39,6 +41,22 @@ root_logger.addHandler(handler)
 
 logger = logging.getLogger("cio-strategist")
 
+# Initialize FastAPI for health checks
+app = FastAPI(title="Petrosa CIO Health")
+
+
+@app.get("/health/liveness")
+async def liveness():
+    return {"status": "ok"}
+
+
+@app.get("/health/readiness")
+async def readiness():
+    # Basic check for NATS connection
+    if hasattr(app.state, "nats_client") and app.state.nats_client.is_connected:
+        return {"status": "ok"}
+    return {"status": "degraded", "nats": "disconnected"}
+
 
 async def main():
     # 0. Start Metrics Server (Epic 5)
@@ -60,6 +78,7 @@ async def main():
     try:
         await nc.connect(nats_url)
         logger.info(f"Connected to NATS at {nats_url}")
+        app.state.nats_client = nc
     except Exception as e:
         logger.error(f"Failed to connect to NATS: {e}")
         sys.exit(1)
@@ -118,15 +137,26 @@ async def main():
     await listener.start()
     logger.info("CIO Strategist is live and listening.")
 
+    # 5. Run Health Check Server in background
+    api_port = int(os.getenv("API_PORT", "8000"))
+    config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="warning")
+    server = uvicorn.Server(config)
+    
+    # Run uvicorn in a way that it doesn't block the main event loop entirely
+    # or rather, run it as a task.
+    asyncio.create_task(server.serve())
+    logger.info(f"Health check server started on port {api_port}")
+
     # Wait for stop signal
     await stop_event.wait()
 
-    # 5. Cleanup Sequence
+    # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
     await listener.stop()
     await builder.close()
     await redis_client.close()
     await nc.close()
+    await server.shutdown()
     logger.info("CIO Strategist shutdown complete.")
 
 
