@@ -134,8 +134,9 @@ async def main():
         loop.add_signal_handler(sig, signal_handler)
 
     # 4. Start Listening
-    await listener.start()
-    logger.info("CIO Strategist is live and listening.")
+    intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    await listener.start(subject=intents_subject)
+    logger.info(f"CIO Strategist is live and listening on {intents_subject}")
 
     # 5. Run Health Check Server in background
     api_port = int(os.getenv("API_PORT", "8000"))
