@@ -69,9 +69,9 @@ async def main():
     # 1. Load Configuration
     nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-    data_manager_url = os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:8000")
-    tradeengine_url = os.getenv("TRADEENGINE_URL", "http://petrosa-tradeengine:8000")
-    strategy_api_url = os.getenv("STRATEGY_API_URL", "http://petrosa-ta-bot:8000")
+    data_manager_url = os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:80")
+    tradeengine_url = os.getenv("TRADEENGINE_URL", "http://petrosa-tradeengine-service:80")
+    ta_bot_url = os.getenv("TA_BOT_URL", "http://petrosa-ta-bot-service:80")
 
     # 2. Initialize Components
     nc = NATS()
@@ -108,7 +108,7 @@ async def main():
     builder = ContextBuilder(
         data_manager_url=data_manager_url,
         tradeengine_url=tradeengine_url,
-        strategy_api_url=strategy_api_url,
+        strategy_api_url=ta_bot_url,
         vector_client=vector_client,
     )
 
