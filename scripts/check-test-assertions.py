@@ -18,8 +18,6 @@ Exit codes:
 import ast
 import os
 import sys
-from pathlib import Path
-from typing import Optional
 
 
 class TestAssertionChecker(ast.NodeVisitor):
@@ -27,9 +25,9 @@ class TestAssertionChecker(ast.NodeVisitor):
 
     def __init__(self):
         self.has_assertion = False
-        self.test_functions: list[tuple[str, int, bool]] = (
-            []
-        )  # (name, line, has_assertion)
+        self.test_functions: list[
+            tuple[str, int, bool]
+        ] = []  # (name, line, has_assertion)
         self.current_test: str | None = None
         self.current_line: int = 0
 

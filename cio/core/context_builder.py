@@ -1,0 +1,217 @@
+import logging
+from typing import Any, Optional
+
+import httpx
+
+from cio.core.vector import VectorClientProtocol
+from cio.models import (
+    MarketSignals,
+    PnlTrend,
+    PortfolioSummary,
+    RegimeAPIResponse,
+    RegimeResult,
+    RiskLimits,
+    StrategyDefaults,
+    StrategyStats,
+    TriggerContext,
+    TriggerType,
+    VolatilityLevel,
+)
+
+logger = logging.getLogger(__name__)
+
+# Categorize triggers into reasoning paths
+COLD_TRIGGERS = {
+    TriggerType.SCHEDULED_REVIEW,
+    TriggerType.PARAMETER_OPTIMIZATION,
+    TriggerType.ESCALATION,
+}
+
+
+class ContextBuilder:
+    """
+    Assembles the complete TriggerContext for a reasoning loop iteration.
+    Orchestrates calls to external Petrosa microservices.
+    """
+
+    def __init__(
+        self,
+        data_manager_url: str,
+        tradeengine_url: str,
+        strategy_api_url: str,
+        vector_client: Optional[VectorClientProtocol] = None,
+    ):
+        self.data_manager_url = data_manager_url
+        self.tradeengine_url = tradeengine_url
+        self.strategy_api_url = strategy_api_url
+        self.vector_client = vector_client
+        self.client = httpx.AsyncClient(timeout=5.0)
+
+    async def build(
+        self,
+        correlation_id: str,
+        source_subject: str,
+        trigger_type: TriggerType,
+        payload: dict[str, Any],
+    ) -> TriggerContext:
+        """
+        Assembles a full TriggerContext.
+
+        Orchestration Logic:
+        1. Fetch Regime from Data-Manager.
+        2. Fetch Portfolio/Risk from TradeEngine.
+        3. Fetch Strategy specific data from the strategy service.
+        4. If trigger is COLD, fetch historical context from Vector DB.
+        5. Combine into TriggerContext.
+        """
+        logger.info(
+            "Building trigger context",
+            extra={
+                "correlation_id": correlation_id,
+                "trigger_type": trigger_type.value,
+            },
+        )
+
+        symbol = payload.get("symbol", "BTCUSDT")
+        strategy_id = payload.get("strategy_id", "unknown")
+
+        # Independent, fault-tolerant fetches
+        regime = await self._fetch_regime(symbol, correlation_id)
+        portfolio, risk, env_stats = await self._fetch_portfolio_and_risk(
+            symbol, correlation_id
+        )
+        stats, defaults = await self._fetch_strategy_data(strategy_id, correlation_id)
+
+        # 4. Fetch Historical Context (Epic 7 COLD Path only)
+        historical_context = None
+        if trigger_type in COLD_TRIGGERS and self.vector_client:
+            logger.info(
+                "COLD trigger detected; fetching historical context",
+                extra={"correlation_id": correlation_id, "strategy_id": strategy_id},
+            )
+            try:
+                historical_context = await self.vector_client.query(strategy_id)
+            except Exception as e:
+                logger.error(
+                    f"Failed to fetch historical context: {e}",
+                    extra={"correlation_id": correlation_id},
+                )
+
+        # Assemble TriggerContext
+        return TriggerContext(
+            correlation_id=correlation_id,
+            source_subject=source_subject,
+            trigger_type=trigger_type,
+            trigger_payload=payload,
+            regime=regime,
+            volatility_level=regime.volatility_level,
+            market_signals=MarketSignals(
+                signal_summary=payload.get("signal_summary", "Manual trigger"),
+                current_price=payload.get("current_price") or payload.get("price") or 0.0,
+                volatility_percentile=payload.get("volatility_percentile", 0.5),
+                trend_strength=payload.get("trend_strength", 0.0),
+                price_action_character=payload.get("price_action_character", "Neutral"),
+            ),
+            strategy_id=strategy_id,
+            strategy_stats=stats,
+            strategy_defaults=defaults,
+            global_drawdown_pct=env_stats.get("global_drawdown_pct", 0.0),
+            open_orders_global=env_stats.get("open_orders_global", 0),
+            open_orders_symbol=env_stats.get("open_orders_symbol", 0),
+            available_capital_usd=env_stats.get("available_capital_usd", 0.0),
+            portfolio=portfolio,
+            risk_limits=risk,
+            historical_context=historical_context,
+        )
+
+    async def _fetch_regime(self, symbol: str, correlation_id: str) -> RegimeResult:
+        """Fetches and maps regime data from petrosa-data-manager."""
+        try:
+            url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
+            response = await self.client.get(url)
+            response.raise_for_status()
+            api_resp = RegimeAPIResponse.model_validate(response.json())
+            return RegimeResult.from_api_response(api_resp)
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch regime: {e}", extra={"correlation_id": correlation_id}
+            )
+            # Return safe default
+            return RegimeResult(
+                regime="choppy",
+                regime_confidence="low",
+                volatility_level=VolatilityLevel.MEDIUM,
+                primary_signal="error",
+                thought_trace=f"Error fetching regime: {str(e)}",
+            )
+
+    async def _fetch_portfolio_and_risk(
+        self, symbol: str, correlation_id: str
+    ) -> tuple[PortfolioSummary, RiskLimits, dict[str, Any]]:
+        """Fetches portfolio and risk data from tradeengine."""
+        try:
+            url = f"{self.tradeengine_url}/state?symbol={symbol}"
+            response = await self.client.get(url)
+            response.raise_for_status()
+            data = response.json()
+
+            portfolio = PortfolioSummary(**data["portfolio"])
+            risk = RiskLimits(**data["risk_limits"])
+            env_stats = data["env_stats"]
+
+            return portfolio, risk, env_stats
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch portfolio/risk: {e}",
+                extra={"correlation_id": correlation_id},
+            )
+            # Safe conservative defaults (trigger blocks)
+            return (
+                PortfolioSummary(
+                    net_directional_exposure=1.0,
+                    same_asset_pct=1.0,
+                    open_positions_count=999,
+                ),
+                RiskLimits(
+                    max_drawdown_pct=0.0,
+                    max_orders_global=0,
+                    max_orders_per_symbol=0,
+                    max_position_size_usd=0.0,
+                ),
+                {
+                    "global_drawdown_pct": 1.0,
+                    "open_orders_global": 999,
+                    "available_capital_usd": 0.0,
+                },
+            )
+
+    async def _fetch_strategy_data(self, strategy_id: str, correlation_id: str) -> tuple[StrategyStats, StrategyDefaults]:
+        """Fetches strategy performance and config defaults."""
+        try:
+            url = f"{self.strategy_api_url}/strategy/{strategy_id}/config"
+            response = await self.client.get(url)
+            response.raise_for_status()
+            data = response.json()
+
+            stats = StrategyStats(**data["stats"])
+            defaults = StrategyDefaults(**data["defaults"])
+
+            return stats, defaults
+        except Exception as e:
+            logger.error(
+                f"Failed to fetch strategy data: {e}",
+                extra={"correlation_id": correlation_id},
+            )
+            # Safe defaults (conservative)
+            return (
+                StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL),
+                StrategyDefaults(
+                    stop_loss_pct=0.01,
+                    take_profit_pct=0.01,
+                    leverage=1.0,
+                    max_hold_hours=1.0,
+                ),
+            )
+
+    async def close(self):
+        await self.client.aclose()

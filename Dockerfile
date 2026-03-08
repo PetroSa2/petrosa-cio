@@ -32,7 +32,8 @@ FROM python:3.11-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/opt/venv/bin:$PATH"
+    PATH="/opt/venv/bin:$PATH" \
+    PYTHONPATH=/app
 
 WORKDIR /app
 
@@ -45,7 +46,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
-COPY . .
+COPY VERSION .
+COPY cio/ cio/
 
 # Create non-root user
 RUN useradd -m -u 1000 petrosa && \
@@ -53,8 +55,8 @@ RUN useradd -m -u 1000 petrosa && \
 
 USER petrosa
 
-# Expose API port
+# Expose API port (if needed in future, currently NATS only)
 EXPOSE 8000
 
 # Run the application
-CMD ["python", "main.py"]
+CMD ["python", "-m", "cio.main"]

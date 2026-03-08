@@ -22,7 +22,6 @@ Usage:
 
 import logging
 import os
-from typing import Optional
 
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
@@ -639,9 +638,9 @@ def check_otlp_health() -> dict:
             # Enabled but never attempted initialization (shouldn't happen, but handle it)
             health["tracing"]["status"] = "unknown"
             health["healthy"] = False
-            health["tracing"][
-                "error"
-            ] = "Initialization was expected but never attempted"
+            health["tracing"]["error"] = (
+                "Initialization was expected but never attempted"
+            )
 
     # Check metrics
     if health["metrics"]["enabled"]:
@@ -655,9 +654,9 @@ def check_otlp_health() -> dict:
             # Enabled but never attempted initialization
             health["metrics"]["status"] = "unknown"
             health["healthy"] = False
-            health["metrics"][
-                "error"
-            ] = "Initialization was expected but never attempted"
+            health["metrics"]["error"] = (
+                "Initialization was expected but never attempted"
+            )
 
     # Check logs
     if health["logs"]["enabled"]:
@@ -687,9 +686,9 @@ def check_otlp_health() -> dict:
             # Enabled but never attempted initialization
             health["http_instrumentation"]["status"] = "unknown"
             health["healthy"] = False
-            health["http_instrumentation"][
-                "error"
-            ] = "Initialization was expected but never attempted"
+            health["http_instrumentation"]["error"] = (
+                "Initialization was expected but never attempted"
+            )
 
     return health
 
