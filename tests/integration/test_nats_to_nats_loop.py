@@ -36,7 +36,7 @@ async def test_full_nats_to_nats_loop():
 
     tradeengine_data = {
         "portfolio": {
-            "net_directional_exposure": 0.1,
+            "gross_exposure": 0.1,
             "same_asset_pct": 0.05,
             "open_positions_count": 1,
         },
@@ -97,7 +97,6 @@ async def test_full_nats_to_nats_loop():
             builder = ContextBuilder(
                 data_manager_url="http://data-manager",
                 tradeengine_url="http://tradeengine",
-                strategy_api_url="http://strategy-api",
             )
 
             orchestrator = Orchestrator(cache=mock_cache)

@@ -30,7 +30,6 @@ async def test_context_builder_cold_path_retrieval():
     builder = ContextBuilder(
         data_manager_url="http://dm",
         tradeengine_url="http://te",
-        strategy_api_url="http://sa",
         vector_client=mock_vector,
     )
 
@@ -47,7 +46,7 @@ async def test_context_builder_cold_path_retrieval():
         stop_loss_pct=0.02, take_profit_pct=0.04, max_hold_hours=24
     )
     portfolio = PortfolioSummary(
-        net_directional_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
+        gross_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
     )
     risk = RiskLimits(
         max_drawdown_pct=0.1,

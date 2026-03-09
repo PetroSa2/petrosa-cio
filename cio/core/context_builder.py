@@ -208,12 +208,11 @@ class ContextBuilder:
         Consolidates analytics and configuration into the CIO context.
         """
         # Parallelize strategy-specific fetches
-        tasks = [
+        stats, defaults = await asyncio.gather(
             self._fetch_strategy_stats(strategy_id, correlation_id),
-            self._fetch_strategy_defaults(strategy_id, correlation_id)
-        ]
-        results = await asyncio.gather(*tasks)
-        return results[0], results[1]
+            self._fetch_strategy_defaults(strategy_id, correlation_id),
+        )
+        return stats, defaults
 
     async def _fetch_strategy_stats(self, strategy_id: str, correlation_id: str) -> StrategyStats:
         """Fetches historical performance metrics from Data Manager analysis API."""
@@ -240,9 +239,29 @@ class ContextBuilder:
             
             # Map Data Manager parameters to CIO StrategyDefaults
             params = data.get("parameters", {})
+            
+            # Prefer explicit non-None selection so falsy values like 0.0 are preserved
+            primary_sl = params.get("stop_loss_pct")
+            alias_sl = params.get("sl_pct")
+            if primary_sl is not None:
+                stop_loss_pct = primary_sl
+            elif alias_sl is not None:
+                stop_loss_pct = alias_sl
+            else:
+                stop_loss_pct = 0.02
+
+            primary_tp = params.get("take_profit_pct")
+            alias_tp = params.get("tp_pct")
+            if primary_tp is not None:
+                take_profit_pct = primary_tp
+            elif alias_tp is not None:
+                take_profit_pct = alias_tp
+            else:
+                take_profit_pct = 0.04
+
             return StrategyDefaults(
-                stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
-                take_profit_pct=params.get("take_profit_pct") or params.get("tp_pct", 0.04),
+                stop_loss_pct=stop_loss_pct,
+                take_profit_pct=take_profit_pct,
                 leverage=params.get("leverage", 1.0),
                 max_hold_hours=params.get("max_hold_hours", 24.0)
             )
