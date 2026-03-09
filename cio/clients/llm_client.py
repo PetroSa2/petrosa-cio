@@ -59,7 +59,17 @@ class CIO_LLM_Client(ABC):
 
         # 3. Pydantic validation + JSON parsing
         try:
-            return response_model.model_validate_json(raw.content)
+            content = raw.content.strip()
+            # Handle potential markdown wrapping
+            if content.startswith("```"):
+                # Find first and last newline to extract content between markers
+                lines = content.splitlines()
+                if len(lines) >= 2:
+                    # Remove first line (```json or ```) and last line (```)
+                    # Join middle lines
+                    content = "\n".join(lines[1:-1])
+
+            return response_model.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError) as e:
             logger.warning(
                 "LLM response validation failed — returning safe default",
@@ -182,10 +192,12 @@ class LiteLLMClient(CIO_LLM_Client):
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": json.dumps(user_context)},
                         ],
-                        response_format={"type": "json_object"}
-                        if "json_object"
-                        in litellm.get_supported_openai_params(primary_model)
-                        else None,
+                        response_format=(
+                            {"type": "json_object"}
+                            if "json_object"
+                            in litellm.get_supported_openai_params(primary_model)
+                            else None
+                        ),
                     )
 
             # Success on primary
@@ -209,10 +221,12 @@ class LiteLLMClient(CIO_LLM_Client):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
                     ],
-                    response_format={"type": "json_object"}
-                    if "json_object"
-                    in litellm.get_supported_openai_params(fallback_model)
-                    else None,
+                    response_format=(
+                        {"type": "json_object"}
+                        if "json_object"
+                        in litellm.get_supported_openai_params(fallback_model)
+                        else None
+                    ),
                 )
 
                 # Success on fallback

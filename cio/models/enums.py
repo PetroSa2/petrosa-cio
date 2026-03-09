@@ -1,7 +1,14 @@
-from enum import Enum
+try:
+    from enum import StrEnum
+except ImportError:
+    # Fallback for Python < 3.11
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        pass
 
 
-class RegimeEnum(str, Enum):
+class RegimeEnum(StrEnum):
     """Internal framework regimes used by LLM Personas and Decision Arbiter."""
 
     TRENDING_BULL = "trending_bull"
@@ -14,7 +21,7 @@ class RegimeEnum(str, Enum):
     CHOPPY = "choppy"
 
 
-class DataManagerRegimeEnum(str, Enum):
+class DataManagerRegimeEnum(StrEnum):
     """Exact regimes returned by petrosa-data-manager /analysis/regime API."""
 
     TURBULENT_ILLIQUIDITY = "turbulent_illiquidity"
@@ -28,7 +35,7 @@ class DataManagerRegimeEnum(str, Enum):
     UNKNOWN = "unknown"
 
 
-class VolatilityLevel(str, Enum):
+class VolatilityLevel(StrEnum):
     """Volatility classification levels.
 
     Note: EXTREME is framework-internal only. Not returned by data-manager API.
@@ -41,7 +48,7 @@ class VolatilityLevel(str, Enum):
     EXTREME = "extreme"
 
 
-class ConfidenceLevel(str, Enum):
+class ConfidenceLevel(StrEnum):
     """3-value enum for LLM and API confidence classification."""
 
     HIGH = "high"
@@ -49,7 +56,7 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     """Strategy health status based on performance delta."""
 
     HEALTHY = "healthy"
@@ -57,7 +64,7 @@ class HealthStatus(str, Enum):
     FAILING = "failing"
 
 
-class RegimeFit(str, Enum):
+class RegimeFit(StrEnum):
     """Qualitative fit of a strategy to the current market regime."""
 
     GOOD = "good"
@@ -65,7 +72,7 @@ class RegimeFit(str, Enum):
     POOR = "poor"
 
 
-class ActivationRecommendation(str, Enum):
+class ActivationRecommendation(StrEnum):
     """LLM recommendation for strategy activation level."""
 
     RUN = "run"
@@ -73,7 +80,7 @@ class ActivationRecommendation(str, Enum):
     PAUSE = "pause"
 
 
-class ActionType(str, Enum):
+class ActionType(StrEnum):
     """Final decision actions taken by the CIO."""
 
     EXECUTE = "execute"
@@ -84,7 +91,7 @@ class ActionType(str, Enum):
     ESCALATE = "escalate"
 
 
-class TriggerType(str, Enum):
+class TriggerType(StrEnum):
     """Types of events that trigger the CIO reasoning loop."""
 
     TRADE_INTENT = "trade_intent"
@@ -96,21 +103,21 @@ class TriggerType(str, Enum):
     ESCALATION = "escalation"
 
 
-class ParamChangeDirection(str, Enum):
+class ParamChangeDirection(StrEnum):
     """Direction of a parameter adjustment signal from the Strategy Assessor."""
 
     INCREASE = "increase"
     DECREASE = "decrease"
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     """Execution order types."""
 
     LIMIT = "limit"
     MARKET = "market"
 
 
-class ExitType(str, Enum):
+class ExitType(StrEnum):
     """Reasons for closing a trading position."""
 
     STOP_LOSS = "stop_loss"
@@ -121,7 +128,7 @@ class ExitType(str, Enum):
     OPPORTUNITY_COST = "opportunity_cost"
 
 
-class PnlTrend(str, Enum):
+class PnlTrend(StrEnum):
     """Qualitative trend of recent PnL."""
 
     POSITIVE = "positive"
