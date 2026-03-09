@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -39,13 +40,14 @@ class ContextBuilder:
         data_manager_url: str,
         tradeengine_url: str,
         strategy_api_url: str,
-        vector_client: VectorClientProtocol | None = None,
+        vector_client: Optional[VectorClientProtocol] = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
         self.strategy_api_url = strategy_api_url
         self.vector_client = vector_client
-        self.client = httpx.AsyncClient(timeout=5.0)
+        # Increased timeout to 15s to handle cluster latency under load
+        self.client = httpx.AsyncClient(timeout=15.0)
 
     async def build(
         self,
@@ -58,11 +60,9 @@ class ContextBuilder:
         Assembles a full TriggerContext.
 
         Orchestration Logic:
-        1. Fetch Regime from Data-Manager.
-        2. Fetch Portfolio/Risk from TradeEngine.
-        3. Fetch Strategy specific data from the strategy service.
-        4. If trigger is COLD, fetch historical context from Vector DB.
-        5. Combine into TriggerContext.
+        1. Fetch Regime, Portfolio/Risk, and Strategy data in parallel.
+        2. If trigger is COLD, fetch historical context from Vector DB.
+        3. Combine into TriggerContext.
         """
         logger.info(
             "Building trigger context",
@@ -75,27 +75,30 @@ class ContextBuilder:
         symbol = payload.get("symbol", "BTCUSDT")
         strategy_id = payload.get("strategy_id", "unknown")
 
-        # Independent, fault-tolerant fetches
-        regime = await self._fetch_regime(symbol, correlation_id)
-        portfolio, risk, env_stats = await self._fetch_portfolio_and_risk(
-            symbol, correlation_id
-        )
-        stats, defaults = await self._fetch_strategy_data(strategy_id, correlation_id)
+        # 1. Parallelize independent fetches to reduce total latency (max vs sum)
+        fetch_tasks = [
+            self._fetch_regime(symbol, correlation_id),
+            self._fetch_portfolio_and_risk(symbol, correlation_id),
+            self._fetch_strategy_data(strategy_id, correlation_id),
+        ]
 
-        # 4. Fetch Historical Context (Epic 7 COLD Path only)
-        historical_context = None
+        # 2. Add Vector retrieval if COLD path
+        vector_task = None
         if trigger_type in COLD_TRIGGERS and self.vector_client:
             logger.info(
-                "COLD trigger detected; fetching historical context",
+                "COLD trigger detected; adding historical context task",
                 extra={"correlation_id": correlation_id, "strategy_id": strategy_id},
             )
-            try:
-                historical_context = await self.vector_client.query(strategy_id)
-            except Exception as e:
-                logger.error(
-                    f"Failed to fetch historical context: {e}",
-                    extra={"correlation_id": correlation_id},
-                )
+            vector_task = self.vector_client.query(strategy_id)
+            fetch_tasks.append(vector_task)
+
+        # 3. Synchronize all gathers
+        results = await asyncio.gather(*fetch_tasks)
+        
+        regime = results[0]
+        portfolio, risk, env_stats = results[1]
+        stats, defaults = results[2]
+        historical_context = results[3] if vector_task else None
 
         # Assemble TriggerContext
         return TriggerContext(
