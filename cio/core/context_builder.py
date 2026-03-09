@@ -39,12 +39,10 @@ class ContextBuilder:
         self,
         data_manager_url: str,
         tradeengine_url: str,
-        strategy_api_url: str,
         vector_client: Optional[VectorClientProtocol] = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
-        self.strategy_api_url = strategy_api_url
         self.vector_client = vector_client
         # Increased timeout to 15s to handle cluster latency under load
         self.client = httpx.AsyncClient(timeout=15.0)
@@ -205,32 +203,55 @@ class ContextBuilder:
     async def _fetch_strategy_data(
         self, strategy_id: str, correlation_id: str
     ) -> tuple[StrategyStats, StrategyDefaults]:
-        """Fetches strategy performance and config defaults."""
+        """
+        Fetches strategy performance and DNA from the Data Manager.
+        Consolidates analytics and configuration into the CIO context.
+        """
+        # Parallelize strategy-specific fetches
+        tasks = [
+            self._fetch_strategy_stats(strategy_id, correlation_id),
+            self._fetch_strategy_defaults(strategy_id, correlation_id)
+        ]
+        results = await asyncio.gather(*tasks)
+        return results[0], results[1]
+
+    async def _fetch_strategy_stats(self, strategy_id: str, correlation_id: str) -> StrategyStats:
+        """Fetches historical performance metrics from Data Manager analysis API."""
         try:
-            url = f"{self.strategy_api_url}/strategy/{strategy_id}/config"
+            url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
-
-            stats = StrategyStats(**data["stats"])
-            defaults = StrategyDefaults(**data["defaults"])
-
-            return stats, defaults
+            return StrategyStats(**data["stats"])
         except Exception as e:
-            logger.error(
-                f"Failed to fetch strategy data: {e}",
-                extra={"correlation_id": correlation_id},
+            logger.warning(
+                f"Failed to fetch strategy stats for {strategy_id}: {e}",
+                extra={"correlation_id": correlation_id}
             )
-            # Safe defaults (conservative)
-            return (
-                StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL),
-                StrategyDefaults(
-                    stop_loss_pct=0.01,
-                    take_profit_pct=0.01,
-                    leverage=1.0,
-                    max_hold_hours=1.0,
-                ),
+            return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
+
+    async def _fetch_strategy_defaults(self, strategy_id: str, correlation_id: str) -> StrategyDefaults:
+        """Fetches strategy DNA (defaults) from Data Manager config API."""
+        try:
+            url = f"{self.data_manager_url}/api/v1/config/strategies/{strategy_id}"
+            response = await self.client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Map Data Manager parameters to CIO StrategyDefaults
+            params = data.get("parameters", {})
+            return StrategyDefaults(
+                stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
+                take_profit_pct=params.get("take_profit_pct") or params.get("tp_pct", 0.04),
+                leverage=params.get("leverage", 1.0),
+                max_hold_hours=params.get("max_hold_hours", 24.0)
             )
+        except Exception as e:
+            logger.warning(
+                f"Failed to fetch strategy defaults for {strategy_id}: {e}",
+                extra={"correlation_id": correlation_id}
+            )
+            return StrategyDefaults(stop_loss_pct=0.01, take_profit_pct=0.01, leverage=1.0, max_hold_hours=1.0)
 
     async def close(self):
         await self.client.aclose()

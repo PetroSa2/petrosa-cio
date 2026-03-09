@@ -108,7 +108,6 @@ async def main():
     builder = ContextBuilder(
         data_manager_url=data_manager_url,
         tradeengine_url=tradeengine_url,
-        strategy_api_url=ta_bot_url,
         vector_client=vector_client,
     )
 
