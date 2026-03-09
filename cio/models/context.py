@@ -33,7 +33,7 @@ class StrategyStats(BaseModel):
 class PortfolioSummary(BaseModel):
     """Aggregate portfolio state for exposure and concentration analysis."""
 
-    net_directional_exposure: float  # 0.0 - 1.0
+    gross_exposure: float  # 0.0 - 1.0
     same_asset_pct: float  # 0.0 - 1.0
     open_positions_count: int
 

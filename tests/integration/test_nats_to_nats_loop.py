@@ -36,7 +36,7 @@ async def test_full_nats_to_nats_loop():
 
     tradeengine_data = {
         "portfolio": {
-            "net_directional_exposure": 0.1,
+            "gross_exposure": 0.1,
             "same_asset_pct": 0.05,
             "open_positions_count": 1,
         },
@@ -79,12 +79,16 @@ async def test_full_nats_to_nats_loop():
 
     # Mock the AsyncClient.get method
     async def mock_get(url, **kwargs):
-        if "analysis/regime" in str(url):
+        url_str = str(url)
+        if "analysis/regime" in url_str:
             return create_mock_response(regime_data)
-        if "tradeengine/state" in str(url):
+        if "tradeengine/state" in url_str:
             return create_mock_response(tradeengine_data)
-        if "strategy" in str(url):
+        if "analysis/performance" in url_str:
             return create_mock_response(strategy_data)
+        if "config/strategies" in url_str:
+            # Wrap parameters for strategy DNA endpoint
+            return create_mock_response({"parameters": strategy_data["defaults"]})
         return create_mock_response({})
 
     # 2. Instantiate the full stack with mocked environment
@@ -97,7 +101,6 @@ async def test_full_nats_to_nats_loop():
             builder = ContextBuilder(
                 data_manager_url="http://data-manager",
                 tradeengine_url="http://tradeengine",
-                strategy_api_url="http://strategy-api",
             )
 
             orchestrator = Orchestrator(cache=mock_cache)

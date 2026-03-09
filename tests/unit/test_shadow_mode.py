@@ -70,7 +70,7 @@ async def test_output_router_shadow_mode():
         open_orders_symbol=0,
         available_capital_usd=10000.0,
         portfolio=PortfolioSummary(
-            net_directional_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
+            gross_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
         ),
         risk_limits=RiskLimits(
             max_drawdown_pct=0.1,

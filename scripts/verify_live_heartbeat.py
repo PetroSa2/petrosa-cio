@@ -51,7 +51,7 @@ async def run_simulation():
         elif "tradeengine/state" in str(url):
             m.json.return_value = {
                 "portfolio": {
-                    "net_directional_exposure": 0.1,
+                    "gross_exposure": 0.1,
                     "same_asset_pct": 0.05,
                     "open_positions_count": 1,
                 },
@@ -90,7 +90,6 @@ async def run_simulation():
         builder = ContextBuilder(
             data_manager_url="http://data-manager",
             tradeengine_url="http://tradeengine",
-            strategy_api_url="http://strategy-api",
         )
         from cio.core.vector import MockVectorClient
 

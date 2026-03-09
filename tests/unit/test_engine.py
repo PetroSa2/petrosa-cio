@@ -51,7 +51,7 @@ def build_test_context(drawdown=0.0, win_rate=0.6, capital=10000.0):
         open_orders_symbol=0,
         available_capital_usd=capital,
         portfolio=PortfolioSummary(
-            net_directional_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
+            gross_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
         ),
         risk_limits=RiskLimits(
             max_drawdown_pct=0.1,
