@@ -96,7 +96,7 @@ class OutputRouter:
             )
 
         # 3. Handle Dispatch execution (Checking DRY_RUN)
-        is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
+        is_dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
         nats_publish_tasks = []
 
         for subject, payload in dispatch_tasks_data:
