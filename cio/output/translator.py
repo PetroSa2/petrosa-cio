@@ -30,9 +30,13 @@ class TradeEngineTranslator:
 
         try:
             # 1. Critical Field Validation
-            side = context.trigger_payload.get(
-                "side"
-            )  # Expecting 'long'/'short' or 'buy'/'sell'
+            # Support multiple possible keys for the trade direction
+            side = (
+                context.trigger_payload.get("side")
+                or context.trigger_payload.get("action")
+                or context.trigger_payload.get("signal_type")
+            )
+
             current_price = context.market_signals.current_price
             quantity_usd = decision.computed_position_size_usd
 
@@ -44,12 +48,14 @@ class TradeEngineTranslator:
                         "has_side": bool(side),
                         "price": current_price,
                         "quantity_usd": quantity_usd,
+                        "payload_keys": list(context.trigger_payload.keys()),
                     },
                 )
                 return None
 
             # 2. Action Mapping and Quantity Translation
-            action = "buy" if side.lower() in ("long", "buy") else "sell"
+            side_lower = str(side).lower()
+            action = "buy" if side_lower in ("long", "buy", "bullish") else "sell"
 
             # CRITICAL FIX: Convert USD position size to base asset quantity
             base_quantity = quantity_usd / current_price
