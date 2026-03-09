@@ -70,8 +70,9 @@ async def main():
     nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     data_manager_url = os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:80")
-    tradeengine_url = os.getenv("TRADEENGINE_URL", "http://petrosa-tradeengine-service:80")
-    ta_bot_url = os.getenv("TA_BOT_URL", "http://petrosa-ta-bot-service:80")
+    tradeengine_url = os.getenv(
+        "TRADEENGINE_URL", "http://petrosa-tradeengine-service:80"
+    )
 
     # 2. Initialize Components
     nc = NATS()
@@ -141,7 +142,7 @@ async def main():
     api_port = int(os.getenv("API_PORT", "8000"))
     config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="warning")
     server = uvicorn.Server(config)
-    
+
     # Run uvicorn in a way that it doesn't block the main event loop entirely
     # or rather, run it as a task.
     asyncio.create_task(server.serve())

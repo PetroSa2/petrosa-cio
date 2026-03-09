@@ -79,12 +79,16 @@ async def test_full_nats_to_nats_loop():
 
     # Mock the AsyncClient.get method
     async def mock_get(url, **kwargs):
-        if "analysis/regime" in str(url):
+        url_str = str(url)
+        if "analysis/regime" in url_str:
             return create_mock_response(regime_data)
-        if "tradeengine/state" in str(url):
+        if "tradeengine/state" in url_str:
             return create_mock_response(tradeengine_data)
-        if "strategy" in str(url):
+        if "analysis/performance" in url_str:
             return create_mock_response(strategy_data)
+        if "config/strategies" in url_str:
+            # Wrap parameters for strategy DNA endpoint
+            return create_mock_response({"parameters": strategy_data["defaults"]})
         return create_mock_response({})
 
     # 2. Instantiate the full stack with mocked environment
