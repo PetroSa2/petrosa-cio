@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -39,7 +39,7 @@ class ContextBuilder:
         self,
         data_manager_url: str,
         tradeengine_url: str,
-        vector_client: VectorClientProtocol | None = None,
+        vector_client: Optional[VectorClientProtocol] = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
@@ -92,7 +92,7 @@ class ContextBuilder:
 
         # 3. Synchronize all gathers
         results = await asyncio.gather(*fetch_tasks)
-
+        
         regime = results[0]
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
@@ -133,7 +133,7 @@ class ContextBuilder:
             url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
             response = await self.client.get(url)
             response.raise_for_status()
-
+            
             data = response.json()
             # Defensive check: Data Manager sometimes returns 200 OK with an error message body
             if "message" in data and "No regime data" in data["message"]:
@@ -142,7 +142,7 @@ class ContextBuilder:
                     regime_confidence="low",
                     volatility_level=VolatilityLevel.MEDIUM,
                     primary_signal="data_manager_empty",
-                    thought_trace=f"Data Manager reports: {data['message']}",
+                    thought_trace=f"Data Manager reports: {data['message']}"
                 )
 
             api_resp = RegimeAPIResponse.model_validate(data)
@@ -208,15 +208,14 @@ class ContextBuilder:
         Consolidates analytics and configuration into the CIO context.
         """
         # Parallelize strategy-specific fetches
-        stats, defaults = await asyncio.gather(
+        tasks = [
             self._fetch_strategy_stats(strategy_id, correlation_id),
-            self._fetch_strategy_defaults(strategy_id, correlation_id),
-        )
-        return stats, defaults
+            self._fetch_strategy_defaults(strategy_id, correlation_id)
+        ]
+        results = await asyncio.gather(*tasks)
+        return results[0], results[1]
 
-    async def _fetch_strategy_stats(
-        self, strategy_id: str, correlation_id: str
-    ) -> StrategyStats:
+    async def _fetch_strategy_stats(self, strategy_id: str, correlation_id: str) -> StrategyStats:
         """Fetches historical performance metrics from Data Manager analysis API."""
         try:
             url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
@@ -227,59 +226,32 @@ class ContextBuilder:
         except Exception as e:
             logger.warning(
                 f"Failed to fetch strategy stats for {strategy_id}: {e}",
-                extra={"correlation_id": correlation_id},
+                extra={"correlation_id": correlation_id}
             )
             return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
 
-    async def _fetch_strategy_defaults(
-        self, strategy_id: str, correlation_id: str
-    ) -> StrategyDefaults:
+    async def _fetch_strategy_defaults(self, strategy_id: str, correlation_id: str) -> StrategyDefaults:
         """Fetches strategy DNA (defaults) from Data Manager config API."""
         try:
             url = f"{self.data_manager_url}/api/v1/config/strategies/{strategy_id}"
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
-
+            
             # Map Data Manager parameters to CIO StrategyDefaults
             params = data.get("parameters", {})
-
-            # Prefer explicit non-None selection so falsy values like 0.0 are preserved
-            primary_sl = params.get("stop_loss_pct")
-            alias_sl = params.get("sl_pct")
-            if primary_sl is not None:
-                stop_loss_pct = primary_sl
-            elif alias_sl is not None:
-                stop_loss_pct = alias_sl
-            else:
-                stop_loss_pct = 0.02
-
-            primary_tp = params.get("take_profit_pct")
-            alias_tp = params.get("tp_pct")
-            if primary_tp is not None:
-                take_profit_pct = primary_tp
-            elif alias_tp is not None:
-                take_profit_pct = alias_tp
-            else:
-                take_profit_pct = 0.04
-
             return StrategyDefaults(
-                stop_loss_pct=stop_loss_pct,
-                take_profit_pct=take_profit_pct,
+                stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
+                take_profit_pct=params.get("take_profit_pct") or params.get("tp_pct", 0.04),
                 leverage=params.get("leverage", 1.0),
-                max_hold_hours=params.get("max_hold_hours", 24.0),
+                max_hold_hours=params.get("max_hold_hours", 24.0)
             )
         except Exception as e:
             logger.warning(
                 f"Failed to fetch strategy defaults for {strategy_id}: {e}",
-                extra={"correlation_id": correlation_id},
+                extra={"correlation_id": correlation_id}
             )
-            return StrategyDefaults(
-                stop_loss_pct=0.01,
-                take_profit_pct=0.01,
-                leverage=1.0,
-                max_hold_hours=1.0,
-            )
+            return StrategyDefaults(stop_loss_pct=0.01, take_profit_pct=0.01, leverage=1.0, max_hold_hours=1.0)
 
     async def close(self):
         await self.client.aclose()
