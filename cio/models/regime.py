@@ -43,7 +43,7 @@ class RegimeAPIData(BaseModel):
     volatility_level: VolatilityLevel
     volume_level: str
     trend_direction: str
-    confidence: str  # Received as string (e.g., "0.85") from API
+    confidence: str | float  # Support both string and float from API
 
 
 class RegimeAPIMetadata(BaseModel):
