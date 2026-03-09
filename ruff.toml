@@ -18,7 +18,6 @@ select = [
 extend-ignore = [
     "E501",    # line too long (ruff format handles this)
     "E722",    # bare except
-    "UP042",   # Class inherits from both str and Enum (StrEnum introduced in 3.11)
 ]
 
 exclude = [
