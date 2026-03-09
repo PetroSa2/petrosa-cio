@@ -135,7 +135,19 @@ class ContextBuilder:
             url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
             response = await self.client.get(url)
             response.raise_for_status()
-            api_resp = RegimeAPIResponse.model_validate(response.json())
+            
+            data = response.json()
+            # Defensive check: Data Manager sometimes returns 200 OK with an error message body
+            if "message" in data and "No regime data" in data["message"]:
+                return RegimeResult(
+                    regime="choppy",
+                    regime_confidence="low",
+                    volatility_level=VolatilityLevel.MEDIUM,
+                    primary_signal="data_manager_empty",
+                    thought_trace=f"Data Manager reports: {data['message']}"
+                )
+
+            api_resp = RegimeAPIResponse.model_validate(data)
             return RegimeResult.from_api_response(api_resp)
         except Exception as e:
             logger.error(
