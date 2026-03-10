@@ -94,6 +94,11 @@ class CIO_LLM_Client(ABC):
         pass
 
 
+# Default Model Pins (Fix 5)
+DEFAULT_PRIMARY_MODEL = "anthropic/claude-3-haiku-20240307"
+DEFAULT_FALLBACK_MODEL = "openai/gpt-4o-mini"
+
+
 class LiteLLMClient(CIO_LLM_Client):
     """Concrete implementation using litellm for multi-provider access."""
 
@@ -156,8 +161,8 @@ class LiteLLMClient(CIO_LLM_Client):
                 timestamp=datetime.utcnow(),
             )
 
-        primary_model = os.getenv("LLM_MODEL", "anthropic/claude-3-haiku-20240307")
-        fallback_model = os.getenv("LLM_FALLBACK_MODEL", "openai/gpt-4o-mini")
+        primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
+        fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         api_base = os.getenv("LLM_API_BASE")
 
         # When using a proxy like Requesty, we prefix with 'openai/' to ensure
