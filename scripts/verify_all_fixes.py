@@ -1,3 +1,9 @@
+import asyncio
+import logging
+import os
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from cio.clients.llm_client import DEFAULT_FALLBACK_MODEL, DEFAULT_PRIMARY_MODEL
 from cio.core.context_builder import ContextBuilder
 from cio.core.engine import CodeEngine
@@ -16,12 +22,6 @@ from cio.models import (
     TriggerContext,
     VolatilityLevel,
 )
-
-import asyncio
-import logging
-import os
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
 
 # Add petrosa-cio to path
 sys.path.append(os.getcwd())
