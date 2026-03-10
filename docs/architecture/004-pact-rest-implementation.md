@@ -84,7 +84,7 @@ sequenceDiagram
 ### Phase 3: Decommissioning the "Ghost"
 6. **Feature Flag**: Enable "REST-Tuning" via environment variable.
 7. **Observer Mode**: Run changes through REST but keep NATS as a secondary log (for 48 hours).
-8. **Hard Cut**: Remove the `strategy.config.update` NATS publishing logic entirely.
+8. **Final Cut**: NATS publishing logic for strategy updates removed.
 
 ---
 
