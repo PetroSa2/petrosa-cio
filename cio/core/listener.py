@@ -57,6 +57,15 @@ class NATSListener:
         # 2. Parse Payload
         try:
             payload = json.loads(msg.data.decode())
+            logger.info(
+                f"Received NATS payload on {msg.subject}",
+                extra={
+                    "correlation_id": correlation_id,
+                    "payload_keys": list(payload.keys()),
+                    "symbol": payload.get("symbol"),
+                    "action": payload.get("action"),
+                },
+            )
         except Exception as e:
             logger.error(
                 f"Failed to parse NATS payload: {e}",
