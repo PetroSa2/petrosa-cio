@@ -4,6 +4,9 @@ import logging
 import os
 from typing import Protocol
 
+import httpx
+
+from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
 from cio.output.translator import TradeEngineTranslator
@@ -29,13 +32,13 @@ class OutputRouter:
         vector_client: VectorClientProtocol,
         ta_bot_url: str,
         realtime_strategies_url: str,
+        cache=None,
     ):
-        import httpx
-
         self.nats_client = nats_client
         self.vector_client = vector_client
         self.ta_bot_url = ta_bot_url
         self.realtime_strategies_url = realtime_strategies_url
+        self.cache = cache
 
         self.http_client = httpx.AsyncClient(
             headers={
@@ -96,12 +99,73 @@ class OutputRouter:
             )
 
         elif action == ActionType.MODIFY_PARAMS:
-            dispatch_tasks_data.append(
-                (
-                    f"strategy.config.update.{strategy_id}",
-                    decision.model_dump_json().encode(),
-                )
+            # a. Call TargetServiceResolver.resolve(strategy_id)
+            target_service = TargetServiceResolver.resolve(strategy_id)
+
+            # b. Build the base URL from the resolved service
+            base_url = (
+                self.ta_bot_url
+                if target_service == ServiceType.TA_BOT
+                else self.realtime_strategies_url
             )
+
+            # c. Build the payload with parameters, changed_by, reason, validate_only
+            params_dict = {}
+            if decision.param_change:
+                params_dict = {
+                    decision.param_change.param: decision.param_change.new_value
+                }
+
+            payload = {
+                "parameters": params_dict,
+                "changed_by": "petrosa-cio",
+                "reason": decision.justification or "CIO automated parameter adjustment",
+                "validate_only": False,
+            }
+
+            # d. Await the POST call
+            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+            try:
+                response = await self.http_client.post(url, json=payload)
+
+                # e. If response status >= 400: log FAILED_TO_APPLY
+                if response.status_code >= 400:
+                    logger.error(
+                        "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
+                        strategy_id,
+                        response.status_code,
+                        response.text,
+                        extra={"correlation_id": correlation_id},
+                    )
+                else:
+                    # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
+                    logger.info(
+                        "SUCCESS: Parameter change applied via REST to %s",
+                        strategy_id,
+                        extra={"correlation_id": correlation_id},
+                    )
+                    if self.cache:
+                        freeze_key = f"cio:freeze:{strategy_id}"
+                        await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+                        logger.info(
+                            "Param freeze set for %s (1800s)",
+                            strategy_id,
+                            extra={"correlation_id": correlation_id},
+                        )
+                    else:
+                        logger.warning(
+                            "FREEZE_SKIPPED: cache unavailable for strategy %s. "
+                            "Feedback loop protection is inactive for this change.",
+                            strategy_id,
+                            extra={"correlation_id": correlation_id},
+                        )
+            except Exception as e:
+                logger.error(
+                    "Error applying parameter change via REST: %s",
+                    str(e),
+                    extra={"correlation_id": correlation_id},
+                )
+
         elif action == ActionType.PAUSE_STRATEGY:
             dispatch_tasks_data.append(
                 (

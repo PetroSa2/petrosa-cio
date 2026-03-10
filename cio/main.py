@@ -122,6 +122,7 @@ async def main():
         vector_client=vector_client,
         ta_bot_url=ta_bot_url,
         realtime_strategies_url=realtime_strategies_url,
+        cache=cache,
     )
 
     listener = NATSListener(
