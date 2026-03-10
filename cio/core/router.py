@@ -167,12 +167,51 @@ class OutputRouter:
                 )
 
         elif action == ActionType.PAUSE_STRATEGY:
-            dispatch_tasks_data.append(
-                (
-                    f"strategy.control.pause.{strategy_id}",
-                    decision.model_dump_json().encode(),
-                )
+            # a. Resolve service using TargetServiceResolver
+            target_service = TargetServiceResolver.resolve(strategy_id)
+
+            # b. Build base URL from resolved service
+            base_url = (
+                self.ta_bot_url
+                if target_service == ServiceType.TA_BOT
+                else self.realtime_strategies_url
             )
+
+            # c. Payload must be exactly:
+            payload = {
+                "parameters": {"enabled": False},
+                "changed_by": "petrosa-cio",
+                "reason": "CIO_PAUSE: " + (decision.justification or "automated pause"),
+                "validate_only": False,
+            }
+
+            # d. Await the POST call to /api/v1/strategies/{strategy_id}/config
+            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+            try:
+                response = await self.http_client.post(url, json=payload)
+
+                # e. If response status >= 400: log FAILED_TO_APPLY
+                if response.status_code >= 400:
+                    logger.error(
+                        "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
+                        strategy_id,
+                        response.status_code,
+                        response.text,
+                        extra={"correlation_id": correlation_id},
+                    )
+                else:
+                    # f. If response 2xx: log SUCCESS
+                    logger.info(
+                        "SUCCESS: Strategy %s paused via REST",
+                        strategy_id,
+                        extra={"correlation_id": correlation_id},
+                    )
+            except Exception as e:
+                logger.error(
+                    "Error applying strategy pause via REST: %s",
+                    str(e),
+                    extra={"correlation_id": correlation_id},
+                )
         elif action == ActionType.ESCALATE:
             dispatch_tasks_data.append(
                 (f"cio.escalation.{strategy_id}", decision.model_dump_json().encode())
