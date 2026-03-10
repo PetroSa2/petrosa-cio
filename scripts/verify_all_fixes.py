@@ -142,7 +142,9 @@ async def verify_fixes():
     )
 
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
-        with patch.object(router.http_client, "post", new_callable=AsyncMock) as mock_post:
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
             mock_post.return_value.status_code = 200
             await router.route(context, decision_pause)
             assert mock_nats.publish.call_count == 0
