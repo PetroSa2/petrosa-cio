@@ -141,13 +141,14 @@ async def verify_fixes():
         thought_trace="Testing Fix 1",
     )
 
-    with patch.object(router.http_client, "post", new_callable=AsyncMock) as mock_post:
-        mock_post.return_value.status_code = 200
-        await router.route(context, decision_pause)
-        assert mock_nats.publish.call_count == 0
-        mock_post.assert_called_once()
-        call_url = mock_post.call_args[0][0]
-        assert "http://ta-bot/api/v1/strategies/momentum_pulse/config" in call_url
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(router.http_client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value.status_code = 200
+            await router.route(context, decision_pause)
+            assert mock_nats.publish.call_count == 0
+            mock_post.assert_called_once()
+            call_url = mock_post.call_args[0][0]
+            assert "http://ta-bot/api/v1/strategies/momentum_pulse/config" in call_url
 
     print("✅ Fix 1 Verified: PAUSE_STRATEGY uses REST POST to TA-bot.")
 
