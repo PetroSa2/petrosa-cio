@@ -863,11 +863,11 @@
    ```
    S0: Define RegimeResult, StrategyResult, ActionResult Pydantic models
        Define SAFE_DEFAULTS keyed by prompt_id
-       
+
    S1: complete_with_schema takes response_model: type[BaseModel]
        Validator calls model.model_validate_json()
        SAFE_DEFAULTS is the fallback
-       
+
    S2: MockLLMClient loads YAML files at init
        Validates incoming context against required_context_fields
        Routes to fixture based on prompt_id
@@ -2313,7 +2313,7 @@
    ```python
    class VolatilityLevel(str, Enum):
        """Volatility classification levels.
-       
+
        Note: EXTREME is framework-internal only. Not returned by data-manager API.
        Set by Code Engine when internal volatility calculation exceeds HIGH threshold.
        """
@@ -4544,7 +4544,7 @@ Note: Newest last, oldest first
    ### S1 AC checklist before closing
 
    - `json.JSONDecodeError` caught alongside `ValidationError` ✅ needed
-   - `ClientFactory.reset()` added for test isolation ✅ needed  
+   - `ClientFactory.reset()` added for test isolation ✅ needed
    - Logging implemented for transport errors and validation failures ✅ needed
    - `LLM_PROVIDER` unknown value raises in production ✅ needed
    - Import verification: `python -c "from apps.strategist.clients.factory import ClientFactory; print('OK')"` ✅ run this
@@ -7969,7 +7969,7 @@ Note: Newest last, oldest first
    - Set `LLM_PROVIDER=mock`
    - Build a `TriggerContext` with `market_signals` where `trend_strength=0.92` (should trigger `trending_bull`)
    - Ensure no regime is seeded in cache (cold start)
-   - Call `orchestrator.run(context)` 
+   - Call `orchestrator.run(context)`
    - Since the Orchestrator still returns `SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]` at the end, instead directly assert that
    `regime_analyst.classify(context)` returns `regime=RegimeEnum.TRENDING_BULL` and `regime_confidence=ConfidenceLevel.HIGH`
    - Use `logging` throughout, no `print()`
@@ -9772,4 +9772,3 @@ Note: Newest last, oldest first
 
   💻 John:
   "Yurisa2, Epic 4 has begun. We're wiring the CIO to the actual NATS bus and making it a live service. Ready to start the NATS Integration?"
-

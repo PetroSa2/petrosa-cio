@@ -141,14 +141,14 @@ jobs:
           # Update the image tag in manifests robustly (preserves registry/repo, only updates tag)
           # Handles both qualified (e.g., repo/petrosa-cio:tag) and unqualified (petrosa-cio:tag) image names
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s|(image:[[:space:]]*)([^[:space:]]*/)?(petrosa-cio):[^[:space:]]*|\1\2\3:$VERSION|g"
-          
+
           # Update version labels specifically (targets common label patterns)
           # Anchored to start of line to prevent over-matching apiVersion
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s/^([[:space:]]*(version|app\.kubernetes\.io\/version)):.*/\1: $VERSION/g"
-          
+
           # Also handle any lingering placeholders for backward compatibility
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
-          
+
           echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
 
       - name: Commit and push to petrosa_k8s
@@ -196,7 +196,7 @@ jobs:
     - name: Notify Deployment Status
       run: |
         VERSION="${{ needs.create-release.outputs.version }}"
-        
+
         if [ "${{ needs.gitops-update.result }}" == "success" ]; then
           echo "✅ Build, Push, and GitOps Update successful!"
           echo "📦 Version: ${VERSION}"

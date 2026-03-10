@@ -1,3 +1,22 @@
+from cio.clients.llm_client import DEFAULT_FALLBACK_MODEL, DEFAULT_PRIMARY_MODEL
+from cio.core.context_builder import ContextBuilder
+from cio.core.engine import CodeEngine
+from cio.core.router import OutputRouter
+from cio.models import (
+    ActionType,
+    ActivationRecommendation,
+    ConfidenceLevel,
+    DecisionResult,
+    HealthStatus,
+    RegimeEnum,
+    RegimeFit,
+    RiskLimits,
+    StrategyDefaults,
+    StrategyStats,
+    TriggerContext,
+    VolatilityLevel,
+)
+
 import asyncio
 import logging
 import os
@@ -7,37 +26,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # Add petrosa-cio to path
 sys.path.append(os.getcwd())
 
-from cio.core.engine import CodeEngine
-from cio.core.router import OutputRouter
-from cio.core.context_builder import ContextBuilder
-from cio.models import (
-    ActionType,
-    DecisionResult,
-    RegimeEnum,
-    TriggerContext,
-    TriggerType,
-    VolatilityLevel,
-    RegimeResult,
-    RiskLimits,
-    StrategyDefaults,
-    StrategyStats,
-    PortfolioSummary,
-    MarketSignals,
-    ConfidenceLevel,
-    RegimeFit,
-    HealthStatus,
-    ActivationRecommendation,
-)
-from cio.clients.llm_client import DEFAULT_PRIMARY_MODEL, DEFAULT_FALLBACK_MODEL
 
 async def verify_fixes():
     print("🚀 Starting local verification of all 5 fixes...")
     logging.basicConfig(level=logging.ERROR)
-    
+
     # --- FIX 2 VERIFICATION (Quarantine) ---
     print("\n[Fix 2] Verifying MCP Quarantine Stubs...")
     try:
         from cio.stubs.roi_engine import ShadowROIEngine
+
         assert ShadowROIEngine is not None
         print("✅ Fix 2 Verified: ShadowROIEngine stub exists.")
     except ImportError as e:
@@ -54,13 +52,21 @@ async def verify_fixes():
     print("\n[Fix 3] Verifying SECURITY_WARNING logging when token is missing...")
     with patch.dict(os.environ, {"PETROSA_INTERNAL_TOKEN": ""}):
         with patch("cio.core.router.logger.warning") as mock_warn_router:
-            router = OutputRouter(AsyncMock(), AsyncMock(), "http://ta-bot", "http://realtime")
-            warn_router_called = any("SECURITY_WARNING" in str(call) for call in mock_warn_router.call_args_list)
+            router = OutputRouter(
+                AsyncMock(), AsyncMock(), "http://ta-bot", "http://realtime"
+            )
+            warn_router_called = any(
+                "SECURITY_WARNING" in str(call)
+                for call in mock_warn_router.call_args_list
+            )
             assert warn_router_called
-            
+
         with patch("cio.core.context_builder.logger.warning") as mock_warn_builder:
             ContextBuilder("http://data-manager", "http://tradeengine")
-            warn_builder_called = any("SECURITY_WARNING" in str(call) for call in mock_warn_builder.call_args_list)
+            warn_builder_called = any(
+                "SECURITY_WARNING" in str(call)
+                for call in mock_warn_builder.call_args_list
+            )
             assert warn_builder_called
     print("✅ Fix 3 Verified: SECURITY_WARNING fires when token is missing.")
 
@@ -71,7 +77,12 @@ async def verify_fixes():
     context_capitulation.regime.regime = RegimeEnum.CAPITULATION
     context_capitulation.correlation_id = "test-id"
     context_capitulation.global_drawdown_pct = 0.0
-    context_capitulation.risk_limits = RiskLimits(max_drawdown_pct=0.1, max_orders_global=10, max_orders_per_symbol=5, max_position_size_usd=1000)
+    context_capitulation.risk_limits = RiskLimits(
+        max_drawdown_pct=0.1,
+        max_orders_global=10,
+        max_orders_per_symbol=5,
+        max_position_size_usd=1000,
+    )
     context_capitulation.open_orders_global = 0
     context_capitulation.open_orders_symbol = 0
 
@@ -84,11 +95,18 @@ async def verify_fixes():
     context_bull = MagicMock(spec=TriggerContext)
     context_bull.regime = MagicMock()
     context_bull.regime.regime = RegimeEnum.TRENDING_BULL
-    context_bull.strategy_defaults = StrategyDefaults(take_profit_pct=0.02, stop_loss_pct=0.01, leverage=3.0, max_hold_hours=24)
+    context_bull.strategy_defaults = StrategyDefaults(
+        take_profit_pct=0.02, stop_loss_pct=0.01, leverage=3.0, max_hold_hours=24
+    )
     context_bull.volatility_level = VolatilityLevel.LOW
     context_bull.strategy_stats = StrategyStats(win_rate=0.5)
     context_bull.global_drawdown_pct = 0.0
-    context_bull.risk_limits = RiskLimits(max_drawdown_pct=0.1, max_orders_global=10, max_orders_per_symbol=5, max_position_size_usd=1000)
+    context_bull.risk_limits = RiskLimits(
+        max_drawdown_pct=0.1,
+        max_orders_global=10,
+        max_orders_per_symbol=5,
+        max_position_size_usd=1000,
+    )
     context_bull.open_orders_global = 0
     context_bull.open_orders_symbol = 0
     context_bull.available_capital_usd = 10000.0
@@ -102,12 +120,14 @@ async def verify_fixes():
     print("\n[Fix 1] Verifying PAUSE_STRATEGY uses REST POST instead of NATS...")
     mock_nats = AsyncMock()
     mock_cache = AsyncMock()
-    router = OutputRouter(mock_nats, AsyncMock(), "http://ta-bot", "http://realtime", cache=mock_cache)
-    
+    router = OutputRouter(
+        mock_nats, AsyncMock(), "http://ta-bot", "http://realtime", cache=mock_cache
+    )
+
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "momentum_pulse"
     context.correlation_id = "rest-test-id"
-    
+
     decision_pause = DecisionResult(
         hard_blocked=False,
         ev_passes=False,
@@ -118,7 +138,7 @@ async def verify_fixes():
         activation_recommendation=ActivationRecommendation.RUN,
         action=ActionType.PAUSE_STRATEGY,
         justification="Test pause",
-        thought_trace="Testing Fix 1"
+        thought_trace="Testing Fix 1",
     )
 
     with patch.object(router.http_client, "post", new_callable=AsyncMock) as mock_post:
@@ -128,10 +148,11 @@ async def verify_fixes():
         mock_post.assert_called_once()
         call_url = mock_post.call_args[0][0]
         assert "http://ta-bot/api/v1/strategies/momentum_pulse/config" in call_url
-        
+
     print("✅ Fix 1 Verified: PAUSE_STRATEGY uses REST POST to TA-bot.")
 
     print("\n🎉 ALL FIXES VERIFIED LOCALLY!")
+
 
 if __name__ == "__main__":
     asyncio.run(verify_fixes())

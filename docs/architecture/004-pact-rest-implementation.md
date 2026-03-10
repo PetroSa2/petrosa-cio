@@ -1,9 +1,9 @@
 
 # Petrosa Autonomous Configuration Tuning (PACT) - Technical Specification
 
-**Version**: 1.0.0  
-**Status**: Draft for Review  
-**Owners**: Architecture Team, Yurisa2  
+**Version**: 1.0.0
+**Status**: Draft for Review
+**Owners**: Architecture Team, Yurisa2
 **Related ADRs**: [ADR-003: CIO Intelligence Framework](../../docs/architecture/003-cio-intelligence-framework.md)
 
 ---
@@ -34,7 +34,7 @@ sequenceDiagram
 
     TA->>CIO: Publish Intent (NATS: cio.intent.trading)
     Note over CIO: Decision Loop (Reasoning)
-    
+
     CIO->>DM: POST /api/v1/config/validate (Pre-flight)
     DM-->>CIO: 200 OK (Validated)
 

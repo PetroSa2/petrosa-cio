@@ -11,10 +11,11 @@ from typing import Any
 
 # --- QUARANTINE BLOCK (Fix 2c) ---
 try:
-    from cio.stubs.roi_engine import ShadowROIEngine
-    from cio.memory import InstitutionalMemoryService
     from core.config_manager import ConfigManager
     from core.utils.schema_parser import discover_schema_models, generate_tools
+
+    from cio.memory import InstitutionalMemoryService
+    from cio.stubs.roi_engine import ShadowROIEngine
 
     MCP_SERVER_AVAILABLE = True
     MCP_IMPORT_ERROR = None
@@ -32,6 +33,8 @@ except ImportError as e:
 
     def generate_tools(path: str) -> list:
         return []
+
+
 # --- END QUARANTINE ---
 
 try:

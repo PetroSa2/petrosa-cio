@@ -184,28 +184,28 @@ When the system wants to override a risk limit (e.g., temporarily increase max p
 # Pseudocode — not implementation
 def reasoning_loop(trigger):
     context = build_context(trigger)
-    
+
     # Step 1: Ground truth
     regime = RegimeAnalyst.run(context)
     if regime.confidence < 0.5:
         return Decision(action="skip", reason="regime uncertain")
-    
+
     # Step 2: Hard limits first
     risk = RiskManager.run(context, regime)
     if risk.hard_limit_breached:
         return Decision(action="block", reason=risk.reason)
-    
+
     # Step 3: Full analysis (warm/cold only)
     if trigger.class in [WARM, COLD]:
         quant = QuantAnalyst.run(context, regime)
         strategy = StrategySpecialist.run(context, regime)
         portfolio = PortfolioManager.run(context, regime, quant)
         treasury = TreasuryManager.run(context, quant)
-    
+
     # Step 4: Synthesize
     verdicts = VerdictBundle(regime, risk, quant, strategy, portfolio, treasury)
     decision = Arbiter.run(verdicts)
-    
+
     log_decision(trigger, context, verdicts, decision)
     return decision
 ```

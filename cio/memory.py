@@ -28,9 +28,11 @@ class InstitutionalMemoryService:
             "event_type": audit_document.get("event_type"),
             "timestamp": audit_document.get("updated_at"),
             "pnl_impact": self._extract_pnl_impact(audit_document),
-            "outcome": "success"
-            if audit_document.get("event_type") == "config_update"
-            else "failure",
+            "outcome": (
+                "success"
+                if audit_document.get("event_type") == "config_update"
+                else "failure"
+            ),
         }
         return await self.vector_client.upsert_trace(
             trace=thought_trace, metadata=metadata

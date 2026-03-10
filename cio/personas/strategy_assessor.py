@@ -53,13 +53,13 @@ class StrategyAssessor:
             "win_rate": stats.win_rate,
             "win_rate_delta": stats.win_rate_delta,
             "consecutive_losses": stats.consecutive_losses,
-            "recent_pnl_trend": stats.recent_pnl_trend.value
-            if stats.recent_pnl_trend
-            else None,
+            "recent_pnl_trend": (
+                stats.recent_pnl_trend.value if stats.recent_pnl_trend else None
+            ),
             "regime": regime.regime.value if regime.regime else None,
-            "regime_confidence": regime.regime_confidence.value
-            if regime.regime_confidence
-            else None,
+            "regime_confidence": (
+                regime.regime_confidence.value if regime.regime_confidence else None
+            ),
             "historical_context": context.historical_context,
         }
 

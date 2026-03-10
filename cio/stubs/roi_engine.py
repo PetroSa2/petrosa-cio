@@ -1,7 +1,9 @@
 # DEPRECATION_NOTICE: This is a temporary stub for ShadowROIEngine for Fix 2. Pending real component relocation.
 
 from __future__ import annotations
+
 from typing import Any
+
 
 class ShadowROIEngine:
     """
@@ -17,5 +19,5 @@ class ShadowROIEngine:
             "status": "UNAVAILABLE",
             "actual_pnl": 0.0,
             "shadow_roi": 0.0,
-            "message": "NURSE_ROI_ENGINE_OFFLINE: This component is currently in maintenance. Contact Architecture for ROI-Enforcer status."
+            "message": "NURSE_ROI_ENGINE_OFFLINE: This component is currently in maintenance. Contact Architecture for ROI-Enforcer status.",
         }

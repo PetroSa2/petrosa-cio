@@ -80,16 +80,20 @@ class ActionClassifier:
         return {
             "strategy_id": context.strategy_id,
             "regime": regime_result.regime.value if regime_result.regime else None,
-            "regime_confidence": regime_result.regime_confidence.value
-            if regime_result.regime_confidence
-            else None,
+            "regime_confidence": (
+                regime_result.regime_confidence.value
+                if regime_result.regime_confidence
+                else None
+            ),
             "health": strategy_result.health.value if strategy_result.health else None,
-            "activation_recommendation": strategy_result.activation_recommendation.value
-            if strategy_result.activation_recommendation
-            else None,
-            "regime_fit": strategy_result.regime_fit.value
-            if strategy_result.regime_fit
-            else None,
+            "activation_recommendation": (
+                strategy_result.activation_recommendation.value
+                if strategy_result.activation_recommendation
+                else None
+            ),
+            "regime_fit": (
+                strategy_result.regime_fit.value if strategy_result.regime_fit else None
+            ),
             "gross_ev": code_result.gross_ev,
             "ev_unavailable": code_result.ev_unavailable,
             "kelly_position_usd": code_result.kelly_position_usd,

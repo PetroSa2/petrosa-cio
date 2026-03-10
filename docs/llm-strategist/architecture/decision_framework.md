@@ -39,25 +39,25 @@ The core reasoning loop orchestrates the interaction between the Code Engine and
 
 def reasoning_loop(trigger):
     context = build_context(trigger)
-    
+
     # Step 1: Code Engine - Hard Limits & Calculations
     code_result = CodeEngine.run(context)
     if code_result.hard_blocked:
         return Decision(action="block", reason=code_result.hard_block_reason)
-    
+
     # Step 2: LLM - Regime Classification (Cached)
     regime_result = RegimeClassifier.run(context)
     if regime_result.confidence < CONFIDENCE_THRESHOLDS["medium"]:
          # Low confidence -> skip trade
         return Decision(action="skip", reason="regime uncertain")
-    
+
     # Step 3: LLM - Strategy Assessment (Cached)
     strategy_result = StrategyAssessor.run(context, regime_result)
-    
+
     # Step 4: LLM - Action Classification
     # Synthesizes Code Engine numbers + Regime/Strategy qualitative flags
     action_result = ActionClassifier.run(code_result, regime_result, strategy_result)
-    
+
     # Step 5: Assembly & output
     decision = DecisionAssembler.assemble(code_result, regime_result, strategy_result, action_result)
     log_decision(decision)

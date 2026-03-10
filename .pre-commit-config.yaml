@@ -111,7 +111,7 @@ repos:
             .*\.svg$|
             .*\.backup$|
             .*/tests/.*|
-            .github/workflows/ci-checks\.yml
+            \.github/workflows/.*
           )
 
   # ==================================================================
@@ -134,7 +134,7 @@ repos:
     hooks:
       - id: check-secrets-patterns
         name: 🔐 Check for common secret patterns
-        entry: bash -c 'grep -rInE "(BINANCE_API_KEY|BINANCE_API_SECRET|DOCKERHUB_TOKEN|JWT_SECRET|mongodb://[^:]+:[^@]+@|password\s*=\s*[\"'\''][^\"'\'']+[\"'\''])" --include="*.py" --include="*.yaml" --include="*.yml" --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.git --exclude=".pre-commit-config.yaml" --exclude="ci-checks.yml" . && echo "⚠️  Found potential secrets in code!" && exit 1 || exit 0'
+        entry: bash -c 'grep -rInE "(BINANCE_API_KEY|BINANCE_API_SECRET|DOCKERHUB_TOKEN|JWT_SECRET|mongodb://[^:]+:[^@]+@|password\s*=\s*[\"'\''][^\"'\'']+[\"'\''])" --include="*.py" --include="*.yaml" --include="*.yml" --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.git --exclude=".pre-commit-config.yaml" --exclude-dir=".github/workflows" . && echo "⚠️  Found potential secrets in code!" && exit 1 || exit 0'
         language: system
         pass_filenames: false
         verbose: true

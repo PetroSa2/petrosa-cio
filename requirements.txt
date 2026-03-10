@@ -1,8 +1,16 @@
 aiofiles>=23.2.1
+# Utilities
+ccxt==4.5.40
 # Core dependencies
 fastapi>=0.110.0
 httpx>=0.26.0
+instructor>=0.6.0
+
+# LLM integration
+litellm>=1.0.0
 motor>=3.3.0
+nats-py>=2.7.0
+
 nats-py>=2.7.0
 opentelemetry-api>=1.22.0
 opentelemetry-exporter-otlp>=1.22.0
@@ -15,30 +23,22 @@ opentelemetry-sdk>=1.22.0
 petrosa-otel>=1.0.0
 prometheus-client>=0.19.0
 
+# Logging and observability
+prometheus-client>=0.19.0
+
 # Validation and configuration
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 pymongo>=4.6.0
-python-json-logger>=2.0.7
-qdrant-client>=1.7.0
-redis>=5.0.0
-
-# Logging and observability
-prometheus-client>=0.19.0
-structlog>=24.1.0
-
-nats-py>=2.7.0
-# Utilities
-ccxt==4.5.40
-redis>=5.0.0
-tenacity>=8.2.0
-tenacity>=8.2.0
-uvicorn[standard]>=0.27.0
-
-# LLM integration
-litellm>=1.0.0
-instructor>=0.6.0
 
 # Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+python-json-logger>=2.0.7
+qdrant-client>=1.7.0
+redis>=5.0.0
+redis>=5.0.0
+structlog>=24.1.0
+tenacity>=8.2.0
+tenacity>=8.2.0
+uvicorn[standard]>=0.27.0

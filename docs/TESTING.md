@@ -86,11 +86,11 @@ def test_complete_user_workflow(app_client):
     # Create user
     response = app_client.post("/users", json={"name": "test"})
     assert response.status_code == 201
-    
+
     # Login
     response = app_client.post("/login", json={"name": "test"})
     assert response.status_code == 200
-    
+
     # Perform action
     response = app_client.get("/data")
     assert response.status_code == 200
@@ -234,9 +234,9 @@ import pytest
 def test_with_mock():
     with patch('mymodule.external_api_call') as mock_api:
         mock_api.return_value = {"status": "success"}
-        
+
         result = my_function()
-        
+
         assert result["status"] == "success"
         mock_api.assert_called_once()
 ```
@@ -432,4 +432,3 @@ pytest --durations=10  # Show 10 slowest tests
 - [CI/CD Pipeline](./CI_CD_PIPELINE.md)
 - [Makefile Reference](./MAKEFILE.md)
 - [Quick Reference](./QUICK_REFERENCE.md)
-

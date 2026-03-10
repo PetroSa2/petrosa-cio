@@ -72,7 +72,7 @@ petrosa-cio/
 
 ### Automated Tests
 - **Unit Tests:** Validate `TradingConfigManager` migration by re-running TradeEngine config tests.
-- **Integration Tests:** 
+- **Integration Tests:**
     - Mock NATS publisher sending `intent.trading.btc`.
     - Verify Nurse promotes it to `signals.trading` within < 50ms.
     - Verify `traceparent` is preserved through the interception.

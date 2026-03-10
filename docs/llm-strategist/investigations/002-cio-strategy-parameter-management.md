@@ -1,6 +1,6 @@
 # Investigation: CIO Strategy Parameter Management Integration (Phase 2: LLM-Assisted)
 
-**Date:** 2026-03-08  
+**Date:** 2026-03-08
 **Status:** INVESTIGATION COMPLETE - APPROVAL PENDING
 **Author:** OpenCode Agent
 **Reviewer:** BMAD Party Mode Team Review
@@ -66,7 +66,7 @@ Phase 3 (Future - REQUIRES SEPARATE INVESTIGATION): Fully Autonomous
 > - Feedback loops where LLM actions distort the market data it reads
 > - Flash-crash scenarios and circuit breakers
 > - Regulatory and compliance considerations
-> 
+>
 > **This investigation focuses ONLY on Phase 2 (LLM-Assisted).**
 
 ---
@@ -82,7 +82,7 @@ The idea is for CIO (LLM management layer) to check each strategy's history and 
 **NOT READY FOR IMPLEMENTATION** - The CIO cannot currently manage strategy parameters in the TA-bot or realtime-strategies services due to architectural gaps that need to be addressed. The services HAVE the APIs, but CIO integration is not yet implemented.
 
 > **Status Update (2026-03-08):** APIs verified to exist in both services. Implementation Option A selected pending formal approval.
-> 
+>
 > **Discovery (2026-03-08):** petrosa-data-manager already has a full Market Regime Classifier with 8 regimes and API endpoint (`/analysis/regime`). Epic 3.1 should integrate with existing data-manager instead of building new regime detection.
 
 ---
@@ -246,7 +246,7 @@ This investigation supports the core objectives of the Petrosa fund:
 The TA-bot already has a comprehensive runtime configuration system:
 
 - **Config Manager**: Full CRUD for 28 strategies
-- **API Endpoints**: 
+- **API Endpoints**:
   - `GET /api/v1/strategies` - List all strategies
   - `GET /api/v1/strategies/{id}/config` - Get config
   - `POST /api/v1/strategies/{id}/config` - Update config
@@ -363,26 +363,26 @@ from typing import Any
 
 class StrategyServiceClient:
     """Generic HTTP client for strategy services."""
-    
+
     def __init__(self, base_url: str, timeout: float = 10.0):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._client: httpx.AsyncClient | None = None
-    
+
     async def __aenter__(self):
         self._client = httpx.AsyncClient(timeout=self.timeout)
         return self
-    
+
     async def __aexit__(self, *args):
         if self._client:
             await self._client.aclose()
-    
+
     async def get(self, path: str) -> dict[str, Any]:
         """GET request to service."""
         response = await self._client.get(f"{self.base_url}{path}")
         response.raise_for_status()
         return response.json()
-    
+
     async def post(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
         """POST request to service."""
         response = await self._client.post(f"{self.base_url}{path}", json=data)
@@ -392,17 +392,17 @@ class StrategyServiceClient:
 
 class TaBotClient(StrategyServiceClient):
     """Client for TA-bot service."""
-    
+
     async def list_strategies(self) -> list[dict]:
         result = await self.get("/api/v1/strategies")
         return result.get("data", [])
-    
+
     async def get_config(self, strategy_id: str, symbol: str | None = None) -> dict:
         path = f"/api/v1/strategies/{strategy_id}/config"
         if symbol:
             path = f"/api/v1/strategies/{strategy_id}/config/{symbol}"
         return await self.get(path)
-    
+
     async def set_config(
         self,
         strategy_id: str,
@@ -419,14 +419,14 @@ class TaBotClient(StrategyServiceClient):
             "changed_by": changed_by,
             "reason": reason,
         })
-    
+
     async def get_audit(self, strategy_id: str, limit: int = 100) -> list[dict]:
         return await self.get(f"/api/v1/strategies/{strategy_id}/audit?limit={limit}")
 
 
 class RealtimeStrategiesClient(StrategyServiceClient):
     """Client for realtime-strategies service."""
-    
+
     # Same interface as TaBotClient
     async def list_strategies(self) -> list[dict]: ...
     async def get_config(self, strategy_id: str, symbol: str | None = None) -> dict: ...
@@ -516,11 +516,11 @@ realtime_strategies_client: RealtimeStrategiesClient | None = None
 async def init_service_clients():
     """Initialize HTTP clients for strategy services."""
     global ta_bot_client, realtime_strategies_client
-    
+
     ta_bot_url = os.getenv("TA_BOT_API_URL")
     if ta_bot_url:
         ta_bot_client = TaBotClient(ta_bot_url)
-    
+
     realtime_url = os.getenv("REALTIME_STRATEGIES_API_URL")
     if realtime_url:
         realtime_strategies_client = RealtimeStrategiesClient(realtime_url)
@@ -606,7 +606,7 @@ async def init_service_clients():
 > - Error handling edge cases may require additional work
 > - Security (auth) deferred to post-launch (NOT included in points)
 
-**Optimistic estimate: ~33 points (~2 sprints)**  
+**Optimistic estimate: ~33 points (~2 sprints)**
 **Realistic estimate: 40-50 points (~3 sprints)** — buffer for unknowns recommended
 
 ---
@@ -624,7 +624,7 @@ async def init_service_clients():
 
 ## Intelligence Framework Requirements
 
-> ⚠️ **CRITICAL PREREQUISITE WARNING**  
+> ⚠️ **CRITICAL PREREQUISITE WARNING**
 > This section identifies requirements that MUST be resolved BEFORE or DURING implementation, not after. Approving implementation without defining the reasoning framework, system prompt, and decision loop means building infrastructure for a "brain that doesn't exist yet."
 
 ### 1. Integration Design: CIO ↔ Epic 3 (Semantic Guarding)

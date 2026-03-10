@@ -143,7 +143,8 @@ class OutputRouter:
             payload = {
                 "parameters": params_dict,
                 "changed_by": "petrosa-cio",
-                "reason": decision.justification or "CIO automated parameter adjustment",
+                "reason": decision.justification
+                or "CIO automated parameter adjustment",
                 "validate_only": False,
             }
 
