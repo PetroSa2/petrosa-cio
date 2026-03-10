@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Any, Optional
 
 import httpx
@@ -44,8 +45,21 @@ class ContextBuilder:
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
         self.vector_client = vector_client
+        token = os.getenv("PETROSA_INTERNAL_TOKEN", "")
+        if not token:
+            logger.warning(
+                "SECURITY_WARNING: PETROSA_INTERNAL_TOKEN is not set. "
+                "All internal HTTP requests from ContextBuilder will be unauthenticated."
+            )
+
         # Increased timeout to 15s to handle cluster latency under load
-        self.client = httpx.AsyncClient(timeout=15.0)
+        self.client = httpx.AsyncClient(
+            timeout=15.0,
+            headers={
+                "X-Petrosa-Issuer": "CIO",
+                "X-Petrosa-Internal-Token": token,
+            }
+        )
 
     async def build(
         self,

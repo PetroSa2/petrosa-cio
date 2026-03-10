@@ -7537,7 +7537,7 @@ Note: Newest last, oldest first
 
   S4 Goals:
    1. Action Dispatcher: Implement a router that handles EXECUTE, MODIFY_PARAMS, SKIP, BLOCK, PAUSE_STRATEGY, and ESCALATE.
-   2. NATS Integration: Define the subjects for trade execution (trade.execute) and parameter updates (strategy.config.update).
+   2. NATS Integration: Define the subjects for trade execution (trade.execute) and parameter updates (REST_CALL).
    3. Audit Logging: Ensure every dispatched action is logged with its full context for post-trade analysis.
 
   Amelia, start by defining the OutputRouter in petrosa-cio/apps/strategist/core/router.py."
@@ -7563,13 +7563,12 @@ Note: Newest last, oldest first
 
    Required:
 
-   1. **Action dispatch table** — handle all six action types: `EXECUTE`, `MODIFY_PARAMS`, `SKIP`, `BLOCK`, `PAUSE_STRATEGY`, `ESCALATE`. Each maps
-   to a specific NATS subject:
-      - `EXECUTE` → `trade.execute.{strategy_id}`
-      - `MODIFY_PARAMS` → `strategy.config.update.{strategy_id}`
-      - `PAUSE_STRATEGY` → `strategy.control.pause.{strategy_id}`
-      - `ESCALATE` → `cio.escalation.{strategy_id}`
-      - `SKIP` and `BLOCK` → no NATS publish, log only
+   1. **Action dispatch table** — handle all six action types: `EXECUTE`, `MODIFY_PARAMS`, `SKIP`, `BLOCK`, `PAUSE_STRATEGY`, `ESCALATE`.
+      - `EXECUTE` → `trade.execute.{strategy_id}` (NATS)
+      - `MODIFY_PARAMS` → `POST /api/v1/strategies/{strategy_id}/config` (REST with Auth)
+      - `PAUSE_STRATEGY` → `POST /api/v1/strategies/{strategy_id}/config` (REST with Auth)
+      - `ESCALATE` → `cio.escalation.{strategy_id}` (NATS)
+      - `SKIP` and `BLOCK` → no publish, log only
 
    2. **NATS abstraction** — the router must accept a `nats_client` interface in `__init__`. For now, define a `NATSClientProtocol` with a single
    `publish(subject: str, payload: bytes)` async method. This keeps it testable without a real NATS connection.
@@ -7623,8 +7622,8 @@ Note: Newest last, oldest first
 │ 30                                                                                                                                             │
 │ 31         Action Dispatch Table:                                                                                                              │
 │ 32         - EXECUTE -> trade.execute.{id}                                                                                                     │
-│ 33         - MODIFY_PARAMS -> strategy.config.update.{id}                                                                                      │
-│ 34         - PAUSE_STRATEGY -> strategy.control.pause.{id}                                                                                     │
+│ 33         - MODIFY_PARAMS -> REST_CALL.{id}                                                                                      │
+│ 34         - PAUSE_STRATEGY -> REST_CALL.{id}                                                                                     │
 │ 35         - ESCALATE -> cio.escalation.{id}                                                                                                   │
 │ 36         - SKIP/BLOCK -> No publish, audit log only                                                                                          │
 │ 37         """                                                                                                                                 │
@@ -7638,9 +7637,9 @@ Note: Newest last, oldest first
 │ 45         if action == ActionType.EXECUTE:                                                                                                    │
 │ 46             subject = f"trade.execute.{strategy_id}"                                                                                        │
 │ 47         elif action == ActionType.MODIFY_PARAMS:                                                                                            │
-│ 48             subject = f"strategy.config.update.{strategy_id}"                                                                               │
+│ 48             subject = f"REST_CALL.{strategy_id}"                                                                               │
 │ 49         elif action == ActionType.PAUSE_STRATEGY:                                                                                           │
-│ 50             subject = f"strategy.control.pause.{strategy_id}"                                                                               │
+│ 50             subject = f"REST_CALL.{strategy_id}"                                                                               │
 │ 51         elif action == ActionType.ESCALATE:                                                                                                 │
 │ 52             subject = f"cio.escalation.{strategy_id}"                                                                                       │
 │ 53         elif action in (ActionType.SKIP, ActionType.BLOCK):                                                                                 │

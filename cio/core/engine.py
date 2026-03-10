@@ -1,6 +1,6 @@
 import logging
 
-from cio.models import CodeEngineResult, TriggerContext, VolatilityLevel
+from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
 
 logger = logging.getLogger(__name__)
 
@@ -10,6 +10,30 @@ SL_VOL_MULTIPLIERS = {
     VolatilityLevel.MEDIUM: 1.2,
     VolatilityLevel.HIGH: 1.5,
     VolatilityLevel.EXTREME: 2.0,
+}
+
+# Regime Multipliers and Caps (Fix 4)
+REGIME_TP_MULTIPLIERS = {
+    RegimeEnum.TRENDING_BULL: 1.3,
+    RegimeEnum.TRENDING_BEAR: 1.3,
+    RegimeEnum.BREAKOUT_PHASE: 1.5,
+    RegimeEnum.RANGING: 0.8,
+    RegimeEnum.CHOPPY: 0.6,
+    RegimeEnum.HIGH_VOLATILITY: 0.7,
+    RegimeEnum.CAPITULATION: 0.6,
+    RegimeEnum.RECOVERY: 1.0,
+}
+
+REGIME_LEVERAGE_CAPS = {
+    RegimeEnum.TRENDING_BULL: 2.0,
+    RegimeEnum.TRENDING_BEAR: 2.0,
+    RegimeEnum.BREAKOUT_PHASE: 1.5,
+}
+DEFAULT_LEVERAGE_CAP = 1.0
+
+REGIME_HARD_BLOCKS = {
+    RegimeEnum.CAPITULATION: "regime_block: CAPITULATION — capital preservation mode, no new entries",
+    RegimeEnum.CHOPPY: "regime_block: CHOPPY — signal quality too low, skip to avoid noise trades",
 }
 
 
@@ -61,7 +85,21 @@ class CodeEngine:
             )
             return result
 
-        # 2. PARAMETER GENERATION (Initial volatility-adjusted SL/TP)
+        # 2. REGIME HARD BLOCKS (Fix 4)
+        if context.regime.regime in REGIME_HARD_BLOCKS:
+            result.hard_blocked = True
+            result.block_reason = REGIME_HARD_BLOCKS[context.regime.regime]
+            logger.warning(
+                "Regime hard block triggered",
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "regime": context.regime.regime,
+                    "block_reason": result.block_reason,
+                },
+            )
+            return result
+
+        # 3. PARAMETER GENERATION (Initial volatility-adjusted SL/TP)
         vol_multiplier = SL_VOL_MULTIPLIERS.get(context.volatility_level, 1.0)
         result.recommended_sl_pct = (
             context.strategy_defaults.stop_loss_pct * vol_multiplier
@@ -69,7 +107,16 @@ class CodeEngine:
         result.recommended_tp_pct = context.strategy_defaults.take_profit_pct
         result.leverage = context.strategy_defaults.leverage
 
-        # 3. EV CALCULATION
+        # 4. REGIME ADJUSTMENTS (Fix 4)
+        # Apply TP regime multiplier
+        tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
+        result.recommended_tp_pct *= tp_multiplier
+
+        # Apply Leverage regime cap
+        lev_cap = REGIME_LEVERAGE_CAPS.get(context.regime.regime, DEFAULT_LEVERAGE_CAP)
+        result.leverage = min(context.strategy_defaults.leverage, lev_cap)
+
+        # 5. EV CALCULATION
         win_rate = context.strategy_stats.win_rate
         if win_rate is None:
             result.ev_unavailable = True
@@ -80,7 +127,7 @@ class CodeEngine:
                 (1 - win_rate) * result.recommended_sl_pct
             )
 
-        # 4. POSITION SIZING (Kelly Criterion)
+        # 6. POSITION SIZING (Kelly Criterion)
         if win_rate is not None and result.recommended_sl_pct > 0:
             # Kelly Fraction f* = (p/a) - (q/b) where:
             # p = probability of win (win_rate)

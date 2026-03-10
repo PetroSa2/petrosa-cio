@@ -73,6 +73,10 @@ async def main():
     tradeengine_url = os.getenv(
         "TRADEENGINE_URL", "http://petrosa-tradeengine-service:80"
     )
+    ta_bot_url = os.getenv("TA_BOT_URL", "http://petrosa-ta-bot-service:80")
+    realtime_strategies_url = os.getenv(
+        "REALTIME_STRATEGIES_URL", "http://petrosa-realtime-strategies:80"
+    )
 
     # 2. Initialize Components
     nc = NATS()
@@ -113,7 +117,13 @@ async def main():
     )
 
     orchestrator = Orchestrator(llm_client=llm_client, cache=cache)
-    router = OutputRouter(nats_client=nc, vector_client=vector_client)
+    router = OutputRouter(
+        nats_client=nc,
+        vector_client=vector_client,
+        ta_bot_url=ta_bot_url,
+        realtime_strategies_url=realtime_strategies_url,
+        cache=cache,
+    )
 
     listener = NATSListener(
         nats_client=nc,
@@ -154,6 +164,7 @@ async def main():
     # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
     await listener.stop()
+    await router.close()
     await builder.close()
     await redis_client.close()
     await nc.close()
