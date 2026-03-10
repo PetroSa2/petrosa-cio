@@ -9,8 +9,8 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
-from apps.nurse.roi_engine import ShadowROIEngine
-from apps.strategist.memory import InstitutionalMemoryService
+from cio.stubs.roi_engine import ShadowROIEngine
+from cio.memory import InstitutionalMemoryService
 from core.config_manager import ConfigManager
 from core.utils.schema_parser import discover_schema_models, generate_tools
 
