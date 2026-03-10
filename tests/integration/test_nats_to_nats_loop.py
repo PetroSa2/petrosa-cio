@@ -105,7 +105,12 @@ async def test_full_nats_to_nats_loop():
 
             orchestrator = Orchestrator(cache=mock_cache)
             mock_vc = AsyncMock()
-            router = OutputRouter(nats_client=mock_nc, vector_client=mock_vc)
+            router = OutputRouter(
+                nats_client=mock_nc,
+                vector_client=mock_vc,
+                ta_bot_url="http://ta-bot",
+                realtime_strategies_url="http://realtime",
+            )
 
             listener = NATSListener(
                 nats_client=mock_nc,

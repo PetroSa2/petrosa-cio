@@ -1,10 +1,10 @@
+from enum import Enum
+
 try:
     from enum import StrEnum
 except ImportError:
     # Fallback for Python < 3.11
-    from enum import Enum
-
-    class StrEnum(str, Enum):
+    class StrEnum(str, Enum):  # type: ignore
         pass
 
 
