@@ -163,6 +163,7 @@ async def main():
     # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
     await listener.stop()
+    await router.close()
     await builder.close()
     await redis_client.close()
     await nc.close()

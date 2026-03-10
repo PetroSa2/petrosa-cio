@@ -24,10 +24,29 @@ class OutputRouter:
     """
 
     def __init__(
-        self, nats_client: NATSClientProtocol, vector_client: VectorClientProtocol
+        self,
+        nats_client: NATSClientProtocol,
+        vector_client: VectorClientProtocol,
+        ta_bot_url: str,
+        realtime_strategies_url: str,
     ):
+        import httpx
+
         self.nats_client = nats_client
         self.vector_client = vector_client
+        self.ta_bot_url = ta_bot_url
+        self.realtime_strategies_url = realtime_strategies_url
+
+        self.http_client = httpx.AsyncClient(
+            headers={
+                "X-Petrosa-Issuer": "CIO",
+                # TODO: AUTH_REQUIRED — wire PETROSA_INTERNAL_TOKEN in Fix 3
+            }
+        )
+
+    async def close(self) -> None:
+        """Closes internal resources."""
+        await self.http_client.aclose()
 
     async def route(self, context: TriggerContext, decision: DecisionResult) -> None:
         """
