@@ -71,12 +71,13 @@ def test_code_engine_risk_gate_drawdown():
 
 
 def test_code_engine_ev_calculation():
-    # win_rate=0.6, TP=0.04, SL=0.02 (adj for Medium volatility 1.2x -> 0.024)
-    # EV = (0.6 * 0.04) - (0.4 * 0.024) = 0.024 - 0.0096 = 0.0144
+    # default regime is RANGING (0.8x TP multiplier)
+    # win_rate=0.6, TP=0.04 * 0.8 = 0.032, SL=0.02 (adj for Medium volatility 1.2x -> 0.024)
+    # EV = (0.6 * 0.032) - (0.4 * 0.024) = 0.0192 - 0.0096 = 0.0096
     ctx = build_test_context(win_rate=0.6)
     result = CodeEngine.run(ctx)
     assert result.hard_blocked is False
-    assert pytest.approx(result.gross_ev, 0.0001) == 0.0144
+    assert pytest.approx(result.gross_ev, 0.0001) == 0.0096
 
 
 def test_code_engine_kelly_sizing():
@@ -85,3 +86,20 @@ def test_code_engine_kelly_sizing():
     # Kelly fraction capped at 0.25
     assert result.kelly_fraction <= 0.25
     assert result.kelly_position_usd <= ctx.risk_limits.max_position_size_usd
+
+
+def test_code_engine_regime_adjustment():
+    """Verifies TP multiplier is applied and impacts EV calculation."""
+    ctx = build_test_context(win_rate=0.6)
+    ctx.regime.regime = RegimeEnum.TRENDING_BULL  # 1.3x TP multiplier
+    ctx.volatility_level = VolatilityLevel.MEDIUM  # 1.2x SL multiplier
+
+    result = CodeEngine.run(ctx)
+
+    # Initial TP 0.04 * 1.3 = 0.052
+    assert pytest.approx(result.recommended_tp_pct, 0.0001) == 0.052
+    # Initial SL 0.02 * 1.2 = 0.024
+    assert pytest.approx(result.recommended_sl_pct, 0.0001) == 0.024
+
+    # EV = (0.6 * 0.052) - (0.4 * 0.024) = 0.0312 - 0.0096 = 0.0216
+    assert pytest.approx(result.gross_ev, 0.0001) == 0.0216

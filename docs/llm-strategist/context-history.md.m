@@ -7563,13 +7563,12 @@ Note: Newest last, oldest first
 
    Required:
 
-   1. **Action dispatch table** — handle all six action types: `EXECUTE`, `MODIFY_PARAMS`, `SKIP`, `BLOCK`, `PAUSE_STRATEGY`, `ESCALATE`. Each maps
-   to a specific NATS subject:
-      - `EXECUTE` → `trade.execute.{strategy_id}`
-      - `MODIFY_PARAMS` → `REST_CALL.{strategy_id}`
-      - `PAUSE_STRATEGY` → `REST_CALL.{strategy_id}`
-      - `ESCALATE` → `cio.escalation.{strategy_id}`
-      - `SKIP` and `BLOCK` → no NATS publish, log only
+   1. **Action dispatch table** — handle all six action types: `EXECUTE`, `MODIFY_PARAMS`, `SKIP`, `BLOCK`, `PAUSE_STRATEGY`, `ESCALATE`.
+      - `EXECUTE` → `trade.execute.{strategy_id}` (NATS)
+      - `MODIFY_PARAMS` → `POST /api/v1/strategies/{strategy_id}/config` (REST with Auth)
+      - `PAUSE_STRATEGY` → `POST /api/v1/strategies/{strategy_id}/config` (REST with Auth)
+      - `ESCALATE` → `cio.escalation.{strategy_id}` (NATS)
+      - `SKIP` and `BLOCK` → no publish, log only
 
    2. **NATS abstraction** — the router must accept a `nats_client` interface in `__init__`. For now, define a `NATSClientProtocol` with a single
    `publish(subject: str, payload: bytes)` async method. This keeps it testable without a real NATS connection.

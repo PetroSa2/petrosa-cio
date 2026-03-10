@@ -30,15 +30,30 @@ class OutputRouter:
         self,
         nats_client: NATSClientProtocol,
         vector_client: VectorClientProtocol,
-        ta_bot_url: str,
-        realtime_strategies_url: str,
+        ta_bot_url: str | None = None,
+        realtime_strategies_url: str | None = None,
         cache=None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
-        self.ta_bot_url = ta_bot_url
-        self.realtime_strategies_url = realtime_strategies_url
+        # Allow explicit arguments to override environment-based configuration.
+        self.ta_bot_url = ta_bot_url or os.getenv("TA_BOT_URL", "")
+        self.realtime_strategies_url = realtime_strategies_url or os.getenv(
+            "REALTIME_STRATEGIES_URL", ""
+        )
         self.cache = cache
+
+        if not self.ta_bot_url:
+            logger.warning(
+                "CONFIG_WARNING: TA bot URL is not configured. "
+                "HTTP calls for TA bot routing may fail."
+            )
+
+        if not self.realtime_strategies_url:
+            logger.warning(
+                "CONFIG_WARNING: Realtime strategies URL is not configured. "
+                "HTTP calls for realtime strategies routing may fail."
+            )
 
         token = os.getenv("PETROSA_INTERNAL_TOKEN", "")
         if not token:
@@ -51,7 +66,8 @@ class OutputRouter:
             headers={
                 "X-Petrosa-Issuer": "CIO",
                 "X-Petrosa-Internal-Token": token,
-            }
+            },
+            timeout=httpx.Timeout(15.0, connect=15.0, read=15.0, write=15.0),
         )
 
     async def close(self) -> None:
@@ -68,6 +84,7 @@ class OutputRouter:
         correlation_id = context.correlation_id
         strategy_id = context.strategy_id
         action = decision.action or ActionType.SKIP
+        is_dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
 
         # 0. Record Metrics
         from cio.core.metrics import DECISION_ACTIONS
@@ -130,48 +147,58 @@ class OutputRouter:
                 "validate_only": False,
             }
 
-            # d. Await the POST call
+            # d. Await the POST call (unless in DRY_RUN mode)
             url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            try:
-                response = await self.http_client.post(url, json=payload)
+            if is_dry_run:
+                logger.info(
+                    f"[SHADOW MODE] Would have applied parameter change via REST to {url}",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "strategy_id": strategy_id,
+                        "payload": payload,
+                    },
+                )
+            else:
+                try:
+                    response = await self.http_client.post(url, json=payload)
 
-                # e. If response status >= 400: log FAILED_TO_APPLY
-                if response.status_code >= 400:
-                    logger.error(
-                        "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
-                        strategy_id,
-                        response.status_code,
-                        response.text,
-                        extra={"correlation_id": correlation_id},
-                    )
-                else:
-                    # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
-                    logger.info(
-                        "SUCCESS: Parameter change applied via REST to %s",
-                        strategy_id,
-                        extra={"correlation_id": correlation_id},
-                    )
-                    if self.cache:
-                        freeze_key = f"cio:freeze:{strategy_id}"
-                        await self.cache.set(freeze_key, "LOCKED", ttl=1800)
-                        logger.info(
-                            "Param freeze set for %s (1800s)",
+                    # e. If response status >= 400: log FAILED_TO_APPLY
+                    if response.status_code >= 400:
+                        logger.error(
+                            "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
                             strategy_id,
+                            response.status_code,
+                            response.text,
                             extra={"correlation_id": correlation_id},
                         )
                     else:
-                        logger.warning(
-                            "FREEZE_SKIPPED: cache unavailable for strategy %s. "
-                            "Feedback loop protection is inactive for this change.",
+                        # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
+                        logger.info(
+                            "SUCCESS: Parameter change applied via REST to %s",
                             strategy_id,
                             extra={"correlation_id": correlation_id},
                         )
-            except Exception as e:
-                logger.error(
-                    "Error applying parameter change via REST: %s",
-                    str(e),
-                    extra={"correlation_id": correlation_id},
-                )
+                        if self.cache:
+                            freeze_key = f"cio:freeze:{strategy_id}"
+                            await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+                            logger.info(
+                                "Param freeze set for %s (1800s)",
+                                strategy_id,
+                                extra={"correlation_id": correlation_id},
+                            )
+                        else:
+                            logger.warning(
+                                "FREEZE_SKIPPED: cache unavailable for strategy %s. "
+                                "Feedback loop protection is inactive for this change.",
+                                strategy_id,
+                                extra={"correlation_id": correlation_id},
+                            )
+                except Exception as e:
+                    logger.error(
+                        "Error applying parameter change via REST: %s",
+                        str(e),
+                        extra={"correlation_id": correlation_id},
+                    )
 
         elif action == ActionType.PAUSE_STRATEGY:
             # a. Resolve service using TargetServiceResolver
@@ -194,38 +221,47 @@ class OutputRouter:
 
             # d. Await the POST call to /api/v1/strategies/{strategy_id}/config
             url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            try:
-                response = await self.http_client.post(url, json=payload)
-
-                # e. If response status >= 400: log FAILED_TO_APPLY
-                if response.status_code >= 400:
-                    logger.error(
-                        "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
-                        strategy_id,
-                        response.status_code,
-                        response.text,
-                        extra={"correlation_id": correlation_id},
-                    )
-                else:
-                    # f. If response 2xx: log SUCCESS
-                    logger.info(
-                        "SUCCESS: Strategy %s paused via REST",
-                        strategy_id,
-                        extra={"correlation_id": correlation_id},
-                    )
-            except Exception as e:
-                logger.error(
-                    "Error applying strategy pause via REST: %s",
-                    str(e),
-                    extra={"correlation_id": correlation_id},
+            if is_dry_run:
+                logger.info(
+                    f"[SHADOW MODE] Would have paused strategy via REST to {url}",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "strategy_id": strategy_id,
+                        "payload": payload,
+                    },
                 )
+            else:
+                try:
+                    response = await self.http_client.post(url, json=payload)
+
+                    # e. If response status >= 400: log FAILED_TO_APPLY
+                    if response.status_code >= 400:
+                        logger.error(
+                            "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
+                            strategy_id,
+                            response.status_code,
+                            response.text,
+                            extra={"correlation_id": correlation_id},
+                        )
+                    else:
+                        # f. If response 2xx: log SUCCESS
+                        logger.info(
+                            "SUCCESS: Strategy %s paused via REST",
+                            strategy_id,
+                            extra={"correlation_id": correlation_id},
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Error applying strategy pause via REST: %s",
+                        str(e),
+                        extra={"correlation_id": correlation_id},
+                    )
         elif action == ActionType.ESCALATE:
             dispatch_tasks_data.append(
                 (f"cio.escalation.{strategy_id}", decision.model_dump_json().encode())
             )
 
         # 3. Handle Dispatch execution (Checking DRY_RUN)
-        is_dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
         nats_publish_tasks = []
 
         for subject, payload in dispatch_tasks_data:
@@ -268,6 +304,15 @@ class OutputRouter:
                 },
             )
         elif not is_dry_run and nats_publish_tasks:
+            logger.info(
+                "T-Junction dispatch successful",
+                extra={
+                    "correlation_id": correlation_id,
+                    "action": action.value,
+                    "strategy_id": strategy_id,
+                    "targets": [t[0] for t in dispatch_tasks_data],
+                },
+            )
             logger.info(
                 "T-Junction dispatch successful",
                 extra={

@@ -107,7 +107,16 @@ class CodeEngine:
         result.recommended_tp_pct = context.strategy_defaults.take_profit_pct
         result.leverage = context.strategy_defaults.leverage
 
-        # 4. EV CALCULATION
+        # 4. REGIME ADJUSTMENTS (Fix 4)
+        # Apply TP regime multiplier
+        tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
+        result.recommended_tp_pct *= tp_multiplier
+
+        # Apply Leverage regime cap
+        lev_cap = REGIME_LEVERAGE_CAPS.get(context.regime.regime, DEFAULT_LEVERAGE_CAP)
+        result.leverage = min(context.strategy_defaults.leverage, lev_cap)
+
+        # 5. EV CALCULATION
         win_rate = context.strategy_stats.win_rate
         if win_rate is None:
             result.ev_unavailable = True
@@ -118,7 +127,7 @@ class CodeEngine:
                 (1 - win_rate) * result.recommended_sl_pct
             )
 
-        # 5. POSITION SIZING (Kelly Criterion)
+        # 6. POSITION SIZING (Kelly Criterion)
         if win_rate is not None and result.recommended_sl_pct > 0:
             # Kelly Fraction f* = (p/a) - (q/b) where:
             # p = probability of win (win_rate)
@@ -152,14 +161,5 @@ class CodeEngine:
             ):
                 result.kelly_position_usd = context.risk_limits.max_position_size_usd
                 result.risk_warnings.append("Kelly size capped by risk limit.")
-
-        # 6. REGIME ADJUSTMENTS (Fix 4)
-        # Apply TP regime multiplier
-        tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
-        result.recommended_tp_pct *= tp_multiplier
-
-        # Apply Leverage regime cap
-        lev_cap = REGIME_LEVERAGE_CAPS.get(context.regime.regime, DEFAULT_LEVERAGE_CAP)
-        result.leverage = min(context.strategy_defaults.leverage, lev_cap)
 
         return result
