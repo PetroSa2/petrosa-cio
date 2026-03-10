@@ -96,7 +96,7 @@ async def test_full_nats_to_nats_loop():
     mock_cache.get = AsyncMock(return_value=None)
     mock_cache.set = AsyncMock()
 
-    with patch.dict("os.environ", {"LLM_PROVIDER": "mock"}):
+    with patch.dict("os.environ", {"LLM_PROVIDER": "mock", "DRY_RUN": "false"}):
         with patch("httpx.AsyncClient.get", side_effect=mock_get):
             builder = ContextBuilder(
                 data_manager_url="http://data-manager",

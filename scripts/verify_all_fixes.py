@@ -59,7 +59,7 @@ async def verify_fixes():
             assert warn_router_called
             
         with patch("cio.core.context_builder.logger.warning") as mock_warn_builder:
-            builder = ContextBuilder("http://data-manager", "http://tradeengine")
+            ContextBuilder("http://data-manager", "http://tradeengine")
             warn_builder_called = any("SECURITY_WARNING" in str(call) for call in mock_warn_builder.call_args_list)
             assert warn_builder_called
     print("✅ Fix 3 Verified: SECURITY_WARNING fires when token is missing.")
@@ -76,7 +76,7 @@ async def verify_fixes():
     context_capitulation.open_orders_symbol = 0
 
     res_cap = CodeEngine.run(context_capitulation)
-    assert res_cap.hard_blocked == True
+    assert res_cap.hard_blocked
     assert "CAPITULATION" in res_cap.block_reason
     print("✅ Fix 4 Verified: CAPITULATION triggers hard block.")
 
