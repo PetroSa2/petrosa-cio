@@ -58,8 +58,8 @@ class RegimeAPIResponse(BaseModel):
 
     pair: str
     metric: str
-    data: RegimeAPIData
-    metadata: RegimeAPIMetadata
+    data: RegimeAPIData | None = None
+    metadata: RegimeAPIMetadata | None = None
 
 
 class RegimeResult(BaseModel):
@@ -84,14 +84,26 @@ class RegimeResult(BaseModel):
         Translates raw Data-Manager API response into the internal CIO framework.
 
         Conversion Logic:
-        1. Handle 'unknown' case specifically as 'choppy' + 'low'.
-        2. Map Data-Manager regime string to internal RegimeEnum.
-        3. Convert confidence float string (e.g., "0.85") into high|medium|low enum.
+        1. Handle missing data case.
+        2. Handle 'unknown' case specifically as 'choppy' + 'low'.
+        3. Map Data-Manager regime string to internal RegimeEnum.
+        4. Convert confidence float string (e.g., "0.85") into high|medium|low enum.
         """
         api_data = response.data
+
+        # 1. Handle missing data
+        if not api_data:
+            return cls(
+                regime=RegimeEnum.CHOPPY,
+                regime_confidence=ConfidenceLevel.LOW,
+                volatility_level=VolatilityLevel.MEDIUM,
+                primary_signal="data_manager_empty",
+                thought_trace="Data-manager returned empty data block; defaulting to safe choppy/low state.",
+            )
+
         api_regime = api_data.regime
 
-        # 1. Handle explicit 'unknown' case
+        # 2. Handle explicit 'unknown' case
         if api_regime == DataManagerRegimeEnum.UNKNOWN:
             return cls(
                 regime=RegimeEnum.CHOPPY,
