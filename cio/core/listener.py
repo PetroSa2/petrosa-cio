@@ -56,12 +56,12 @@ class NATSListener:
 
         # 2. Parse Payload
         try:
-            payload = json.loads(msg.data.decode())
+            payload_raw = msg.data.decode()
+            payload = json.loads(payload_raw)
             logger.info(
-                f"Received NATS payload on {msg.subject}",
+                f"Received NATS payload on {msg.subject}: {payload_raw}",
                 extra={
                     "correlation_id": correlation_id,
-                    "payload_keys": list(payload.keys()),
                     "symbol": payload.get("symbol"),
                     "action": payload.get("action"),
                 },
