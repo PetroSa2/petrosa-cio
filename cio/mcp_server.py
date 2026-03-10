@@ -9,10 +9,30 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
-from cio.stubs.roi_engine import ShadowROIEngine
-from cio.memory import InstitutionalMemoryService
-from core.config_manager import ConfigManager
-from core.utils.schema_parser import discover_schema_models, generate_tools
+# --- QUARANTINE BLOCK (Fix 2c) ---
+try:
+    from cio.stubs.roi_engine import ShadowROIEngine
+    from cio.memory import InstitutionalMemoryService
+    from core.config_manager import ConfigManager
+    from core.utils.schema_parser import discover_schema_models, generate_tools
+
+    MCP_SERVER_AVAILABLE = True
+    MCP_IMPORT_ERROR = None
+except ImportError as e:
+    MCP_SERVER_AVAILABLE = False
+    MCP_IMPORT_ERROR = str(e)
+
+    # Minimal stubs to allow the class to be parsed and defined
+    ShadowROIEngine = None
+    InstitutionalMemoryService = None
+    ConfigManager = None
+
+    def discover_schema_models(path: str) -> dict:
+        return {}
+
+    def generate_tools(path: str) -> list:
+        return []
+# --- END QUARANTINE ---
 
 try:
     from core.llm import CIO_LLM_Client
@@ -276,4 +296,10 @@ class MCPServer:
 
 
 def create_server(module_path: str = "apps.strategist.defaults") -> MCPServer:
+    if not MCP_SERVER_AVAILABLE:
+        raise RuntimeError(
+            f"MCPServer cannot be initialized. "
+            f"Fix broken dependencies before using MCP tools. "
+            f"Import error was: {MCP_IMPORT_ERROR}"
+        )
     return MCPServer(module_path=module_path)
