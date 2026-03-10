@@ -40,10 +40,17 @@ class OutputRouter:
         self.realtime_strategies_url = realtime_strategies_url
         self.cache = cache
 
+        token = os.getenv("PETROSA_INTERNAL_TOKEN", "")
+        if not token:
+            logger.warning(
+                "SECURITY_WARNING: PETROSA_INTERNAL_TOKEN is not set. "
+                "All internal HTTP requests from OutputRouter will be unauthenticated."
+            )
+
         self.http_client = httpx.AsyncClient(
             headers={
                 "X-Petrosa-Issuer": "CIO",
-                # TODO: AUTH_REQUIRED — wire PETROSA_INTERNAL_TOKEN in Fix 3
+                "X-Petrosa-Internal-Token": token,
             }
         )
 
