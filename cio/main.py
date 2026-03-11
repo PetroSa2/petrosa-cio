@@ -15,6 +15,15 @@ from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
 
+# Optional OpenTelemetry imports
+try:
+    from petrosa_otel import (
+        attach_logging_handler,
+        setup_telemetry,
+    )
+except ImportError:
+    setup_telemetry = None
+    attach_logging_handler = None
 # Configure Logging
 class CorrelationIdFilter(logging.Filter):
     def filter(self, record):
@@ -37,21 +46,6 @@ root_logger.setLevel(logging.INFO)
 for h in root_logger.handlers[:]:
     root_logger.removeHandler(h)
 root_logger.addHandler(handler)
-
-# Initialize OpenTelemetry after logging is configured so the OTLP handler
-# is added last and is not wiped by the handler reset above.
-try:
-    from petrosa_otel import setup_telemetry
-
-    if not os.getenv("OTEL_NO_AUTO_INIT"):
-        service_name = os.getenv("OTEL_SERVICE_NAME", "petrosa-cio")
-        setup_telemetry(
-            service_name=service_name,
-            service_type="async",
-            auto_attach_logging=True,
-        )
-except ImportError:
-    pass
 
 logger = logging.getLogger("cio-strategist")
 
@@ -79,6 +73,37 @@ async def main():
     prometheus_port = int(os.getenv("METRICS_PORT", "9090"))
     prometheus_client.start_http_server(prometheus_port)
     logger.info(f"Prometheus metrics server started on port {prometheus_port}")
+
+    # 1. Setup OpenTelemetry
+    if (
+        os.getenv("ENABLE_OTEL", "true").lower() in ("true", "1", "yes")
+        and setup_telemetry
+        and os.getenv("OTEL_NO_AUTO_INIT", "").lower() not in ("1", "true", "yes", "on")
+    ):
+        try:
+            logger.info("Initializing OpenTelemetry for CIO")
+            setup_telemetry(
+                service_name="cio",
+                service_type="async",
+                enable_http=True,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize OpenTelemetry: {e}")
+
+    # 3. Attach OTel logging handler LAST (after logging is configured)
+    if (
+        os.getenv("ENABLE_OTEL", "true").lower() in ("true", "1", "yes")
+        and attach_logging_handler
+        and os.getenv("OTEL_NO_AUTO_INIT", "").lower() not in ("1", "true", "yes", "on")
+    ):
+        try:
+            success = attach_logging_handler()
+            if success:
+                logger.info(
+                    "✅ OpenTelemetry logging handler attached - logs will be exported to Grafana"
+                )
+        except Exception as e:
+            logger.error(f"Failed to attach OTel logging handler: {e}")
 
     # 1. Load Configuration
     nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
