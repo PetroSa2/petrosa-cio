@@ -149,14 +149,19 @@ class ContextBuilder:
             response.raise_for_status()
 
             data = response.json()
-            # Defensive check: Data Manager sometimes returns 200 OK with an error message body
-            if "message" in data and "No regime data" in data["message"]:
+            # Defensive check: Data Manager returns 200 OK with an error message in metadata
+            metadata = data.get("metadata", {})
+            if (
+                metadata
+                and "message" in metadata
+                and "No regime data" in metadata["message"]
+            ):
                 return RegimeResult(
                     regime="choppy",
                     regime_confidence="low",
                     volatility_level=VolatilityLevel.MEDIUM,
                     primary_signal="data_manager_empty",
-                    thought_trace=f"Data Manager reports: {data['message']}",
+                    thought_trace=f"Data Manager reports: {metadata['message']}",
                 )
 
             api_resp = RegimeAPIResponse.model_validate(data)

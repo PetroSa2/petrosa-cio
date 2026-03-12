@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -83,5 +83,42 @@ async def test_context_builder_cold_path_retrieval():
 
     assert ctx_hot.historical_context is None
     mock_vector.query.assert_not_called()
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_context_builder_handles_no_regime_data_in_metadata():
+    """
+    Verifies that ContextBuilder handles 'No regime data available' message
+    when it's nested in the metadata block (not at top level).
+    """
+    # 1. Setup
+    builder = ContextBuilder(
+        data_manager_url="http://dm",
+        tradeengine_url="http://te",
+    )
+
+    # Mock HTTP response that returns 200 OK with error in metadata
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "pair": "BTCUSDT",
+        "metric": "regime",
+        "data": None,
+        "metadata": {"message": "No regime data available"},
+    }
+
+    builder.client.get = AsyncMock(return_value=mock_response)
+
+    # 2. Test the regime fetch
+    result = await builder._fetch_regime("BTCUSDT", "test-correlation")
+
+    # 3. Assertions - should return safe default, not raise validation error
+    assert result.regime == "choppy"
+    assert result.regime_confidence == "low"
+    assert result.volatility_level == VolatilityLevel.MEDIUM
+    assert result.primary_signal == "data_manager_empty"
+    assert "No regime data available" in result.thought_trace
 
     await builder.close()
