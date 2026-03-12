@@ -15,6 +15,22 @@ from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
 
+# Initialize OpenTelemetry as early as possible
+try:
+    from petrosa_otel import setup_telemetry
+
+    if not os.getenv("OTEL_NO_AUTO_INIT"):
+        service_name = os.getenv("OTEL_SERVICE_NAME", "petrosa-cio")
+        setup_telemetry(
+            service_name=service_name,
+            service_type="async",
+            auto_attach_logging=True,
+        )
+except ImportError:
+    # Fallback if petrosa-otel is not available
+    pass
+
+
 
 # Configure Logging
 class CorrelationIdFilter(logging.Filter):
@@ -168,6 +184,14 @@ async def main():
     await builder.close()
     await redis_client.close()
     await nc.close()
+    
+    # Flush telemetry before exit
+    try:
+        from petrosa_otel import flush_telemetry
+        flush_telemetry()
+    except ImportError:
+        pass
+        
     await server.shutdown()
     logger.info("CIO Strategist shutdown complete.")
 
