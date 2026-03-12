@@ -15,23 +15,6 @@ from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
 
-# Initialize OpenTelemetry as early as possible
-try:
-    from petrosa_otel import setup_telemetry
-
-    if not os.getenv("OTEL_NO_AUTO_INIT"):
-        service_name = os.getenv("OTEL_SERVICE_NAME", "petrosa-cio")
-        setup_telemetry(
-            service_name=service_name,
-            service_type="async",
-            auto_attach_logging=True,
-        )
-except ImportError:
-    # Fallback if petrosa-otel is not available
-    pass
-
-
-
 # Configure Logging
 class CorrelationIdFilter(logging.Filter):
     def filter(self, record):
@@ -54,6 +37,21 @@ root_logger.setLevel(logging.INFO)
 for h in root_logger.handlers[:]:
     root_logger.removeHandler(h)
 root_logger.addHandler(handler)
+
+# Initialize OpenTelemetry after logging is configured so the OTLP handler
+# is added last and is not wiped by the handler reset above.
+try:
+    from petrosa_otel import setup_telemetry
+
+    if not os.getenv("OTEL_NO_AUTO_INIT"):
+        service_name = os.getenv("OTEL_SERVICE_NAME", "petrosa-cio")
+        setup_telemetry(
+            service_name=service_name,
+            service_type="async",
+            auto_attach_logging=True,
+        )
+except ImportError:
+    pass
 
 logger = logging.getLogger("cio-strategist")
 
