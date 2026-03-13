@@ -17,13 +17,12 @@ from cio.core.router import OutputRouter
 
 # Optional OpenTelemetry imports
 try:
-    from petrosa_otel import (
-        attach_logging_handler,
-        setup_telemetry,
-    )
+    from petrosa_otel import attach_logging_handler, setup_telemetry
 except ImportError:
     setup_telemetry = None
     attach_logging_handler = None
+
+
 # Configure Logging
 class CorrelationIdFilter(logging.Filter):
     def filter(self, record):
@@ -83,7 +82,7 @@ async def main():
         try:
             logger.info("Initializing OpenTelemetry for CIO")
             setup_telemetry(
-                service_name="cio",
+                service_name=os.getenv("OTEL_SERVICE_NAME", "petrosa-cio"),
                 service_type="async",
                 enable_http=True,
             )
@@ -189,7 +188,10 @@ async def main():
 
     # 5. Run Health Check Server in background
     api_port = int(os.getenv("API_PORT", "8000"))
-    config = uvicorn.Config(app, host="0.0.0.0", port=api_port, log_level="warning")
+    api_host = os.getenv("API_HOST", "0.0.0.0")  # nosec
+    config = uvicorn.Config(
+        app, host=api_host, port=api_port, log_level="warning"
+    )  # nosec
     server = uvicorn.Server(config)
 
     # Run uvicorn in a way that it doesn't block the main event loop entirely
@@ -207,14 +209,15 @@ async def main():
     await builder.close()
     await redis_client.close()
     await nc.close()
-    
+
     # Flush telemetry before exit
     try:
         from petrosa_otel import flush_telemetry
+
         flush_telemetry()
     except ImportError:
         pass
-        
+
     await server.shutdown()
     logger.info("CIO Strategist shutdown complete.")
 
