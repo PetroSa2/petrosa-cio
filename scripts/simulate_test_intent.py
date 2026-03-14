@@ -32,7 +32,7 @@ async def run():
         "volatility_percentile": 0.85,
         "trend_strength": 0.32,
         "price_action_character": "Volatile",
-        "trigger_type": "SIGNAL"
+        "trigger_type": "SIGNAL",
     }
 
     # 3. Connect and Publish
@@ -47,7 +47,9 @@ async def run():
         # Send with correlation_id in header
         headers = {"correlation_id": correlation_id}
 
-        logger.info(f"Publishing test intent for inside_bar_breakout to {topic} [ID: {correlation_id}]")
+        logger.info(
+            f"Publishing test intent for inside_bar_breakout to {topic} [ID: {correlation_id}]"
+        )
         await nc.publish(topic, json.dumps(payload).encode(), headers=headers)
 
         logger.info("Test intent published successfully.")

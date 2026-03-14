@@ -189,9 +189,7 @@ async def main():
     # 5. Run Health Check Server in background
     api_port = int(os.getenv("API_PORT", "8000"))
     api_host = os.getenv("API_HOST", "0.0.0.0")  # nosec
-    config = uvicorn.Config(
-        app, host=api_host, port=api_port, log_level="warning"
-    )  # nosec
+    config = uvicorn.Config(app, host=api_host, port=api_port, log_level="warning")  # nosec
     server = uvicorn.Server(config)
 
     # Run uvicorn in a way that it doesn't block the main event loop entirely
