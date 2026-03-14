@@ -12,6 +12,7 @@ from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.clients.factory import ClientFactory
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
+from cio.core.heartbeat import HeartbeatResponder
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
@@ -172,6 +173,10 @@ async def main():
         router=router,
     )
 
+    # Epic 2: Initialize and Start Heartbeat Responder
+    heartbeat = HeartbeatResponder(nats_client=nc, redis_client=redis_client)
+    await heartbeat.start(subject=os.getenv("NATS_TOPIC_HEARTBEAT", "cio.heartbeat"))
+
     # 3. Graceful Shutdown Setup
     stop_event = asyncio.Event()
 
@@ -204,6 +209,7 @@ async def main():
 
     # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
+    await heartbeat.stop()
     await listener.stop()
     await router.close()
     await builder.close()

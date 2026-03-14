@@ -81,14 +81,16 @@ class NurseEnforcer:
             # AC 2: Proactively returns RETRY_SAFE
             latency_ms = int((time.perf_counter() - start_time) * 1000)
 
-            # AC 3: Dispatch RED alert upon timeout
-            AlertManager.dispatch_critical_alert(
-                f"Audit Timeout: Exceeded 200ms ({latency_ms}ms)",
-                context={
-                    "correlation_id": correlation_id,
-                    "latency_ms": latency_ms,
-                    "strategy_id": context.strategy_id,
-                },
+            # AC 3: Dispatch RED alert upon timeout (backgrounded to keep enforcer responsive)
+            asyncio.create_task(
+                AlertManager.dispatch_critical_alert(
+                    f"Audit Timeout: Exceeded 200ms ({latency_ms}ms)",
+                    context={
+                        "correlation_id": correlation_id,
+                        "latency_ms": latency_ms,
+                        "strategy_id": context.strategy_id,
+                    },
+                )
             )
 
             if span and Status and StatusCode:
