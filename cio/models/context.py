@@ -2,17 +2,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from cio.apps.nurse.models import RiskLimits
 from cio.models.enums import PnlTrend, TriggerType, VolatilityLevel
 from cio.models.regime import RegimeResult
-
-
-class RiskLimits(BaseModel):
-    """Hard risk limits enforced by the Code Engine."""
-
-    max_drawdown_pct: float
-    max_orders_global: int
-    max_orders_per_symbol: int
-    max_position_size_usd: float
 
 
 class StrategyStats(BaseModel):

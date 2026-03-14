@@ -1,1 +1,9 @@
-* @yurisa2
+# CODEOWNERS for Petrosa CIO
+# These files control core risk guardrails and require MFA approval.
+
+# Safety Models and Constants
+/cio/apps/nurse/models.py @PetroSa2/security-admins
+/cio/core/safety_constants.py @PetroSa2/security-admins
+
+# Default catch-all
+* @PetroSa2/core-devs
