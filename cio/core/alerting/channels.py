@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import smtplib
@@ -77,6 +78,13 @@ class EmailChannel(AlertChannel):
         self.from_email = os.getenv("ALERT_EMAIL_FROM", "alerts@petrosa.com")
         self.to_email = os.getenv("ALERT_EMAIL_TO", "admin@petrosa.com")
 
+    def _send_sync(self, msg: MIMEText):
+        """Synchronous SMTP send to be run in a thread."""
+        with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+            server.starttls()
+            server.login(self.smtp_user, self.smtp_pass)
+            server.send_message(msg)
+
     async def send(self, message: str, context: dict[str, Any]) -> bool:
         if not self.smtp_user or not self.smtp_pass:
             logger.warning("SMTP credentials not configured, skipping email alert.")
@@ -88,12 +96,8 @@ class EmailChannel(AlertChannel):
             msg["From"] = self.from_email
             msg["To"] = self.to_email
 
-            # Standard smtplib is synchronous, but we wrap it for the async interface
-            # In a production high-load scenario, use an async SMTP client
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.smtp_user, self.smtp_pass)
-                server.send_message(msg)
+            # Use asyncio.to_thread to avoid blocking the event loop (Fix for Copilot)
+            await asyncio.to_thread(self._send_sync, msg)
             
             logger.info("Email alert sent successfully.")
             return True

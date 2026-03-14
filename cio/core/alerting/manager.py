@@ -21,20 +21,19 @@ class AlertManager:
         ctx = context or {}
         correlation_id = ctx.get("correlation_id", "SYSTEM")
 
+        # Payload construction: Standardized keys win over ctx
+        # (Fix for Copilot: merge ctx first, then set standard keys)
+        payload = {
+            **ctx,
+            "alert_type": "RED",
+            "correlation_id": correlation_id,
+        }
+
         # 1. Standardized Log Alert (Ingested by Loki/Alloy)
-        # We keep this for immediate local visibility and Loki ingestion
         logger.critical(
             f"CRITICAL_ALERT: {message}",
-            extra={
-                "alert_type": "RED",
-                "correlation_id": correlation_id,
-                **ctx,
-            },
+            extra=payload,
         )
 
         # 2. Redundant Multi-Channel Dispatch (Grafana API, Otel, Email)
-        await AlertManager._dispatcher.dispatch(message, {
-            "alert_type": "RED",
-            "correlation_id": correlation_id,
-            **ctx,
-        })
+        await AlertManager._dispatcher.dispatch(message, payload)

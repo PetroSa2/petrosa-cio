@@ -26,9 +26,18 @@ class HeartbeatResponder:
 
     async def stop(self):
         """Stops the responder."""
-        if self.subscription:
-            await self.subscription.unsubscribe()
-            logger.info("Heartbeat Responder stopped.")
+        if self.subscription is not None:
+            # Fix for Copilot: Handle both Subscription objects and sids (ints)
+            try:
+                if hasattr(self.subscription, "unsubscribe"):
+                    await self.subscription.unsubscribe()
+                elif isinstance(self.subscription, int):
+                    await self.nc.unsubscribe(self.subscription)
+                logger.info("Heartbeat Responder stopped.")
+            except Exception as e:
+                logger.error(f"Error during heartbeat stop: {e}")
+            finally:
+                self.subscription = None
 
     async def _handle_ping(self, msg: Msg):
         """
@@ -48,7 +57,6 @@ class HeartbeatResponder:
         }
         
         # TODO: Add actual connectivity checks if clients are provided
-        # For now, we assume they are alive if they were passed in
         
         status = "GOVERNANCE_ACTIVE"
         if not health["redis"] or not health["mongodb"]:
