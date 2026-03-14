@@ -21,13 +21,11 @@ class TargetServiceResolver:
         "trade_momentum",
         "ticker_velocity",
         "btc_dominance",
-        "cross_exchange_spread",
         "onchain_metrics",
-        "spread_liquidity",
         "iceberg_detector",
     }
 
-    # Strategies managed by the petrosa-bot-ta-analysis service (28 total)
+    # Strategies managed by the petrosa-bot-ta-analysis service (27 total)
     TA_BOT_SERVICE_STRATEGIES: set[str] = {
         "band_fade_reversal",
         "bear_trap_buy",
@@ -52,7 +50,6 @@ class TargetServiceResolver:
         "minervini_trend_template",
         "momentum_pulse",
         "multi_timeframe_trend_continuation",
-        "order_flow_imbalance",
         "range_break_pop",
         "rsi_extreme_reversal",
         "shooting_star_reversal",
