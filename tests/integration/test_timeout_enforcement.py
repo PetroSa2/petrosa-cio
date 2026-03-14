@@ -12,12 +12,14 @@ async def test_nurse_enforcer_timeout_triggers_retry_safe():
     """
     Validates that the NurseEnforcer triggers a RETRY_SAFE decision
     if the underlying orchestrator takes longer than 200ms.
+    Uses an Event to avoid real wall-clock sleep and flakiness.
     """
-    # 1. Setup Mock Orchestrator that sleeps for 300ms
+    # 1. Setup Mock Orchestrator that waits on an event that never fires
     mock_orchestrator = MagicMock()
+    timeout_event = asyncio.Event()
 
     async def slow_run(*args, **kwargs):
-        await asyncio.sleep(0.3)
+        await timeout_event.wait()
         return MagicMock()  # Should not reach here
 
     mock_orchestrator.run = slow_run

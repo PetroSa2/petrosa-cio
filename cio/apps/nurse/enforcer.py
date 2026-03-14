@@ -14,12 +14,14 @@ from cio.models import (
 # Optional OpenTelemetry imports
 try:
     from opentelemetry.trace import StatusCode
+    from opentelemetry.trace.status import Status
     from petrosa_otel import get_tracer
 
     tracer = get_tracer("petrosa-cio")
 except ImportError:
     tracer = None
     StatusCode = None
+    Status = None
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +91,8 @@ class NurseEnforcer:
                 },
             )
 
-            if span and StatusCode:
-                span.set_status(StatusCode.ERROR)
+            if span and Status and StatusCode:
+                span.set_status(Status(StatusCode.ERROR))
                 span.set_attribute("latency_ms", latency_ms)
                 span.set_attribute("timeout", True)
                 span.end()
@@ -104,8 +106,8 @@ class NurseEnforcer:
                 extra={"correlation_id": correlation_id},
             )
 
-            if span and StatusCode:
-                span.set_status(StatusCode.ERROR)
+            if span and Status and StatusCode:
+                span.set_status(Status(StatusCode.ERROR))
                 span.record_exception(e)
                 span.end()
 

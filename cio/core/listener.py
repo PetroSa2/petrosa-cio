@@ -1,16 +1,22 @@
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Protocol
 
 from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 
 from cio.core.context_builder import ContextBuilder
 from cio.core.router import OutputRouter
-from cio.models import TriggerType
+from cio.models import DecisionResult, TriggerContext, TriggerType
 
 logger = logging.getLogger(__name__)
+
+
+class EnforcerProtocol(Protocol):
+    """Protocol for the NurseEnforcer."""
+
+    async def audit(self, context: TriggerContext) -> DecisionResult: ...
 
 
 class NATSListener:
@@ -22,7 +28,7 @@ class NATSListener:
     def __init__(
         self,
         nats_client: NATS,
-        enforcer: Any,  # NurseEnforcer
+        enforcer: EnforcerProtocol,
         context_builder: ContextBuilder,
         router: OutputRouter,
     ):
