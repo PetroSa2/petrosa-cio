@@ -261,6 +261,37 @@ class OutputRouter:
             dispatch_tasks_data.append(
                 (f"cio.escalation.{strategy_id}", decision.model_dump_json().encode())
             )
+        elif action == ActionType.RETRY_SAFE:
+            # Proactive retry signal for transient timeouts
+            dispatch_tasks_data.append(
+                (f"cio.retry.{strategy_id}", decision.model_dump_json().encode())
+            )
+        elif action == ActionType.FAIL_SAFE:
+            # 1. NATS Failure Signal
+            dispatch_tasks_data.append(
+                (f"cio.failure.{strategy_id}", decision.model_dump_json().encode())
+            )
+            # 2. Trigger Strategy Pause via REST (Double-lock)
+            target_service = TargetServiceResolver.resolve(strategy_id)
+            base_url = (
+                self.ta_bot_url
+                if target_service == ServiceType.TA_BOT
+                else self.realtime_strategies_url
+            )
+            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+            payload = {
+                "parameters": {"enabled": False},
+                "changed_by": "petrosa-cio",
+                "reason": "CRITICAL_FAIL_SAFE: "
+                + (decision.justification or "system failure"),
+                "validate_only": False,
+            }
+            if not is_dry_run:
+                try:
+                    # We don't await here to not block the NATS publish
+                    asyncio.create_task(self.http_client.post(url, json=payload))
+                except Exception as e:
+                    logger.error(f"Failed to fire fail-safe REST pause: {e}")
 
         # 3. Handle Dispatch execution (Checking DRY_RUN)
         nats_publish_tasks = []
