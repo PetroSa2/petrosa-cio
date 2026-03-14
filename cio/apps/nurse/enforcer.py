@@ -82,7 +82,7 @@ class NurseEnforcer:
             latency_ms = int((time.perf_counter() - start_time) * 1000)
 
             # AC 3: Dispatch RED alert upon timeout
-            AlertManager.dispatch_critical_alert(
+            await AlertManager.dispatch_critical_alert(
                 f"Audit Timeout: Exceeded 200ms ({latency_ms}ms)",
                 context={
                     "correlation_id": correlation_id,
