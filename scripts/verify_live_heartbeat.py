@@ -5,6 +5,7 @@ import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.core.context_builder import ContextBuilder
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
@@ -96,10 +97,11 @@ async def run_simulation():
         vector_client = MockVectorClient()
 
         orchestrator = Orchestrator()
+        enforcer = NurseEnforcer(orchestrator=orchestrator)
         router = OutputRouter(nats_client=mock_nc, vector_client=vector_client)
         listener = NATSListener(
             nats_client=mock_nc,
-            orchestrator=orchestrator,
+            enforcer=enforcer,
             context_builder=builder,
             router=router,
         )
