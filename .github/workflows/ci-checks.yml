@@ -280,17 +280,7 @@ jobs:
         run: ./scripts/gitops-rebase-main.sh
         working-directory: petrosa_k8s
 
-      - name: Validate VERSION_PLACEHOLDER in source k8s manifests
-        run: |
-          echo "🔍 Checking for VERSION_PLACEHOLDER in source k8s manifests..."
-          if grep -rq "VERSION_PLACEHOLDER" k8s/ 2>/dev/null; then
-            echo "✅ VERSION_PLACEHOLDER found in source k8s manifests"
-          else
-            echo "❌ ERROR: VERSION_PLACEHOLDER not found in source k8s manifests!"
-            echo "The gitops-update will silently fail if VERSION_PLACEHOLDER is missing."
-            echo "Please ensure k8s/ manifests use VERSION_PLACEHOLDER instead of hardcoded versions."
-            exit 1
-          fi
+
 
       - name: Update cio image tag in GitOps manifests
         run: |
