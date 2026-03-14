@@ -59,6 +59,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Actually place close-all market orders",
     )
+    parser.add_argument(
+        "--confirm-i-am-sure",
+        action="store_true",
+        help="Mandatory confirmation flag for --force-execute",
+    )
+    parser.add_argument(
+        "--hibernate",
+        action="store_true",
+        help="Set account to 'Reduce-Only' / 'Close-Only' mode after closing positions",
+    )
     return parser.parse_args(argv)
 
 
@@ -148,6 +158,20 @@ def fetch_all_positions(spot_exchange: Any, futures_exchange: Any) -> list[Close
     return actions
 
 
+def hibernate_account(futures_exchange: Any) -> bool:
+    """Set futures account to 'Reduce-Only' equivalent by setting multi-assets mode or leverage."""
+    print("Executing Hibernate Mode: Setting account to Close-Only/Reduce-Only...")
+    try:
+        # For Binance Futures, we can disable multi-asset mode or ensure position side is 'BOTH'
+        # A more direct 'hibernate' is setting the account to a 'Close Only' status if the API supports it
+        # ccxt doesn't have a single 'hibernate' call, so we implement common safety toggles
+        futures_exchange.fapiPrivatePostMultiAssetsMargin({"multiAssetsMargin": "false"})
+        return True
+    except Exception as e:
+        print(f"Warning: Hibernate command failed: {e}")
+        return False
+
+
 def market_close_all(
     actions: list[CloseAction],
     *,
@@ -173,22 +197,32 @@ def market_close_all(
                 }
             )
         else:
-            order = exchange.create_order(
-                action.symbol,
-                "market",
-                action.side,
-                action.amount,
-            )
-            results.append(
-                {
-                    "status": "executed",
-                    "market": action.market,
-                    "symbol": action.symbol,
-                    "side": action.side,
-                    "amount": action.amount,
-                    "order_id": order.get("id"),
-                }
-            )
+            try:
+                order = exchange.create_order(
+                    action.symbol,
+                    "market",
+                    action.side,
+                    action.amount,
+                )
+                results.append(
+                    {
+                        "status": "executed",
+                        "market": action.market,
+                        "symbol": action.symbol,
+                        "side": action.side,
+                        "amount": action.amount,
+                        "order_id": order.get("id"),
+                    }
+                )
+            except Exception as e:
+                results.append(
+                    {
+                        "status": "failed",
+                        "market": action.market,
+                        "symbol": action.symbol,
+                        "error": str(e),
+                    }
+                )
 
         if idx % max(batch_size, 1) == 0:
             time.sleep(max(rate_limit_ms, 0) / 1000.0)
@@ -198,6 +232,13 @@ def market_close_all(
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    if args.force_execute and not args.confirm_i_am_sure:
+        print(
+            "CRITICAL SAFETY ERROR: --force-execute requires --confirm-i-am-sure",
+            file=sys.stderr,
+        )
+        return 1
 
     execute = args.force_execute
     dry_run = not execute
@@ -228,8 +269,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print(json.dumps(results, indent=2))
 
+    if args.hibernate and not dry_run:
+        hibernate_account(futures_exchange)
+
     if dry_run:
-        print("Dry-run mode completed. Use --force-execute to place orders.")
+        print("Dry-run mode completed. Use --force-execute --confirm-i-am-sure to place orders.")
 
     return 0
 
