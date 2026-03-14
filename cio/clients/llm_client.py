@@ -272,14 +272,17 @@ class LiteLLMClient(CIO_LLM_Client):
         """Generates real embeddings via litellm.embedding."""
         import litellm
 
+        primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
         embedding_model = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
         api_base = os.getenv("LLM_API_BASE")
-        
+
+        # When using a proxy like Requesty, we prefix with 'openai/' to ensure
+        # litellm uses the OpenAI-compatible route for all models.
+        routing_model = f"openai/{primary_model}" if api_base else embedding_model
+
         try:
             response = await litellm.aembedding(
-                model=routing_primary if api_base else embedding_model, # Re-use routing logic if proxy
-                input=[text],
-                api_base=api_base
+                model=routing_model, input=[text], api_base=api_base
             )
             return response.data[0]["embedding"]
         except Exception as e:
@@ -476,7 +479,7 @@ class MockLLMClient(CIO_LLM_Client):
     async def embed(self, text: str) -> list[float]:
         """Behaviorally honest mock embedding (deterministic for same text)."""
         import hashlib
-        
+
         # Create a semi-random but deterministic vector based on input text
         hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
         return [(hash_val % (i + 1)) / float(hash_val % 100 + 1) for i in range(1536)]

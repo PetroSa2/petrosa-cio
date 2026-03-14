@@ -52,8 +52,12 @@ class QdrantVectorClient:
             # For query, we use a generic strategy embedding or zero vector if no text provided
             # In a real scenario, we might want to query based on current market regime text.
             query_text = f"Recent history for strategy {strategy_id}"
-            query_vector = await self.llm_client.embed(query_text) if self.llm_client else [0.0] * 1536
-            
+            query_vector = (
+                await self.llm_client.embed(query_text)
+                if self.llm_client
+                else [0.0] * 1536
+            )
+
             results = await self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
@@ -93,8 +97,14 @@ class QdrantVectorClient:
             payload["strategy_id"] = strategy_id
 
             # Generate real embedding from the thought trace or summary
-            text_to_embed = payload.get("thought_trace") or payload.get("summary") or str(payload)
-            vector = await self.llm_client.embed(text_to_embed) if self.llm_client else [0.0] * 1536
+            text_to_embed = (
+                payload.get("thought_trace") or payload.get("summary") or str(payload)
+            )
+            vector = (
+                await self.llm_client.embed(text_to_embed)
+                if self.llm_client
+                else [0.0] * 1536
+            )
 
             await self.client.upsert(
                 collection_name=self.collection_name,
