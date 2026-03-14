@@ -35,7 +35,7 @@ class VectorClientProtocol(Protocol):
 class QdrantVectorClient:
     """Production client for Qdrant Vector DB."""
 
-    def __init__(self):
+    def __init__(self, llm_client=None):
         if not QDRANT_AVAILABLE:
             raise ImportError("qdrant-client is required for QdrantVectorClient")
 
@@ -43,15 +43,20 @@ class QdrantVectorClient:
         api_key = os.getenv("QDRANT_API_KEY")
         self.client = AsyncQdrantClient(url=url, api_key=api_key)
         self.collection_name = "cio_strategy_history"
+        self.llm_client = llm_client
 
     async def query(self, strategy_id: str, limit: int = 5) -> str:
         if not QDRANT_AVAILABLE:
             return ""
         try:
-            dummy_vector = [0.0] * 1536
+            # For query, we use a generic strategy embedding or zero vector if no text provided
+            # In a real scenario, we might want to query based on current market regime text.
+            query_text = f"Recent history for strategy {strategy_id}"
+            query_vector = await self.llm_client.embed(query_text) if self.llm_client else [0.0] * 1536
+            
             results = await self.client.search(
                 collection_name=self.collection_name,
-                query_vector=dummy_vector,
+                query_vector=query_vector,
                 query_filter=models.Filter(
                     must=[
                         models.FieldCondition(
@@ -87,12 +92,16 @@ class QdrantVectorClient:
                 payload["timestamp"] = datetime.utcnow().isoformat()
             payload["strategy_id"] = strategy_id
 
+            # Generate real embedding from the thought trace or summary
+            text_to_embed = payload.get("thought_trace") or payload.get("summary") or str(payload)
+            vector = await self.llm_client.embed(text_to_embed) if self.llm_client else [0.0] * 1536
+
             await self.client.upsert(
                 collection_name=self.collection_name,
                 points=[
                     models.PointStruct(
                         id=str(uuid.uuid4()),
-                        vector=[0.0] * 1536,  # Placeholder for future embedding
+                        vector=vector,
                         payload=payload,
                     )
                 ],
@@ -106,8 +115,9 @@ class QdrantVectorClient:
 class MockVectorClient:
     """Mock for local development."""
 
-    def __init__(self):
+    def __init__(self, llm_client=None):
         self._storage = []
+        self.llm_client = llm_client
 
     async def query(self, strategy_id: str, limit: int = 5) -> str:
         return "Mock Historical Context: Strategy has been stable."

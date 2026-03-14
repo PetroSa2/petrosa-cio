@@ -35,6 +35,13 @@ class CIO_LLM_Client(ABC):
         """
         pass
 
+    @abstractmethod
+    async def embed(self, text: str) -> list[float]:
+        """
+        Generates a vector embedding for the given text.
+        """
+        pass
+
     async def complete_with_schema(
         self,
         prompt_id: str,
@@ -261,6 +268,25 @@ class LiteLLMClient(CIO_LLM_Client):
                     timestamp=datetime.utcnow(),
                 )
 
+    async def embed(self, text: str) -> list[float]:
+        """Generates real embeddings via litellm.embedding."""
+        import litellm
+
+        embedding_model = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
+        api_base = os.getenv("LLM_API_BASE")
+        
+        try:
+            response = await litellm.aembedding(
+                model=routing_primary if api_base else embedding_model, # Re-use routing logic if proxy
+                input=[text],
+                api_base=api_base
+            )
+            return response.data[0]["embedding"]
+        except Exception as e:
+            logger.error(f"Embedding generation failed: {e}")
+            # Fallback to zero vector to prevent hard crashes in async audit loops
+            return [0.0] * 1536
+
     def _process_response(
         self, prompt_id: str, response: Any, latency_ms: int
     ) -> RawLLMResponse:
@@ -446,6 +472,14 @@ class MockLLMClient(CIO_LLM_Client):
             latency_ms=max(latency_ms, 50),  # At least 50ms for realism
             timestamp=datetime.utcnow(),
         )
+
+    async def embed(self, text: str) -> list[float]:
+        """Behaviorally honest mock embedding (deterministic for same text)."""
+        import hashlib
+        
+        # Create a semi-random but deterministic vector based on input text
+        hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
+        return [(hash_val % (i + 1)) / float(hash_val % 100 + 1) for i in range(1536)]
 
     def _simulate_classification(self, prompt_id: str, context: dict[str, Any]) -> str:
         """
