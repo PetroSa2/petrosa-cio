@@ -1,12 +1,12 @@
 import json
 import logging
 import uuid
+from typing import Any
 
 from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 
 from cio.core.context_builder import ContextBuilder
-from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
 from cio.models import TriggerType
 
@@ -22,12 +22,12 @@ class NATSListener:
     def __init__(
         self,
         nats_client: NATS,
-        orchestrator: Orchestrator,
+        enforcer: Any,  # NurseEnforcer
         context_builder: ContextBuilder,
         router: OutputRouter,
     ):
         self.nc = nats_client
-        self.orchestrator = orchestrator
+        self.enforcer = enforcer
         self.context_builder = context_builder
         self.router = router
         self.subscription = None
@@ -89,12 +89,12 @@ class NATSListener:
             )
             return
 
-        # 4. Run Orchestrator
+        # 4. Run NurseEnforcer (with Timeout Guard)
         try:
-            decision = await self.orchestrator.run(context)
+            decision = await self.enforcer.audit(context)
         except Exception as e:
             logger.error(
-                f"Orchestrator critical failure: {e}",
+                f"Enforcer critical failure: {e}",
                 extra={"correlation_id": correlation_id},
             )
             return

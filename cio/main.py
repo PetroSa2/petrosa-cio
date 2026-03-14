@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
+from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.clients.factory import ClientFactory
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
@@ -155,6 +156,7 @@ async def main():
     )
 
     orchestrator = Orchestrator(llm_client=llm_client, cache=cache)
+    enforcer = NurseEnforcer(orchestrator=orchestrator)
     router = OutputRouter(
         nats_client=nc,
         vector_client=vector_client,
@@ -165,7 +167,7 @@ async def main():
 
     listener = NATSListener(
         nats_client=nc,
-        orchestrator=orchestrator,
+        enforcer=enforcer,
         context_builder=builder,
         router=router,
     )

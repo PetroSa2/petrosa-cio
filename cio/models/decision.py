@@ -101,3 +101,29 @@ SAFE_DECISION_RESULT = DecisionResult(
     justification="Critical failure: returning safe default decision",
     thought_trace="SYSTEM_ERROR",
 )
+
+TIMEOUT_RETRY_RESULT = DecisionResult(
+    hard_blocked=False,
+    ev_passes=False,
+    cost_viable=False,
+    regime_confidence=ConfidenceLevel.LOW,
+    regime_fit=RegimeFit.NEUTRAL,
+    strategy_health=HealthStatus.HEALTHY,
+    activation_recommendation=ActivationRecommendation.RUN,
+    action=ActionType.RETRY_SAFE,
+    justification="TIMEOUT_GUARD: Audit exceeded 200ms limit. Safe-failing to RETRY_SAFE.",
+    thought_trace="TIMEOUT_ENFORCEMENT",
+)
+
+CRITICAL_FAILURE_RESULT = DecisionResult(
+    hard_blocked=True,
+    ev_passes=False,
+    cost_viable=False,
+    regime_confidence=ConfidenceLevel.LOW,
+    regime_fit=RegimeFit.NEUTRAL,
+    strategy_health=HealthStatus.FAILING,
+    activation_recommendation=ActivationRecommendation.PAUSE,
+    action=ActionType.FAIL_SAFE,
+    justification="CRITICAL_FAILURE: System error or unhandled exception. Safe-failing to FAIL_SAFE.",
+    thought_trace="CRITICAL_FAILURE_ENFORCEMENT",
+)

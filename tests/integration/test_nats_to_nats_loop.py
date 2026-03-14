@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.core.context_builder import ContextBuilder
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
@@ -104,6 +105,7 @@ async def test_full_nats_to_nats_loop():
             )
 
             orchestrator = Orchestrator(cache=mock_cache)
+            enforcer = NurseEnforcer(orchestrator=orchestrator)
             mock_vc = AsyncMock()
             router = OutputRouter(
                 nats_client=mock_nc,
@@ -114,7 +116,7 @@ async def test_full_nats_to_nats_loop():
 
             listener = NATSListener(
                 nats_client=mock_nc,
-                orchestrator=orchestrator,
+                enforcer=enforcer,
                 context_builder=builder,
                 router=router,
             )

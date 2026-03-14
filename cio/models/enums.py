@@ -89,6 +89,8 @@ class ActionType(StrEnum):
     BLOCK = "block"
     PAUSE_STRATEGY = "pause_strategy"
     ESCALATE = "escalate"
+    RETRY_SAFE = "retry_safe"
+    FAIL_SAFE = "fail_safe"
 
 
 class TriggerType(StrEnum):
