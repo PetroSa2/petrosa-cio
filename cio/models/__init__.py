@@ -8,10 +8,12 @@ from cio.models.context import RiskLimits as RiskLimits
 from cio.models.context import StrategyDefaults as StrategyDefaults
 from cio.models.context import StrategyStats as StrategyStats
 from cio.models.context import TriggerContext as TriggerContext
+from cio.models.decision import CRITICAL_FAILURE_RESULT as CRITICAL_FAILURE_RESULT
 
 # Decision models
 from cio.models.decision import SAFE_DECISION_RESULT as SAFE_DECISION_RESULT
 from cio.models.decision import SAFE_DEFAULTS as SAFE_DEFAULTS
+from cio.models.decision import TIMEOUT_RETRY_RESULT as TIMEOUT_RETRY_RESULT
 from cio.models.decision import ActionResult as ActionResult
 from cio.models.decision import DecisionResult as DecisionResult
 
