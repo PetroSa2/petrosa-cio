@@ -187,8 +187,8 @@ class MCPServer:
         if tool_name not in self.tools_by_name:
             raise ValueError(f"unknown tool: {tool_name}")
 
-        # Check Rate Governor for "write" operations (set_*)
-        if tool_name.startswith("set_") and self.rate_governor.is_throttled():
+        # Check Rate Governor for "write" operations (set_* or rollback)
+        if (tool_name.startswith("set_") or tool_name == "rollback_to_version") and self.rate_governor.is_throttled():
             status = self.rate_governor.get_status()
             return {
                 "content": [{
