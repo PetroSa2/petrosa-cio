@@ -14,6 +14,7 @@ try:
     from core.config_manager import ConfigManager
     from core.utils.schema_parser import discover_schema_models, generate_tools
 
+    from cio.core.rate_governor import RateGovernor
     from cio.memory import InstitutionalMemoryService
     from cio.stubs.roi_engine import ShadowROIEngine
 
@@ -78,6 +79,10 @@ class MCPServer:
         self.memory_service = memory_service or InstitutionalMemoryService()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
+        
+        # Initialize Rate Governor
+        nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
+        self.rate_governor = RateGovernor(nats_url=nats_url)
 
         use_llm = os.getenv("MCP_USE_LLM", "false").lower() == "true"
         if use_llm and llm_client is None:
@@ -181,6 +186,18 @@ class MCPServer:
 
         if tool_name not in self.tools_by_name:
             raise ValueError(f"unknown tool: {tool_name}")
+
+        # Check Rate Governor for "write" operations (set_*)
+        if tool_name.startswith("set_") and self.rate_governor.is_throttled():
+            status = self.rate_governor.get_status()
+            return {
+                "content": [{
+                    "type": "text", 
+                    "text": f"ERROR: 429_SIMULATED. Binance API rate limit usage is at {status['usage_pct']}%. "
+                            f"Please BACK OFF and wait for the weight to reset before making further configuration changes."
+                }],
+                "isError": True
+            }
 
         if tool_name.startswith("get_"):
             if tool_name == "get_earnings_summary":
@@ -288,14 +305,21 @@ class MCPServer:
 
     async def run_stdio(self) -> None:
         """Run JSON-RPC loop over stdin/stdout (one JSON request per line)."""
-        while True:
-            line = await asyncio.to_thread(input)
-            if not line:
-                continue
+        # Start rate governor
+        await self.rate_governor.start()
+        
+        try:
+            while True:
+                line = await asyncio.to_thread(input)
+                if not line:
+                    continue
 
-            request = json.loads(line)
-            response = await self.handle_request(request)
-            print(json.dumps(response), flush=True)
+                request = json.loads(line)
+                response = await self.handle_request(request)
+                print(json.dumps(response), flush=True)
+        finally:
+            # Stop rate governor
+            await self.rate_governor.stop()
 
 
 def create_server(module_path: str = "apps.strategist.defaults") -> MCPServer:
