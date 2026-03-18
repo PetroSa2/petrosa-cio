@@ -9,12 +9,13 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from cio.core.rate_governor import RateGovernor
+
 # --- QUARANTINE BLOCK (Fix 2c) ---
 try:
     from core.config_manager import ConfigManager
     from core.utils.schema_parser import discover_schema_models, generate_tools
 
-    from cio.core.rate_governor import RateGovernor
     from cio.memory import InstitutionalMemoryService
     from cio.stubs.roi_engine import ShadowROIEngine
 
