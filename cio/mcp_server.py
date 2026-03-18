@@ -9,12 +9,13 @@ from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any
 
+from cio.core.rate_governor import RateGovernor
+
 # --- QUARANTINE BLOCK (Fix 2c) ---
 try:
     from core.config_manager import ConfigManager
     from core.utils.schema_parser import discover_schema_models, generate_tools
 
-    from cio.core.rate_governor import RateGovernor
     from cio.memory import InstitutionalMemoryService
     from cio.stubs.roi_engine import ShadowROIEngine
 
@@ -187,8 +188,8 @@ class MCPServer:
         if tool_name not in self.tools_by_name:
             raise ValueError(f"unknown tool: {tool_name}")
 
-        # Check Rate Governor for "write" operations (set_*)
-        if tool_name.startswith("set_") and self.rate_governor.is_throttled():
+        # Check Rate Governor for "write" operations (set_* or rollback)
+        if (tool_name.startswith("set_") or tool_name == "rollback_to_version") and self.rate_governor.is_throttled():
             status = self.rate_governor.get_status()
             return {
                 "content": [{

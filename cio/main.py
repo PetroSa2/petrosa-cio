@@ -190,8 +190,14 @@ async def main():
 
     # 4. Start Listening
     intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
-    await listener.start(subject=intents_subject)
-    logger.info(f"CIO Strategist is live and listening on {intents_subject}")
+    # Ensure we use a wildcard to capture strategy-specific intents (e.g., cio.intent.trading.strategy_1)
+    if not intents_subject.endswith(("*", ">")):
+        subscribe_subject = f"{intents_subject}.*"
+    else:
+        subscribe_subject = intents_subject
+        
+    await listener.start(subject=subscribe_subject)
+    logger.info(f"CIO Strategist is live and listening on {subscribe_subject}")
 
     # 5. Run Health Check Server in background
     api_port = int(os.getenv("API_PORT", "8000"))
