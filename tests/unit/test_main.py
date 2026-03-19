@@ -29,9 +29,11 @@ async def test_nats_subscription_with_wildcard():
 
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
+        mock_nats_listener.stop = AsyncMock()
         
         mock_heartbeat = MockHeartbeatResponder.return_value
         mock_heartbeat.start = AsyncMock()
+        mock_heartbeat.stop = AsyncMock()
 
         # Mock the entire main loop to avoid SystemExit or real connections
         with patch("asyncio.create_task"), \
