@@ -53,10 +53,10 @@ class NurseEnforcer:
             span = None
 
         try:
-            # AC 1: Wrap in a 200ms timeout guard
+            # AC 1: Wrap in a 10s timeout guard (increased from 200ms to support LLM latency)
             # AC 2: Return standardized RETRY_SAFE on timeout
             decision = await asyncio.wait_for(
-                self.orchestrator.run(context), timeout=0.2
+                self.orchestrator.run(context), timeout=10.0
             )
 
             # Record final latency
