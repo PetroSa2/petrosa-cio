@@ -1,5 +1,5 @@
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 from cio.main import main
@@ -16,8 +16,14 @@ async def test_nats_subscription_with_wildcard():
     mock_redis = AsyncMock()
     mock_redis.close = AsyncMock()
 
+    # Create a mock for uvicorn Server
+    mock_server = MagicMock()
+    mock_server.serve = AsyncMock()
+    mock_server.shutdown = AsyncMock()
+
     with patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}), \
-         patch("uvicorn.run"), \
+         patch("uvicorn.Config"), \
+         patch("uvicorn.Server", return_value=mock_server), \
          patch("cio.main.attach_logging_handler", return_value=True), \
          patch("cio.main.setup_telemetry", return_value=True), \
          patch("cio.main.NATSListener") as MockNATSListener, \
