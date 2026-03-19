@@ -20,10 +20,10 @@ async def test_nats_subscription_with_wildcard():
          patch("cio.main.NATS", return_value=mock_nc), \
          patch("redis.asyncio.from_url", new_callable=AsyncMock), \
          patch("cio.main.ClientFactory"), \
-         patch("cio.main.ContextBuilder"), \
+         patch("cio.main.ContextBuilder") as MockContextBuilder, \
          patch("cio.main.Orchestrator"), \
          patch("cio.main.NurseEnforcer"), \
-         patch("cio.main.OutputRouter"), \
+         patch("cio.main.OutputRouter") as MockOutputRouter, \
          patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder, \
          patch("prometheus_client.start_http_server"):
 
@@ -34,6 +34,12 @@ async def test_nats_subscription_with_wildcard():
         mock_heartbeat = MockHeartbeatResponder.return_value
         mock_heartbeat.start = AsyncMock()
         mock_heartbeat.stop = AsyncMock()
+
+        mock_router = MockOutputRouter.return_value
+        mock_router.close = AsyncMock()
+
+        mock_builder = MockContextBuilder.return_value
+        mock_builder.close = AsyncMock()
 
         # Mock the entire main loop to avoid SystemExit or real connections
         with patch("asyncio.create_task"), \
