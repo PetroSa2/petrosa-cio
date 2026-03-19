@@ -11,6 +11,10 @@ async def test_nats_subscription_with_wildcard():
     # Create a mock for the NATS client that supports connect()
     mock_nc = AsyncMock()
     mock_nc.connect = AsyncMock()
+    
+    # Create a mock for the Redis client
+    mock_redis = AsyncMock()
+    mock_redis.close = AsyncMock()
 
     with patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}), \
          patch("uvicorn.run"), \
@@ -18,7 +22,7 @@ async def test_nats_subscription_with_wildcard():
          patch("cio.main.setup_telemetry", return_value=True), \
          patch("cio.main.NATSListener") as MockNATSListener, \
          patch("cio.main.NATS", return_value=mock_nc), \
-         patch("redis.asyncio.from_url", new_callable=AsyncMock), \
+         patch("redis.asyncio.from_url", return_value=mock_redis), \
          patch("cio.main.ClientFactory"), \
          patch("cio.main.ContextBuilder") as MockContextBuilder, \
          patch("cio.main.Orchestrator"), \
