@@ -1,7 +1,34 @@
+import asyncio
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock
-from cio.core.heartbeat import HeartbeatResponder
+from unittest.mock import AsyncMock, MagicMock, patch
+from cio.core.heartbeat import HeartbeatResponder, HeartbeatPublisher
+
+@pytest.mark.asyncio
+async def test_heartbeat_publisher_lifecycle():
+    """Test that HeartbeatPublisher starts, publishes, and stops cleanly."""
+    mock_nc = AsyncMock()
+    # Use short interval for testing
+    publisher = HeartbeatPublisher(mock_nc, interval_seconds=0.01)
+    
+    await publisher.start("test.heartbeat")
+    assert publisher.running is True
+    assert publisher.task is not None
+    
+    # Wait for at least one publish
+    await asyncio.sleep(0.05)
+    
+    mock_nc.publish.assert_called()
+    args, _ = mock_nc.publish.call_args
+    assert args[0] == "test.heartbeat"
+    
+    data = json.loads(args[1].decode())
+    assert data["service"] == "petrosa-cio"
+    assert data["status"] == "GOVERNANCE_ACTIVE"
+    
+    await publisher.stop()
+    assert publisher.running is False
+    assert publisher.task is None
 
 @pytest.mark.asyncio
 async def test_heartbeat_responder_handle_ping():

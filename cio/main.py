@@ -175,10 +175,10 @@ async def main():
 
     # Epic 2: Initialize and Start Heartbeat System (Responder + Publisher)
     heartbeat_subject = os.getenv("NATS_TOPIC_HEARTBEAT", "cio.heartbeat")
-    
+
     responder = HeartbeatResponder(nats_client=nc, redis_client=redis_client)
     await responder.start(subject=heartbeat_subject)
-    
+
     publisher = HeartbeatPublisher(nats_client=nc, interval_seconds=10.0)
     await publisher.start(subject=heartbeat_subject)
 

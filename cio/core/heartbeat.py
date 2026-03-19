@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -85,14 +86,14 @@ class HeartbeatPublisher:
     def __init__(self, nats_client: NATS, interval_seconds: float = 10.0):
         self.nc = nats_client
         self.interval = interval_seconds
-        self.task: asyncio.Task | None = None
+        self.task: asyncio.Task[None] | None = None
         self.running = False
 
     async def start(self, subject: str = "cio.heartbeat"):
         """Starts the periodic heartbeat publication."""
         if self.running:
             return
-        
+
         self.running = True
         self.task = asyncio.create_task(self._run_loop(subject))
         logger.info(f"Heartbeat Publisher started on subject: {subject} (interval: {self.interval}s)")
@@ -101,7 +102,6 @@ class HeartbeatPublisher:
         """Stops the heartbeat publisher."""
         self.running = False
         if self.task:
-            self.task.cancel()
             try:
                 await self.task
             except asyncio.CancelledError:
@@ -123,5 +123,5 @@ class HeartbeatPublisher:
                 logger.debug(f"Heartbeat published to {subject}")
             except Exception as e:
                 logger.error(f"Error publishing heartbeat: {e}")
-            
+
             await asyncio.sleep(self.interval)
