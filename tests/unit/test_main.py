@@ -8,10 +8,16 @@ from cio.main import main
 @pytest.mark.asyncio
 async def test_nats_subscription_with_wildcard():
     """Verify that the NATS listener subscribes to the correct subject with a wildcard."""
+    # Create a mock for the NATS client that supports connect()
+    mock_nc = AsyncMock()
+    mock_nc.connect = AsyncMock()
+
     with patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}), \
          patch("uvicorn.run"), \
+         patch("cio.main.attach_logging_handler", return_value=True), \
+         patch("cio.main.setup_telemetry", return_value=True), \
          patch("cio.main.NATSListener") as MockNATSListener, \
-         patch("nats.connect", new_callable=AsyncMock) as mock_nats_connect, \
+         patch("cio.main.NATS", return_value=mock_nc), \
          patch("redis.asyncio.from_url", new_callable=AsyncMock), \
          patch("cio.main.ClientFactory"), \
          patch("cio.main.ContextBuilder"), \
@@ -23,24 +29,17 @@ async def test_nats_subscription_with_wildcard():
 
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
-        mock_nats_connect.return_value = AsyncMock()
 
-        # Create a mock for the stop_event that is set after a short delay
-        import asyncio
-
-        async def set_stop_event():
-            await asyncio.sleep(0.1)
-            # Find the stop_event in the main's local scope and set it
-            for task in asyncio.all_tasks():
-                if task.get_coro().__name__ == 'main':
-                    for stack_frame in task.get_stack():
-                        if 'stop_event' in stack_frame.f_locals:
-                            stack_frame.f_locals['stop_event'].set()
-                            break
-                    break
-
-        asyncio.create_task(set_stop_event())
-        await main()
+        # Mock the entire main loop to avoid SystemExit or real connections
+        with patch("asyncio.create_task"), \
+             patch("asyncio.Event") as mock_event_cls:
+            
+            mock_stop_event = mock_event_cls.return_value
+            # Make the wait() return immediately
+            mock_stop_event.wait = AsyncMock()
+            
+            await main()
 
         # Verify that the listener was started with the correct subject
+        # cio.main.py appends .* if it's missing
         mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.*")
