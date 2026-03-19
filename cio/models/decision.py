@@ -111,7 +111,7 @@ TIMEOUT_RETRY_RESULT = DecisionResult(
     strategy_health=HealthStatus.HEALTHY,
     activation_recommendation=ActivationRecommendation.RUN,
     action=ActionType.RETRY_SAFE,
-    justification="TIMEOUT_GUARD: Audit exceeded 200ms limit. Safe-failing to RETRY_SAFE.",
+    justification="TIMEOUT_GUARD: Audit exceeded time limit. Safe-failing to RETRY_SAFE.",
     thought_trace="TIMEOUT_ENFORCEMENT",
 )
 
