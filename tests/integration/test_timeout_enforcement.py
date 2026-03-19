@@ -11,7 +11,7 @@ from cio.models import ActionType, TriggerContext
 async def test_nurse_enforcer_timeout_triggers_retry_safe():
     """
     Validates that the NurseEnforcer triggers a RETRY_SAFE decision
-    if the underlying orchestrator takes longer than 200ms.
+    if the underlying orchestrator takes longer than the timeout.
     Uses an Event to avoid real wall-clock sleep and flakiness.
     """
     # 1. Setup Mock Orchestrator that waits on an event that never fires
@@ -45,7 +45,7 @@ async def test_nurse_enforcer_timeout_triggers_retry_safe():
 async def test_nurse_enforcer_fast_audit_passes():
     """
     Validates that the NurseEnforcer passes the decision through
-    if the orchestrator is fast (under 200ms).
+    if the orchestrator is fast (under the timeout).
     """
     # 1. Setup Mock Orchestrator that is fast
     mock_orchestrator = MagicMock()
