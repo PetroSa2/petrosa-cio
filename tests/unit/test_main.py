@@ -24,11 +24,14 @@ async def test_nats_subscription_with_wildcard():
          patch("cio.main.Orchestrator"), \
          patch("cio.main.NurseEnforcer"), \
          patch("cio.main.OutputRouter"), \
-         patch("cio.main.HeartbeatResponder"), \
+         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder, \
          patch("prometheus_client.start_http_server"):
 
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
+        
+        mock_heartbeat = MockHeartbeatResponder.return_value
+        mock_heartbeat.start = AsyncMock()
 
         # Mock the entire main loop to avoid SystemExit or real connections
         with patch("asyncio.create_task"), \
