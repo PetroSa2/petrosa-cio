@@ -1,6 +1,5 @@
-import asyncio
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
 import pytest
 from cio.main import main
@@ -9,56 +8,59 @@ from cio.main import main
 @pytest.mark.asyncio
 async def test_nats_subscription_with_wildcard():
     """Verify that the NATS listener subscribes to the correct subject with a wildcard."""
+    # Create a mock for the NATS client that supports connect()
+    mock_nc = AsyncMock()
+    mock_nc.connect = AsyncMock()
     
+    # Create a mock for the Redis client
+    mock_redis = AsyncMock()
+    mock_redis.close = AsyncMock()
+
+    # Create a mock for uvicorn Server
+    mock_server = MagicMock()
+    mock_server.serve = AsyncMock()
+    mock_server.shutdown = AsyncMock()
+
     with patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}), \
-         patch("cio.main.NATS") as MockNATSClass, \
-         patch("redis.asyncio.from_url") as mock_redis_from_url, \
-         patch("cio.main.AsyncRedisCache"), \
+         patch("uvicorn.Config"), \
+         patch("uvicorn.Server", return_value=mock_server), \
+         patch("cio.main.attach_logging_handler", return_value=True), \
+         patch("cio.main.setup_telemetry", return_value=True), \
+         patch("cio.main.NATSListener") as MockNATSListener, \
+         patch("cio.main.NATS", return_value=mock_nc), \
+         patch("redis.asyncio.from_url", return_value=mock_redis), \
          patch("cio.main.ClientFactory"), \
          patch("cio.main.ContextBuilder") as MockContextBuilder, \
          patch("cio.main.Orchestrator"), \
          patch("cio.main.NurseEnforcer"), \
          patch("cio.main.OutputRouter") as MockOutputRouter, \
-         patch("cio.main.NATSListener") as MockNATSListener, \
          patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder, \
-         patch("prometheus_client.start_http_server"), \
-         patch("uvicorn.Server") as MockUvicornServer:
-         
-        # Configure the NATS mock instance
-        mock_nats_instance = AsyncMock()
-        mock_nats_instance.close = AsyncMock()
-        MockNATSClass.return_value = mock_nats_instance
+         patch("prometheus_client.start_http_server"):
 
-        # Configure Redis mock instance
-        mock_redis_instance = AsyncMock()
-        mock_redis_instance.close = AsyncMock()
-        mock_redis_from_url.return_value = mock_redis_instance
-
-        # Configure the uvicorn mock
-        mock_uvicorn_instance = MockUvicornServer.return_value
-        mock_uvicorn_instance.serve = AsyncMock()
-        mock_uvicorn_instance.shutdown = AsyncMock()
-
-        # Configure the NATSListener mock instance
-        mock_nats_listener_instance = MockNATSListener.return_value
-        mock_nats_listener_instance.start = AsyncMock()
-        mock_nats_listener_instance.stop = AsyncMock()
+        mock_nats_listener = MockNATSListener.return_value
+        mock_nats_listener.start = AsyncMock()
+        mock_nats_listener.stop = AsyncMock()
         
-        mock_router_instance = MockOutputRouter.return_value
-        mock_router_instance.close = AsyncMock()
+        mock_heartbeat = MockHeartbeatResponder.return_value
+        mock_heartbeat.start = AsyncMock()
+        mock_heartbeat.stop = AsyncMock()
 
-        mock_builder_instance = MockContextBuilder.return_value
-        mock_builder_instance.close = AsyncMock()
+        mock_router = MockOutputRouter.return_value
+        mock_router.close = AsyncMock()
 
-        mock_heartbeat_instance = MockHeartbeatResponder.return_value
-        mock_heartbeat_instance.start = AsyncMock()
-        mock_heartbeat_instance.stop = AsyncMock()
+        mock_builder = MockContextBuilder.return_value
+        mock_builder.close = AsyncMock()
 
-        with patch("asyncio.Event.wait", new_callable=AsyncMock):
-            try:
-                await main()
-            except Exception as e:
-                pytest.fail(f"main() failed unexpectedly with exception: {e}")
+        # Mock the entire main loop to avoid SystemExit or real connections
+        with patch("asyncio.create_task"), \
+             patch("asyncio.Event") as mock_event_cls:
+            
+            mock_stop_event = mock_event_cls.return_value
+            # Make the wait() return immediately
+            mock_stop_event.wait = AsyncMock()
+            
+            await main()
 
-        # The core assertion: Verify that the listener was started with the correct wildcard subject
-        mock_nats_listener_instance.start.assert_called_once_with(subject="cio.intent.trading.*")
+        # Verify that the listener was started with the correct subject
+        # cio.main.py appends .* if it's missing
+        mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.*")

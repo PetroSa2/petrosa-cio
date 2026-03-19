@@ -52,9 +52,9 @@ class ContextBuilder:
                 "All internal HTTP requests from ContextBuilder will be unauthenticated."
             )
 
-        # Increased timeout to 15s to handle cluster latency under load
+        # Increased timeout to 30s to handle cluster latency under load
         self.client = httpx.AsyncClient(
-            timeout=15.0,
+            timeout=30.0,
             headers={
                 "X-Petrosa-Issuer": "CIO",
                 "X-Petrosa-Internal-Token": token,

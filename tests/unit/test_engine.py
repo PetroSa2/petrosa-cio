@@ -103,3 +103,19 @@ def test_code_engine_regime_adjustment():
 
     # EV = (0.6 * 0.052) - (0.4 * 0.024) = 0.0312 - 0.0096 = 0.0216
     assert pytest.approx(result.gross_ev, 0.0001) == 0.0216
+
+
+def test_code_engine_regime_confidence_bypass():
+    """Verifies that hard blocks are bypassed when regime confidence is low."""
+    ctx = build_test_context()
+    ctx.regime.regime = RegimeEnum.CHOPPY
+
+    # High confidence -> Should block
+    ctx.regime.regime_confidence = ConfidenceLevel.HIGH
+    result = CodeEngine.run(ctx)
+    assert result.hard_blocked is True
+
+    # Low confidence -> Should NOT block (bypass fix)
+    ctx.regime.regime_confidence = ConfidenceLevel.LOW
+    result = CodeEngine.run(ctx)
+    assert result.hard_blocked is False

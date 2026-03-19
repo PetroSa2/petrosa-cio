@@ -86,7 +86,10 @@ class CodeEngine:
             return result
 
         # 2. REGIME HARD BLOCKS (Fix 4)
-        if context.regime.regime in REGIME_HARD_BLOCKS:
+        if (
+            context.regime.regime in REGIME_HARD_BLOCKS
+            and context.regime.regime_confidence != "low"
+        ):
             result.hard_blocked = True
             result.block_reason = REGIME_HARD_BLOCKS[context.regime.regime]
             logger.warning(

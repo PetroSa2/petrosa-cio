@@ -25,11 +25,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Global configuration for Nurse Enforcer
+# Increased from 200ms to 10s to support LLM latency requirements
+AUDIT_TIMEOUT_SECONDS = 10.0
+
 
 class NurseEnforcer:
     """
     Enforces strict audit rules on trading intents.
-    Wrapped in a 200ms timeout guard to ensure low-latency fail-safe.
+    Wrapped in a timeout guard to ensure low-latency fail-safe.
     """
 
     def __init__(self, orchestrator: Orchestrator):
@@ -37,7 +41,7 @@ class NurseEnforcer:
 
     async def audit(self, context: TriggerContext) -> DecisionResult:
         """
-        Executes the reasoning loop via Orchestrator with a 200ms timeout guard.
+        Executes the reasoning loop via Orchestrator with a timeout guard.
         If the timeout is hit, returns RETRY_SAFE to the fleet.
         If a critical exception occurs, returns FAIL_SAFE.
         """
@@ -53,10 +57,10 @@ class NurseEnforcer:
             span = None
 
         try:
-            # AC 1: Wrap in a 200ms timeout guard
+            # AC 1: Wrap in a timeout guard
             # AC 2: Return standardized RETRY_SAFE on timeout
             decision = await asyncio.wait_for(
-                self.orchestrator.run(context), timeout=0.2
+                self.orchestrator.run(context), timeout=AUDIT_TIMEOUT_SECONDS
             )
 
             # Record final latency
@@ -82,9 +86,10 @@ class NurseEnforcer:
             latency_ms = int((time.perf_counter() - start_time) * 1000)
 
             # AC 3: Dispatch RED alert upon timeout (backgrounded to keep enforcer responsive)
+            timeout_limit_ms = int(AUDIT_TIMEOUT_SECONDS * 1000)
             asyncio.create_task(
                 AlertManager.dispatch_critical_alert(
-                    f"Audit Timeout: Exceeded 200ms ({latency_ms}ms)",
+                    f"Audit Timeout: Exceeded {timeout_limit_ms}ms ({latency_ms}ms)",
                     context={
                         "correlation_id": correlation_id,
                         "latency_ms": latency_ms,
