@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import MagicMock, patch
 from cio.mcp_server import MCPServer
 
 @pytest.mark.asyncio
