@@ -35,15 +35,20 @@ async def test_nats_subscription_with_wildcard():
          patch("cio.main.NurseEnforcer"), \
          patch("cio.main.OutputRouter") as MockOutputRouter, \
          patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder, \
+         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher, \
          patch("prometheus_client.start_http_server"):
 
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
         mock_nats_listener.stop = AsyncMock()
         
-        mock_heartbeat = MockHeartbeatResponder.return_value
-        mock_heartbeat.start = AsyncMock()
-        mock_heartbeat.stop = AsyncMock()
+        mock_heartbeat_responder = MockHeartbeatResponder.return_value
+        mock_heartbeat_responder.start = AsyncMock()
+        mock_heartbeat_responder.stop = AsyncMock()
+
+        mock_heartbeat_publisher = MockHeartbeatPublisher.return_value
+        mock_heartbeat_publisher.start = AsyncMock()
+        mock_heartbeat_publisher.stop = AsyncMock()
 
         mock_router = MockOutputRouter.return_value
         mock_router.close = AsyncMock()

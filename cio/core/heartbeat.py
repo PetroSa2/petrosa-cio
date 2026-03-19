@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -74,3 +75,53 @@ class HeartbeatResponder:
 
         await self.nc.publish(msg.reply, json.dumps(response).encode())
         logger.debug(f"Heartbeat replied: {status} in {latency_ms}ms")
+
+
+class HeartbeatPublisher:
+    """
+    Periodically publishes heartbeats to 'cio.heartbeat' (push model).
+    This ensures that passive monitors like petrosa-tradeengine can detect
+    that the CIO is alive without performing active pings.
+    """
+    def __init__(self, nats_client: NATS, interval_seconds: float = 10.0):
+        self.nc = nats_client
+        self.interval = interval_seconds
+        self.task: asyncio.Task[None] | None = None
+        self.running = False
+
+    async def start(self, subject: str = "cio.heartbeat"):
+        """Starts the periodic heartbeat publication."""
+        if self.running:
+            return
+
+        self.running = True
+        self.task = asyncio.create_task(self._run_loop(subject))
+        logger.info(f"Heartbeat Publisher started on subject: {subject} (interval: {self.interval}s)")
+
+    async def stop(self):
+        """Stops the heartbeat publisher."""
+        self.running = False
+        if self.task:
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+        logger.info("Heartbeat Publisher stopped.")
+
+    async def _run_loop(self, subject: str):
+        """Main loop for publishing heartbeats."""
+        while self.running:
+            try:
+                heartbeat_data = {
+                    "service": "petrosa-cio",
+                    "status": "GOVERNANCE_ACTIVE",
+                    "timestamp": time.time(),
+                    "version": "1.0.0"
+                }
+                await self.nc.publish(subject, json.dumps(heartbeat_data).encode())
+                logger.debug(f"Heartbeat published to {subject}")
+            except Exception as e:
+                logger.error(f"Error publishing heartbeat: {e}")
+
+            await asyncio.sleep(self.interval)
