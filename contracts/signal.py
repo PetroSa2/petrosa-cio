@@ -190,7 +190,7 @@ class Signal(BaseModel):
         if isinstance(v, str):
             # Parse ISO format string
             try:
-                dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(v)
                 return dt
             except ValueError:
                 # Try parsing as Unix timestamp
