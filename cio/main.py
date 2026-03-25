@@ -195,9 +195,11 @@ async def main():
 
     # 4. Start Listening
     intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
-    # Ensure we use a wildcard to capture strategy-specific intents (e.g., cio.intent.trading.strategy_1)
-    if not intents_subject.endswith(("*", ">")):
-        subscribe_subject = f"{intents_subject}.*"
+    # AC: Use multi-token wildcard '>' to capture all strategy-specific intents
+    # following the Petrosa NATS contract.
+    if not intents_subject.endswith((">")):
+        base_subject = intents_subject.rstrip(".*")
+        subscribe_subject = f"{base_subject}.>"
     else:
         subscribe_subject = intents_subject
         

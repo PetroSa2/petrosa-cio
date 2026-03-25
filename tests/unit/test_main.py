@@ -67,5 +67,5 @@ async def test_nats_subscription_with_wildcard():
             await main()
 
         # Verify that the listener was started with the correct subject
-        # cio.main.py appends .* if it's missing
-        mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.*")
+        # cio.main.py appends .> if it's missing (following Petrosa NATS contract)
+        mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.>")
