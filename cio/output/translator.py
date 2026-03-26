@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from cio.models import DecisionResult, TriggerContext
@@ -78,7 +78,7 @@ class TradeEngineTranslator:
                 "source": "petrosa-cio",
                 "strength": "strong",
                 "strategy_mode": "llm_reasoning",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 # Map risk management parameters from decision (primary) or payload
                 "stop_loss": context.trigger_payload.get("stop_loss"),
                 "stop_loss_pct": decision.stop_loss_pct

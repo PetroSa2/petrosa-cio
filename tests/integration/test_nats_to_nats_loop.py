@@ -105,6 +105,8 @@ async def test_full_nats_to_nats_loop():
             )
 
             orchestrator = Orchestrator(cache=mock_cache)
+            original_run = orchestrator.run
+            orchestrator.run = AsyncMock(side_effect=original_run)
             enforcer = NurseEnforcer(orchestrator=orchestrator)
             mock_vc = AsyncMock()
             router = OutputRouter(
@@ -123,7 +125,7 @@ async def test_full_nats_to_nats_loop():
 
             # 3. Create a dummy NATS message
             mock_msg = MagicMock()
-            mock_msg.subject = "trade.intent.BTCUSDT"
+            mock_msg.subject = "cio.intent.trading.momentum_v1"
             mock_msg.data = json.dumps(
                 {
                     "symbol": "BTCUSDT",
@@ -144,6 +146,7 @@ async def test_full_nats_to_nats_loop():
             # 5. Assertions
             # Verify NATS publish was called TWICE (Legacy + Modern)
             assert mock_nc.publish.call_count == 2
+            assert orchestrator.run.await_count == 1
 
             # Check Legacy Call (signals.trading)
             legacy_call = mock_nc.publish.call_args_list[0]
