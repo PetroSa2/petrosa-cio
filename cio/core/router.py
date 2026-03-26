@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 class NATSClientProtocol(Protocol):
     """Structural protocol for NATS client to ensure testability."""
 
-    async def publish(self, subject: str, payload: bytes) -> None: ...
+    async def publish(self, subject: str, payload: bytes) -> None:
+        ...
 
 
 class OutputRouter:
@@ -84,7 +85,7 @@ class OutputRouter:
         correlation_id = context.correlation_id
         strategy_id = context.strategy_id
         action = decision.action or ActionType.SKIP
-        is_dry_run = os.getenv("DRY_RUN", "true").lower() == "true"
+        is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
         # 0. Record Metrics
         from cio.core.metrics import DECISION_ACTIONS
@@ -336,15 +337,6 @@ class OutputRouter:
                 },
             )
         elif not is_dry_run and nats_publish_tasks:
-            logger.info(
-                "T-Junction dispatch successful",
-                extra={
-                    "correlation_id": correlation_id,
-                    "action": action.value,
-                    "strategy_id": strategy_id,
-                    "targets": [t[0] for t in dispatch_tasks_data],
-                },
-            )
             logger.info(
                 "T-Junction dispatch successful",
                 extra={
