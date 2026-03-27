@@ -95,6 +95,12 @@ test: validate-python ## Run all tests with coverage
 	ENVIRONMENT=testing PYTHONPATH=. pytest tests/ -v --cov=cio --cov-report=term-missing --cov-fail-under=$(COVERAGE_THRESHOLD)
 	@echo "✅ Tests completed!"
 
+test-coverage: test ## Alias for test (standardized)
+
+test-quality: validate-python ## Run test quality check (assertions check)
+	@echo "🔍 Checking test quality..."
+	python3 scripts/check-test-assertions.py $(shell find tests -name "test_*.py")
+
 unit: ## Run unit tests only
 	@echo "🧪 Running unit tests..."
 	PYTHONPATH=. pytest tests/unit/ -v
