@@ -4,6 +4,17 @@
 # Version: 2.0
 # Service: petrosa-cio
 
+# Python enforcement
+PYTHON_VERSION_EXPECTED := 3.11
+PYTHON_VERSION_ACTUAL := $(shell python3 --version | cut -d' ' -f2 | cut -d'.' -f1,2)
+
+# Colors for output
+RED := \033[0;31m
+GREEN := \033[0;32m
+YELLOW := \033[0;33m
+BLUE := \033[0;34m
+NC := \033[0m # No Color
+
 # Variables
 PYTHON := python3
 COVERAGE_THRESHOLD := 40
@@ -18,23 +29,34 @@ RUFF := $(if $(wildcard ./venv/bin/ruff),./venv/bin/ruff,ruff)
 .PHONY: security build container
 .PHONY: pipeline
 
+.PHONY: pipeline validate-python
+
 # Default target
 .DEFAULT_GOAL := help
 
 help: ## Show this help message
-	@echo "🚀 Petrosa $(IMAGE_NAME) - Standard Development Commands"
-	@echo "========================================================"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+	@echo "$(BLUE)Petrosa $(IMAGE_NAME) - Standard Development Commands$(NC)"
+	@echo "$(BLUE)========================================================$(NC)"
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(GREEN)%-20s$(NC) %s\n", $$1, $$2}'
+
+validate-python: ## Validate Python version is 3.11
+	@echo "$(BLUE)Validating Python version...$(NC)"
+	@if [ "$(PYTHON_VERSION_ACTUAL)" != "$(PYTHON_VERSION_EXPECTED)" ]; then \
+		echo "$(RED)❌ ERROR: Python $(PYTHON_VERSION_EXPECTED) required, found $(PYTHON_VERSION_ACTUAL)$(NC)"; \
+		echo "$(YELLOW)💡 Recommended resolution: Use 'pyenv install 3.11.9 && pyenv local 3.11.9'$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(GREEN)✅ Python version $(PYTHON_VERSION_ACTUAL) matches expected $(PYTHON_VERSION_EXPECTED)$(NC)"
 
 # Setup and Installation
-setup: ## Complete environment setup with dependencies
-	@echo "🚀 Setting up development environment..."
+setup: validate-python ## Complete environment setup with dependencies
+	@echo "$(BLUE)Setting up development environment...$(NC)"
 	$(PYTHON) -m pip install --upgrade pip
 	$(PYTHON) -m pip install -r requirements.txt
 	$(PYTHON) -m pip install -r requirements-dev.txt
 	@echo "✅ Setup completed!"
 
-install: ## Install production dependencies only
+install: validate-python ## Install production dependencies only
 	@echo "📦 Installing production dependencies..."
 	$(PYTHON) -m pip install -r requirements.txt
 
@@ -68,8 +90,8 @@ type-check: ## Run type checking with mypy
 	@echo "✅ Type checking completed!"
 
 # Testing
-test: ## Run all tests with coverage
-	@echo "🧪 Running all tests with coverage..."
+test: validate-python ## Run all tests with coverage
+	@echo "$(BLUE)🧪 Running all tests with coverage...$(NC)"
 	ENVIRONMENT=testing PYTHONPATH=. pytest tests/ -v --cov=cio --cov-report=term-missing --cov-fail-under=$(COVERAGE_THRESHOLD)
 	@echo "✅ Tests completed!"
 
@@ -93,8 +115,8 @@ build: ## Build Docker image
 	docker build -t $(IMAGE_NAME):latest .
 
 # Complete Pipeline
-pipeline: ## Run complete CI/CD pipeline locally
-	@echo "🔄 Running complete CI/CD pipeline..."
+pipeline: validate-python ## Run complete CI/CD pipeline locally
+	@echo "$(BLUE)🔄 Running complete CI/CD pipeline...$(NC)"
 	$(MAKE) clean
 	$(MAKE) format
 	$(MAKE) lint
