@@ -37,12 +37,15 @@ class Orchestrator:
         Follows the HOT / WARM / COLD path logic.
         """
         start_time = time.perf_counter()
+        provider_name = self.client.__class__.__name__
+        
         logger.info(
-            "Starting reasoning loop",
+            f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id}",
             extra={
                 "correlation_id": context.correlation_id,
                 "trigger_type": context.trigger_type.value,
                 "strategy_id": context.strategy_id,
+                "llm_provider": provider_name,
             },
         )
 
@@ -51,18 +54,21 @@ class Orchestrator:
             code_result = CodeEngine.run(context)
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks
-                logger.info(
-                    "Hard block detected by engine",
+                logger.warning(
+                    f"⛔ HARD BLOCK DETECTED | Reason: {code_result.block_reason}",
                     extra={
                         "correlation_id": context.correlation_id,
                         "block_reason": code_result.block_reason,
                     },
                 )
                 # We still need placeholder regime/strategy results for the assembler
-                # Safe defaults are fine here since they aren't used for decisions
                 regime_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
                 strategy_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_STRATEGY_ASSESSOR"]
 
+                logger.info(
+                    "Executing final Action Classifier for hard-blocked trade",
+                    extra={"correlation_id": context.correlation_id}
+                )
                 return await self.action_classifier.classify(
                     context, code_result, regime_fallback, strategy_fallback
                 )
@@ -80,7 +86,7 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached regime: {e}")
 
             if not regime:
-                logger.debug("Regime cache miss. Running Regime Classifier.")
+                logger.info("Running Regime Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
                 regime = await self.regime_analyst.classify(context)
                 if self.cache:
                     await self.cache.set(
@@ -103,7 +109,7 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached strategy: {e}")
 
             if not strategy:
-                logger.debug("Strategy cache miss. Running Strategy Assessor.")
+                logger.info("Running Strategy Assessor (LLM)...", extra={"correlation_id": context.correlation_id})
                 strategy = await self.strategy_assessor.assess(context)
                 if self.cache:
                     await self.cache.set(
@@ -113,17 +119,19 @@ class Orchestrator:
                     )
 
             # 4. ACTION CLASSIFICATION
+            logger.info("Running Final Action Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
             decision = await self.action_classifier.classify(
                 context, code_result, regime, strategy
             )
 
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             logger.info(
-                f"Reasoning loop complete: {decision.action}",
+                f"✅ REASONING LOOP COMPLETE | Action: {decision.action} | Latency: {latency_ms}ms",
                 extra={
                     "correlation_id": context.correlation_id,
                     "latency_ms": latency_ms,
                     "action": str(decision.action),
+                    "llm_provider": provider_name,
                 },
             )
 

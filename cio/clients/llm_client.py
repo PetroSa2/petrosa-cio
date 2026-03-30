@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -165,7 +165,7 @@ class LiteLLMClient(CIO_LLM_Client):
                 input_tokens=0,
                 output_tokens=0,
                 latency_ms=0,
-                timestamp=datetime.now(UTC),
+                timestamp=datetime.now(timezone.utc),
             )
 
         primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
@@ -265,7 +265,7 @@ class LiteLLMClient(CIO_LLM_Client):
                     input_tokens=0,
                     output_tokens=0,
                     latency_ms=latency_ms,
-                    timestamp=datetime.now(UTC),
+                    timestamp=datetime.now(timezone.utc),
                 )
 
     async def embed(self, text: str) -> list[float]:
@@ -329,7 +329,7 @@ class LiteLLMClient(CIO_LLM_Client):
             output_tokens=usage.completion_tokens,
             cached_tokens=cached_tokens,
             latency_ms=latency_ms,
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(timezone.utc),
         )
 
     async def get_cached(self, cache_key: str) -> str | None:
@@ -394,7 +394,7 @@ class MockLLMClient(CIO_LLM_Client):
                     input_tokens=0,
                     output_tokens=0,
                     latency_ms=latency_ms,
-                    timestamp=datetime.now(UTC),
+                    timestamp=datetime.now(timezone.utc),
                 )
             elif mock_fail == "malformed":
                 return RawLLMResponse(
@@ -404,7 +404,7 @@ class MockLLMClient(CIO_LLM_Client):
                     input_tokens=150,
                     output_tokens=20,
                     latency_ms=latency_ms,
-                    timestamp=datetime.now(UTC),
+                    timestamp=datetime.now(timezone.utc),
                 )
             elif mock_fail == "invalid_schema":
                 return RawLLMResponse(
@@ -414,7 +414,7 @@ class MockLLMClient(CIO_LLM_Client):
                     input_tokens=150,
                     output_tokens=30,
                     latency_ms=latency_ms,
-                    timestamp=datetime.now(UTC),
+                    timestamp=datetime.now(timezone.utc),
                 )
 
         # 1. Look up prompt metadata for validation
@@ -437,7 +437,7 @@ class MockLLMClient(CIO_LLM_Client):
                         input_tokens=0,
                         output_tokens=0,
                         latency_ms=latency_ms,
-                        timestamp=datetime.now(UTC),
+                        timestamp=datetime.now(timezone.utc),
                     )
 
         # 3. Simulate success with scenario-based logic
@@ -473,7 +473,7 @@ class MockLLMClient(CIO_LLM_Client):
             output_tokens=50,
             cached_tokens=240,
             latency_ms=max(latency_ms, 50),  # At least 50ms for realism
-            timestamp=datetime.now(UTC),
+            timestamp=datetime.now(timezone.utc),
         )
 
     async def embed(self, text: str) -> list[float]:

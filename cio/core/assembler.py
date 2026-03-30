@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from cio.models import (
     ActionType,
@@ -87,7 +87,7 @@ class DecisionAssembler:
             if old_val > 0:
                 applied_change = AppliedParamChange(
                     strategy_id=context.strategy_id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(timezone.utc),
                     param=sig.param,
                     old_value=old_val,
                     new_value=new_val,
