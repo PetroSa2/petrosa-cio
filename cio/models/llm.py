@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
@@ -17,4 +17,4 @@ class RawLLMResponse(BaseModel):
     output_tokens: int
     cached_tokens: int = 0  # Tokens served from prompt cache
     latency_ms: int  # Wall clock time for the call
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

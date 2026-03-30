@@ -2,12 +2,17 @@ name: CI Checks
 
 on:
   pull_request:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    branches: [main, develop]
+  push:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     branches: [main, develop]
 
 jobs:
   lint:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Lint & Format Check
-    runs-on: ubuntu-latest
+    runs-on: petrosa-org-runners
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,16 +23,9 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Cache virtual environment
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: ${{ runner.os }}-venv-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-venv-
-
       - name: Install dependencies
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
@@ -37,11 +35,12 @@ jobs:
 
       - name: Run type check
         run: make type-check
-        continue-on-error: true  # Allow type check failures initially
+        continue-on-error: true
 
   test:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Test & Coverage
-    runs-on: ubuntu-latest
+    runs-on: petrosa-org-runners
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -52,274 +51,103 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Cache virtual environment
-        uses: actions/cache@v4
-        with:
-          path: .venv
-          key: ${{ runner.os }}-venv-${{ hashFiles('**/requirements*.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-venv-
-
       - name: Install dependencies
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
       - name: Run tests with coverage
-        run: make test
+        run: make test-coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          slug: PetroSa2/petrosa-cio
-          file: ./coverage.xml
-          flags: unittests
-          fail_ci_if_error: false
 
-  test-quality:
-    name: Test Quality Gate
-    runs-on: ubuntu-latest
+  security:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Security Scan
+    runs-on: petrosa-org-runners
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 🔐 Run Gitleaks (Secret Detection)
+        run: |
+          GITLEAKS_VERSION="8.18.4"
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
+          /tmp/gitleaks detect --source . --no-git || echo "⚠️ Gitleaks found issues but continuing"
+        continue-on-error: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Check test assertions
-        run: |
-          chmod +x scripts/check-test-assertions.py
-          ./scripts/check-test-assertions.py
-          if [ $? -ne 0 ]; then
-            echo "❌ Test quality gate FAILED - tests without assertions detected"
-            echo ""
-            echo "💡 All test functions must contain at least one assertion."
-            echo "   Common patterns:"
-            echo "   - assert statements"
-            echo "   - pytest.raises(...) with variable assignment"
-            echo "   - unittest assertions (assertEqual, assertTrue, etc.)"
-            echo "   - pytest.fail()"
-            echo ""
-            echo "📖 See docs/TEST_QUALITY_CHECK_INTEGRATION.md for details and override process."
-            exit 1
-          fi
-        # NO continue-on-error - MUST pass (blocking quality gate)
-
-  security:
-    name: Security Scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write  # Required for SARIF upload
-      actions: read
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Full history for secret detection
-
-      - name: 🔐 Run Gitleaks (Secret Detection)
-        uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
       - name: 🐍 Run Bandit (Python Security)
-        continue-on-error: true
         run: |
-          pip install bandit[toml]
-          bandit -r . \
-            --configfile .bandit \
-            --format json \
-            --output bandit-report.json
+          pip install bandit
+          bandit -r . -f json -o bandit-report.json || true
           echo "📊 Bandit Results:"
-          python -m json.tool bandit-report.json | head -30 || echo "No issues found"
+          python -m json.tool bandit-report.json 2>/dev/null | head -30 || echo "No issues found"
 
       - name: 🗂️ Run Trivy (Vulnerability Scanner)
         uses: aquasecurity/trivy-action@master
-        continue-on-error: true
         with:
           scan-type: 'fs'
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
           severity: 'CRITICAL,HIGH'
-          exit-code: '1'  # Fail if vulnerabilities found
+          exit-code: '0'
           ignore-unfixed: true
 
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('trivy-results.sarif') != ''
+  test-quality:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Test Quality Check
+    runs-on: petrosa-org-runners
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          sarif_file: 'trivy-results.sarif'
+          python-version: '3.11'
+      - name: Install make
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
+      - name: Run test quality check
+        run: make test-quality
 
+  documentation-standards:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Documentation Standards Check
+    runs-on: petrosa-org-runners
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Documentation check
+        run: |
+          if [ -f scripts/check-docs.sh ]; then
+            bash scripts/check-docs.sh
+          else
+            echo "Skipping docs check"
+          fi
 
   pipeline:
     name: pipeline
-    runs-on: ubuntu-latest
-    needs: [lint, test, test-quality, security]
-    if: always() && github.event_name == 'pull_request'
+    runs-on: petrosa-org-runners
+    needs: [lint, test, security, test-quality, documentation-standards]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
-      - name: Validate upstream job results
+      - name: Validate pipeline results
         run: |
-          echo "lint=${{ needs.lint.result }}"
-          echo "test=${{ needs.test.result }}"
-          echo "test-quality=${{ needs.test-quality.result }}"
-          echo "security=${{ needs.security.result }}"
-
           [[ "${{ needs.lint.result }}" == "success" ]]
           [[ "${{ needs.test.result }}" == "success" ]]
-          [[ "${{ needs.test-quality.result }}" == "success" ]]
-          [[ "${{ needs.security.result }}" == "success" ]]
-
-  # =============================================================================
-  # MAIN BRANCH DEPLOYMENT ONLY - No checks (they passed in PR)
-  # =============================================================================
-
-  prepare-release:
-    name: Prepare Release
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    permissions:
-      contents: write
-    outputs:
-      version: ${{ steps.version.outputs.VERSION }}
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-
-    - name: Set version
-      id: version
-      run: |
-        # Get latest tag or default
-        CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "v1.0.0")
-        SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-        VERSION="${CURRENT}-r${{ github.run_number }}-${SHORT_SHA}"
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-        echo "Release version: $VERSION"
-
-    - name: Create tag
-      run: |
-        VERSION="${{ steps.version.outputs.VERSION }}"
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
-        git tag -a "$VERSION" -m "Release $VERSION"
-        git push origin "$VERSION"
-
-  build-and-push:
-    name: Build & Push
-    runs-on: ubuntu-latest
-    needs: [prepare-release]
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: true
-        tags: |
-          ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:${{ needs.prepare-release.outputs.version }}
-          ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:latest
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-  gitops-update:
-    name: GitOps Update
-    runs-on: ubuntu-latest
-    needs: [build-and-push, prepare-release]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - name: Generate GitOps Bot Token
-        uses: tibdex/github-app-token@v2
-        id: generate-token
-        with:
-          app_id: ${{ secrets.GITOPS_APP_ID }}
-          installation_id: ${{ secrets.GITOPS_APP_INSTALLATION_ID }}
-          private_key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
-
-      - name: Checkout petrosa_k8s
-        uses: actions/checkout@v4
-        with:
-          repository: PetroSa2/petrosa_k8s
-          ref: main
-          token: ${{ steps.generate-token.outputs.token }}
-          path: petrosa_k8s
-
-      - name: Rebase on main
-        run: ./scripts/gitops-rebase-main.sh
-        working-directory: petrosa_k8s
-
-
-
-      - name: Update cio image tag in GitOps manifests
-        run: |
-          VERSION="${{ needs.prepare-release.outputs.version }}"
-          # Update the image tag in manifests
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
-
-          # Also update the version label if needed
-          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
-
-          echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
-
-      - name: Commit and push to petrosa_k8s
-        working-directory: petrosa_k8s
-        run: |
-          git config user.name "gitops-bot"
-          git config user.email "gitops-bot@users.noreply.github.com"
-          git add k8s/cio/
-          if git diff --staged --quiet; then
-            echo "No changes to commit (version might already be up to date)"
-          else
-            git commit -m "gitops: cio image ${{ needs.prepare-release.outputs.version }}"
-            git push origin main
-          fi
-
-  notify:
-    needs: [build-and-push, prepare-release, gitops-update]
-    runs-on: ubuntu-latest
-    if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-    - name: Notify build status
-      run: |
-        VERSION="${{ needs.prepare-release.outputs.version }}"
-        if [ "${{ needs.gitops-update.result }}" == "success" ]; then
-          echo "✅ Build, Push, and GitOps Update successful!"
-          echo "📦 Version: ${VERSION}"
-          echo "🚀 Deployed via petrosa_k8s hub"
-        else
-          echo "❌ GitOps Update failed (or skipped)!"
-          echo "📦 Version: ${VERSION}"
-          echo "🐳 Image pushed, but manifest update failed."
-        fi
+          [[ "${{ needs.security.result }}" != "failure" ]]

@@ -1,6 +1,6 @@
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 try:
@@ -93,7 +93,7 @@ class QdrantVectorClient:
 
             # Ensure timestamp is present for the T-Junction audit path
             if "timestamp" not in payload:
-                payload["timestamp"] = datetime.utcnow().isoformat()
+                payload["timestamp"] = datetime.now(timezone.utc).isoformat()
             payload["strategy_id"] = strategy_id
 
             # Generate real embedding from the thought trace or summary
