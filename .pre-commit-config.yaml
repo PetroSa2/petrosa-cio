@@ -1,126 +1,114 @@
-# Standardized Pre-commit Configuration for Petrosa Services
-# Version: 2.1 - Standardized across ecosystem (Aligned with #303)
-# Replaces: black, isort, flake8 with Ruff v0.1.15
+# Golden Pre-Commit Configuration for Petrosa (v3.0)
+# Use: copy to .pre-commit-config.yaml in any Petrosa repo
 
 repos:
   # ==================================================================
-  # CODE QUALITY - Ruff (All-in-one) - STRICT VERSION ALIGNMENT
+  # CODE QUALITY - Ruff (Latest v0.9.9)
   # ==================================================================
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.15
+    rev: v0.9.9
     hooks:
       - id: ruff
-        args: [--fix]
-        name: Ruff linter (replaces flake8, isort)
+        name: ⚡ Ruff Linter & Fixer
+        args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
-        name: Ruff formatter (replaces black)
+        name: ⚡ Ruff Formatter
 
   # ==================================================================
-  # TYPE CHECKING - Mypy
+  # TYPE CHECKING - Mypy (Latest v1.15.0)
   # ==================================================================
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.9.0
+    rev: v1.15.0
     hooks:
       - id: mypy
-        name: Mypy type checker
-        additional_dependencies: [pyyaml, types-PyYAML, types-requests]
-        args: [--ignore-missing-imports]
+        name: 🔍 Mypy Type Checker
+        additional_dependencies: [
+          'pyyaml',
+          'types-PyYAML',
+          'types-requests',
+          'types-setuptools',
+          'pydantic'
+        ]
+        args: [--ignore-missing-imports, --strict]
 
   # ==================================================================
-  # YAML LINTING - Yamllint
+  # SECURITY - Gitleaks (Official Hook)
   # ==================================================================
-  - repo: https://github.com/adrienverge/yamllint
-    rev: v1.35.1
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
     hooks:
-      - id: yamllint
-        name: YAML linter
+      - id: gitleaks
+        name: 🔐 Gitleaks (Secret Detection)
 
   # ==================================================================
-  # PROTO LINTING - Protolint
-  # ==================================================================
-  - repo: https://github.com/yoheimuta/protolint
-    rev: v0.50.4
-    hooks:
-      - id: protolint
-        name: Protobuf linter
-
-  # ==================================================================
-  # SECURITY CHECKS - Standard (No external dependencies)
-  # ==================================================================
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
-    hooks:
-      # File checks
-      - id: trailing-whitespace
-      - id: end-of-file-fixer
-      - id: check-yaml
-        args: [--allow-multiple-documents]
-      - id: check-json
-      - id: check-toml
-      - id: check-ast
-
-      # Security: File size and content checks
-      - id: check-added-large-files
-        args: [--maxkb=500]
-        name: Check for large files (max 500KB)
-
-      - id: check-merge-conflict
-        name: Check for merge conflict markers
-
-      - id: check-case-conflict
-        name: Check for case-insensitive filename conflicts
-
-      # Code quality
-      - id: debug-statements
-        name: Check for debug statements (pdb, ipdb)
-
-      - id: requirements-txt-fixer
-        name: Fix requirements.txt formatting
-
-      - id: check-docstring-first
-        name: Check docstring is first in file
-
-  # ==================================================================
-  # SECURITY: Pattern-based secret detection
-  # ==================================================================
-  - repo: https://github.com/pre-commit/pygrep-hooks
-    rev: v1.10.0
-    hooks:
-      - id: python-no-eval
-        name: 🔐 Check for eval() usage (security risk)
-
-      - id: python-no-log-warn
-        name: Check for deprecated log.warn
-
-  # ==================================================================
-  # PYTHON SECURITY
+  # SECURITY - Bandit (Latest v1.7.8)
   # ==================================================================
   - repo: https://github.com/PyCQA/bandit
     rev: 1.7.8
     hooks:
       - id: bandit
-        name: 🔐 Bandit Python security scan
-        args:
-          - --severity-level=medium
-          - --confidence-level=medium
-        exclude: ^(tests/|_bmad-output/)
+        name: 🔐 Bandit (Python Security)
+        args: [-ll, -r, .]
+        exclude: ^tests/
 
   # ==================================================================
-  # LOCAL HOOKS (No external dependencies needed)
+  # SECURITY - Dependency Check (Safety)
+  # ==================================================================
+  - repo: https://github.com/pyupio/safety
+    rev: v3.0.1
+    hooks:
+      - id: safety
+        name: 🔐 Safety (Dependency Scan)
+        args: [check, --full-report]
+        files: ^requirements\.txt$
+
+  # ==================================================================
+  # LINTING - YAML & TOML
+  # ==================================================================
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        name: 📋 YAML Linter
+
+  # ==================================================================
+  # STANDARD HOOKS
+  # ==================================================================
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-ast
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-merge-conflict
+      - id: debug-statements
+
+  # ==================================================================
+  # LOCAL PETROSA HOOKS
   # ==================================================================
   - repo: local
     hooks:
       - id: check-test-assertions
-        name: 🧪 Check tests have assertions
+        name: 🧪 Check Test Assertions
         entry: python3 scripts/check-test-assertions.py
         language: system
-        pass_filenames: true
         types: [python]
         files: ^tests/
 
-      - id: pytest
-        name: 🧪 Run pytest
-        entry: pytest
+      - id: check-secrets-patterns
+        name: 🔐 Check for Petrosa Secret Patterns
+        entry: bash -c 'grep -rInE "(BINANCE_API_KEY|BINANCE_API_SECRET|DOCKERHUB_TOKEN|JWT_SECRET|mongodb://[^:]+:[^@]+@|password\s*=\s*[\"'\''][^\"'\'']+[\"'\''])" --include="*.py" --include="*.yaml" --include="*.yml" --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.git . && echo "⚠️ Found potential secrets!" && exit 1 || exit 0'
+        language: system
+        pass_filenames: false
+
+      - id: pipeline
+        name: 🔄 Complete Local Pipeline (Parallel to CI)
+        entry: make test
         language: system
         pass_filenames: false
         always_run: true
