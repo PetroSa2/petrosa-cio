@@ -1,20 +1,24 @@
-# Auto-request GitHub Copilot review for all pull requests
-# This ensures consistent automated code review across the repository
+# Defers GitHub Copilot review until CI Checks complete successfully.
+# Replaces the pull_request trigger with workflow_run to enforce post-CI ordering.
 #
-# Triggers: PR opened, reopened, or synchronized (new commits pushed)
-# Permissions: Requires pull-requests: write to request reviewers
-#
-# Related: Issue #54 - Auto-request Copilot review for all PRs
+# Related: Issue #314 - Defer Copilot Review Until CI Checks Succeed
+# Supersedes: Issue #54, #188
 
 name: Request Copilot Review
 
 on:
-  pull_request:
-    types: [opened, reopened, synchronize]
+  workflow_run:
+    workflows: ["CI Checks"]
+    types: [completed]
 
 jobs:
   request-copilot-review:
-    runs-on: ubuntu-latest
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0] != null &&
+      github.event.workflow_run.pull_requests[0].head.repo.full_name == github.repository
+    runs-on: petrosa-org-runners
     permissions:
       pull-requests: write
       contents: read
@@ -26,25 +30,35 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
-            const pull_number = context.payload.pull_request.number;
+            const run = context.payload.workflow_run;
+            const pr = run.pull_requests[0];
 
-            console.log(`🤖 Requesting Copilot review for PR #${pull_number}...`);
+            if (!pr) {
+              console.log('No pull request associated with this workflow_run.');
+              return;
+            }
+
+            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+              console.log(`Skipping fork PR from ${pr.head.repo.full_name}`);
+              return;
+            }
+
+            const pull_number = pr.number;
+
+            console.log(`Requesting Copilot review for PR #${pull_number}...`);
 
             try {
               await github.rest.pulls.requestReviewers({
                 owner,
                 repo,
                 pull_number,
-                reviewers: ['github-copilot']
+                reviewers: ['github-copilot'],
               });
-              console.log(`✅ Copilot review requested successfully for PR #${pull_number}`);
+              console.log(`Requested Copilot review for PR #${pull_number}`);
             } catch (error) {
-              // Don't fail the workflow if Copilot is already requested or unavailable
-              // This ensures the workflow doesn't block PR operations
               if (error.status === 422) {
-                console.log(`ℹ️ Copilot review already requested or reviewer unavailable for PR #${pull_number}`);
+                console.log('Copilot already requested or unavailable; continuing.');
               } else {
-                console.log(`⚠️ Could not request Copilot review: ${error.message}`);
-                console.log(`   This is non-blocking and the PR can proceed normally.`);
+                console.log(`Non-blocking error: ${error.message}`);
               }
             }
