@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 class NATSClientProtocol(Protocol):
     """Structural protocol for NATS client to ensure testability."""
 
-    async def publish(self, subject: str, payload: bytes) -> None:
-        ...
+    async def publish(self, subject: str, payload: bytes) -> None: ...
 
 
 class OutputRouter:

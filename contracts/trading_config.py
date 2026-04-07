@@ -6,7 +6,7 @@ execution parameters, risk management, and strategy behavior on a per-symbol
 and per-position-side basis.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -50,10 +50,11 @@ class TradingConfig(BaseModel):
 
     # Timestamps
     created_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc), description="When configuration was created"
+        default_factory=lambda: datetime.now(UTC),
+        description="When configuration was created",
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(UTC),
         description="When configuration was last updated",
     )
 
@@ -151,7 +152,8 @@ class TradingConfigAudit(BaseModel):
     changed_by: str = Field(..., description="Who/what made the change")
     reason: str | None = Field(None, description="Reason for the change")
     timestamp: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc), description="When the change occurred"
+        default_factory=lambda: datetime.now(UTC),
+        description="When the change occurred",
     )
 
     # Additional context
@@ -220,7 +222,8 @@ class LeverageStatus(BaseModel):
 
     # Metadata
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc), description="When this record was last updated"
+        default_factory=lambda: datetime.now(UTC),
+        description="When this record was last updated",
     )
 
     def is_synced(self) -> bool:

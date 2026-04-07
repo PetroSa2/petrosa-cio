@@ -11,10 +11,13 @@ class AlertManager:
     Centralized alerting for the Petrosa CIO.
     Dispatches alerts to multiple channels with triple-redundancy.
     """
+
     _dispatcher = RedundantAlertDispatcher()
 
     @staticmethod
-    async def dispatch_critical_alert(message: str, context: dict[str, Any] | None = None):
+    async def dispatch_critical_alert(
+        message: str, context: dict[str, Any] | None = None
+    ):
         """
         Dispatches a CRITICAL (RED) alert to all configured channels.
         """

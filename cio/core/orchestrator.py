@@ -38,7 +38,7 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         provider_name = self.client.__class__.__name__
-        
+
         logger.info(
             f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id}",
             extra={
@@ -67,7 +67,7 @@ class Orchestrator:
 
                 logger.info(
                     "Executing final Action Classifier for hard-blocked trade",
-                    extra={"correlation_id": context.correlation_id}
+                    extra={"correlation_id": context.correlation_id},
                 )
                 return await self.action_classifier.classify(
                     context, code_result, regime_fallback, strategy_fallback
@@ -86,7 +86,10 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached regime: {e}")
 
             if not regime:
-                logger.info("Running Regime Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
+                logger.info(
+                    "Running Regime Classifier (LLM)...",
+                    extra={"correlation_id": context.correlation_id},
+                )
                 regime = await self.regime_analyst.classify(context)
                 if self.cache:
                     await self.cache.set(
@@ -109,7 +112,10 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached strategy: {e}")
 
             if not strategy:
-                logger.info("Running Strategy Assessor (LLM)...", extra={"correlation_id": context.correlation_id})
+                logger.info(
+                    "Running Strategy Assessor (LLM)...",
+                    extra={"correlation_id": context.correlation_id},
+                )
                 strategy = await self.strategy_assessor.assess(context)
                 if self.cache:
                     await self.cache.set(
@@ -119,7 +125,10 @@ class Orchestrator:
                     )
 
             # 4. ACTION CLASSIFICATION
-            logger.info("Running Final Action Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
+            logger.info(
+                "Running Final Action Classifier (LLM)...",
+                extra={"correlation_id": context.correlation_id},
+            )
             decision = await self.action_classifier.classify(
                 context, code_result, regime, strategy
             )

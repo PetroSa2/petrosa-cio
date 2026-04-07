@@ -197,12 +197,12 @@ async def main():
     intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
     # AC: Use multi-token wildcard '>' to capture all strategy-specific intents
     # following the Petrosa NATS contract.
-    if not intents_subject.endswith((">")):
+    if not intents_subject.endswith(">"):
         base_subject = intents_subject.rstrip(".*")
         subscribe_subject = f"{base_subject}.>"
     else:
         subscribe_subject = intents_subject
-        
+
     await listener.start(subject=subscribe_subject)
     logger.info(f"CIO Strategist is live and listening on {subscribe_subject}")
 

@@ -1,11 +1,5 @@
 try:
-    try:
     from enum import StrEnum
-except ImportError:
-    from enum import Enum
-    class StrEnum(str, Enum):
-        def __str__(self):
-            return str(self.value)
 except ImportError:
     # Fallback for Python < 3.11
     from enum import Enum

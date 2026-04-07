@@ -22,23 +22,24 @@ async def test_nats_subscription_with_wildcard():
     mock_server.serve = AsyncMock()
     mock_server.shutdown = AsyncMock()
 
-    with patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}), \
-         patch("uvicorn.Config"), \
-         patch("uvicorn.Server", return_value=mock_server), \
-         patch("cio.main.attach_logging_handler", return_value=True), \
-         patch("cio.main.setup_telemetry", return_value=True), \
-         patch("cio.main.NATSListener") as MockNATSListener, \
-         patch("cio.main.NATS", return_value=mock_nc), \
-         patch("redis.asyncio.from_url", return_value=mock_redis), \
-         patch("cio.main.ClientFactory"), \
-         patch("cio.main.ContextBuilder") as MockContextBuilder, \
-         patch("cio.main.Orchestrator"), \
-         patch("cio.main.NurseEnforcer"), \
-         patch("cio.main.OutputRouter") as MockOutputRouter, \
-         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder, \
-         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher, \
-         patch("prometheus_client.start_http_server"):
-
+    with (
+        patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}),
+        patch("uvicorn.Config"),
+        patch("uvicorn.Server", return_value=mock_server),
+        patch("cio.main.attach_logging_handler", return_value=True),
+        patch("cio.main.setup_telemetry", return_value=True),
+        patch("cio.main.NATSListener") as MockNATSListener,
+        patch("cio.main.NATS", return_value=mock_nc),
+        patch("redis.asyncio.from_url", return_value=mock_redis),
+        patch("cio.main.ClientFactory"),
+        patch("cio.main.ContextBuilder") as MockContextBuilder,
+        patch("cio.main.Orchestrator"),
+        patch("cio.main.NurseEnforcer"),
+        patch("cio.main.OutputRouter") as MockOutputRouter,
+        patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
+        patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
+        patch("prometheus_client.start_http_server"),
+    ):
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
         mock_nats_listener.stop = AsyncMock()
@@ -68,7 +69,6 @@ async def test_nats_subscription_with_wildcard():
                 return task
 
             with patch("asyncio.create_task", side_effect=_capture_task):
-
                 mock_stop_event = mock_event_cls.return_value
                 # Make the wait() return immediately
                 mock_stop_event.wait = AsyncMock(return_value=None)
