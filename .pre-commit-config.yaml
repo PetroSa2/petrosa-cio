@@ -52,15 +52,15 @@ repos:
         exclude: ^tests/
 
   # ==================================================================
-  # SECURITY - Dependency Check (Safety)
+  # SECURITY - Dependency Check (Safety) — optional; see petrosa_k8s template
   # ==================================================================
-  - repo: https://github.com/pyupio/safety
-    rev: v3.0.1
-    hooks:
-      - id: safety
-        name: 🔐 Safety (Dependency Scan)
-        args: [check, --full-report]
-        files: ^requirements\.txt$
+  # - repo: https://github.com/pyupio/safety
+  #   rev: 3.0.1
+  #   hooks:
+  #     - id: safety
+  #       name: 🔐 Safety (Dependency Scan)
+  #       args: [check, --full-report]
+  #       files: ^requirements\.txt$
 
   # ==================================================================
   # LINTING - YAML & TOML
