@@ -4,7 +4,7 @@ except ImportError:
     # Fallback for Python < 3.11
     from enum import Enum
 
-    class StrEnum(str, Enum):  # noqa: UP042
+    class StrEnum(str, Enum):  # type: ignore[no-redef]  # noqa: UP042
         pass
 
 

@@ -61,6 +61,7 @@ paths = [
     '''test_.*\.py$''',
     '''.*/tests/.*''',
     '''docs/.*''',
+    '''\.pre-commit-config\.yaml$''',
 ]
 
 # Allowlist specific patterns that are false positives

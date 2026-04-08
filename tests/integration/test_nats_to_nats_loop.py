@@ -148,9 +148,9 @@ async def test_full_nats_to_nats_loop():
             assert mock_nc.publish.call_count == 2
             assert orchestrator.run.await_count == 1
 
-            # Check Legacy Call (signals.trading)
+            # Check Legacy Call (signals.trading.<strategy_id> — matches tradeengine signals.trading.>)
             legacy_call = mock_nc.publish.call_args_list[0]
-            assert legacy_call[0][0] == "signals.trading"
+            assert legacy_call[0][0] == "signals.trading.momentum_v1"
             legacy_payload = json.loads(legacy_call[0][1].decode())
             assert legacy_payload["action"] == "buy"
             # Verify quantity fix: size / price.
