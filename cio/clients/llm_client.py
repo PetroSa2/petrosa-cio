@@ -78,12 +78,12 @@ class CIO_LLM_Client(ABC):
             content = raw.content.strip()
             # Handle potential markdown wrapping
             if content.startswith("```"):
-                # Find first and last newline to extract content between markers
                 lines = content.splitlines()
-                if len(lines) >= 2:
-                    # Remove first line (```json or ```) and last line (```)
-                    # Join middle lines
-                    content = "\n".join(lines[1:-1])
+                # Drop opening fence line, then closing fence only if present
+                inner = lines[1:]
+                if inner and inner[-1].strip() == "```":
+                    inner = inner[:-1]
+                content = "\n".join(inner)
 
             return response_model.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError) as e:
@@ -115,10 +115,21 @@ class CIO_LLM_Client(ABC):
                     fb_content = fallback_raw.content.strip()
                     if fb_content.startswith("```"):
                         lines = fb_content.splitlines()
-                        if len(lines) >= 2:
-                            fb_content = "\n".join(lines[1:-1])
+                        # Drop opening fence line, then closing fence only if present
+                        inner = lines[1:]
+                        if inner and inner[-1].strip() == "```":
+                            inner = inner[:-1]
+                        fb_content = "\n".join(inner)
                     return response_model.model_validate_json(fb_content)
                 except (ValidationError, json.JSONDecodeError) as fb_e:
+                    try:
+                        from cio.core.metrics import LLM_VALIDATION_FAILURES
+
+                        LLM_VALIDATION_FAILURES.labels(
+                            prompt_id=prompt_id, model=fallback_raw.model
+                        ).inc()
+                    except ImportError:
+                        pass
                     logger.warning(
                         "LLM schema fallback also failed — returning safe default",
                         extra={"prompt_id": prompt_id, "error": str(fb_e)},
