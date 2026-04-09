@@ -33,7 +33,7 @@ class OutputRouter:
         vector_client: VectorClientProtocol,
         ta_bot_url: str | None = None,
         realtime_strategies_url: str | None = None,
-        cache: "AsyncRedisCache | None" = None,
+        cache: AsyncRedisCache | None = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
