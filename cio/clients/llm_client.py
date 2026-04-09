@@ -42,6 +42,15 @@ class CIO_LLM_Client(ABC):
         """
         pass
 
+    async def _schema_fallback(
+        self, prompt_id: str, system_prompt: str, user_context: dict[str, Any]
+    ) -> "RawLLMResponse | None":
+        """
+        Override in subclass to provide a fallback LLM call on schema validation failure.
+        Returns None if no fallback is available.
+        """
+        return None
+
     async def complete_with_schema(
         self,
         prompt_id: str,
@@ -69,22 +78,66 @@ class CIO_LLM_Client(ABC):
             content = raw.content.strip()
             # Handle potential markdown wrapping
             if content.startswith("```"):
-                # Find first and last newline to extract content between markers
                 lines = content.splitlines()
-                if len(lines) >= 2:
-                    # Remove first line (```json or ```) and last line (```)
-                    # Join middle lines
-                    content = "\n".join(lines[1:-1])
+                # Drop opening fence line, then closing fence only if present
+                inner = lines[1:]
+                if inner and inner[-1].strip() == "```":
+                    inner = inner[:-1]
+                content = "\n".join(inner)
 
             return response_model.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError) as e:
+            # Record metric
+            try:
+                from cio.core.metrics import LLM_VALIDATION_FAILURES
+
+                LLM_VALIDATION_FAILURES.labels(
+                    prompt_id=prompt_id, model=raw.model
+                ).inc()
+            except ImportError:
+                pass
+
             logger.warning(
-                "LLM response validation failed — returning safe default",
+                "LLM response validation failed — attempting schema fallback",
                 extra={
                     "prompt_id": prompt_id,
                     "error": str(e),
                     "content_preview": raw.content[:200],
                 },
+            )
+
+            # 4. Schema-failure fallback: retry with fallback model
+            fallback_raw = await self._schema_fallback(
+                prompt_id, system_prompt, user_context
+            )
+            if fallback_raw and not fallback_raw.error:
+                try:
+                    fb_content = fallback_raw.content.strip()
+                    if fb_content.startswith("```"):
+                        lines = fb_content.splitlines()
+                        # Drop opening fence line, then closing fence only if present
+                        inner = lines[1:]
+                        if inner and inner[-1].strip() == "```":
+                            inner = inner[:-1]
+                        fb_content = "\n".join(inner)
+                    return response_model.model_validate_json(fb_content)
+                except (ValidationError, json.JSONDecodeError) as fb_e:
+                    try:
+                        from cio.core.metrics import LLM_VALIDATION_FAILURES
+
+                        LLM_VALIDATION_FAILURES.labels(
+                            prompt_id=prompt_id, model=fallback_raw.model
+                        ).inc()
+                    except ImportError:
+                        pass
+                    logger.warning(
+                        "LLM schema fallback also failed — returning safe default",
+                        extra={"prompt_id": prompt_id, "error": str(fb_e)},
+                    )
+
+            logger.warning(
+                "LLM response validation failed — returning safe default",
+                extra={"prompt_id": prompt_id},
             )
             return SAFE_DEFAULTS[prompt_id]
 
@@ -206,8 +259,9 @@ class LiteLLMClient(CIO_LLM_Client):
                         ],
                         response_format=(
                             {"type": "json_object"}
-                            if "json_object"
-                            in litellm.get_supported_openai_params(primary_model)
+                            if api_base
+                            or "json_object"
+                            in litellm.get_supported_openai_params(routing_primary)
                             else None
                         ),
                     )
@@ -235,8 +289,9 @@ class LiteLLMClient(CIO_LLM_Client):
                     ],
                     response_format=(
                         {"type": "json_object"}
-                        if "json_object"
-                        in litellm.get_supported_openai_params(fallback_model)
+                        if api_base
+                        or "json_object"
+                        in litellm.get_supported_openai_params(routing_fallback)
                         else None
                     ),
                 )
@@ -267,6 +322,51 @@ class LiteLLMClient(CIO_LLM_Client):
                     latency_ms=latency_ms,
                     timestamp=datetime.now(UTC),
                 )
+
+    async def _schema_fallback(
+        self, prompt_id: str, system_prompt: str, user_context: dict[str, Any]
+    ) -> "RawLLMResponse | None":
+        """
+        Retries with the fallback model when the primary model returns invalid JSON.
+        Called by complete_with_schema on ValidationError / JSONDecodeError.
+        """
+        import litellm
+
+        fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
+        api_base = os.getenv("LLM_API_BASE")
+        routing_fallback = f"openai/{fallback_model}" if api_base else fallback_model
+
+        logger.info(
+            "Schema fallback: retrying with fallback model",
+            extra={"prompt_id": prompt_id, "model": fallback_model},
+        )
+
+        try:
+            start_time = time.perf_counter()
+            response = await litellm.acompletion(
+                model=routing_fallback,
+                api_base=api_base,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(user_context)},
+                ],
+                response_format=(
+                    {"type": "json_object"}
+                    if api_base
+                    or "json_object"
+                    in litellm.get_supported_openai_params(routing_fallback)
+                    else None
+                ),
+            )
+            return self._process_response(
+                prompt_id, response, int((time.perf_counter() - start_time) * 1000)
+            )
+        except Exception as e:
+            logger.warning(
+                "Schema fallback call failed",
+                extra={"prompt_id": prompt_id, "error": str(e)},
+            )
+            return None
 
     async def embed(self, text: str) -> list[float]:
         """Generates real embeddings via litellm.embedding."""
