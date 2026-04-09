@@ -17,3 +17,10 @@ DECISION_ACTIONS = Counter(
     "Total number of final decisions by action type",
     ["action_type", "strategy_id"],
 )
+
+# LLM Validation Failures
+LLM_VALIDATION_FAILURES = Counter(
+    "cio_llm_validation_failures_total",
+    "Total number of LLM response schema validation failures",
+    ["prompt_id", "model"],
+)
