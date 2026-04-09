@@ -6,6 +6,7 @@ from typing import Protocol
 
 import httpx
 
+from cio.core.cache import AsyncRedisCache
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
@@ -17,8 +18,7 @@ logger = logging.getLogger(__name__)
 class NATSClientProtocol(Protocol):
     """Structural protocol for NATS client to ensure testability."""
 
-    async def publish(self, subject: str, payload: bytes) -> None:
-        ...
+    async def publish(self, subject: str, payload: bytes) -> None: ...
 
 
 class OutputRouter:
@@ -33,7 +33,7 @@ class OutputRouter:
         vector_client: VectorClientProtocol,
         ta_bot_url: str | None = None,
         realtime_strategies_url: str | None = None,
-        cache=None,
+        cache: AsyncRedisCache | None = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
@@ -109,8 +109,14 @@ class OutputRouter:
         dispatch_tasks_data: list[tuple[str, bytes]] = []
 
         if action == ActionType.EXECUTE:
-            # LEGACY BRANCH: Translate to Signal model and send to legacy topic
-            legacy_subject = os.getenv("NATS_TOPIC_SIGNALS", "signals.trading")
+            # LEGACY BRANCH: Translate to Signal model and send to legacy topic.
+            # Contract: petrosa-tradeengine subscribes to signals.trading.> (wildcard after
+            # base). Bare "signals.trading" is NOT matched by that subscription in NATS.
+            # Align with TA bot / docs: f"{base_topic}.{strategy_id}".
+            base_signals = (
+                os.getenv("NATS_TOPIC_SIGNALS") or "signals.trading"
+            ).rstrip(".*>")
+            legacy_subject = f"{base_signals}.{strategy_id}"
             legacy_data = TradeEngineTranslator.to_legacy_signal(context, decision)
             if legacy_data:
                 dispatch_tasks_data.append(
@@ -297,7 +303,7 @@ class OutputRouter:
         # 3. Handle Dispatch execution (Checking DRY_RUN)
         nats_publish_tasks = []
 
-        for subject, payload in dispatch_tasks_data:
+        for subject, msg_bytes in dispatch_tasks_data:
             if is_dry_run:
                 logger.info(
                     f"[SHADOW MODE] Would have published to {subject}",
@@ -305,11 +311,11 @@ class OutputRouter:
                         "correlation_id": correlation_id,
                         "action": action.value,
                         "strategy_id": strategy_id,
-                        "payload_preview": payload.decode()[:300],
+                        "payload_preview": msg_bytes.decode()[:300],
                     },
                 )
             else:
-                nats_publish_tasks.append(self.nats_client.publish(subject, payload))
+                nats_publish_tasks.append(self.nats_client.publish(subject, msg_bytes))
 
         # 4. Synchronize all operations (Audit + Publishes)
         # We use gather to fire both the audit write and the NATS publishes concurrently

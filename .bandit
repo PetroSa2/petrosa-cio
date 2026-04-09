@@ -1,18 +1,8 @@
-# Bandit configuration file in YAML format
-### Excludes
-exclude_dirs:
-  - 'tests/'
-  - '.venv/'
-  - 'venv/'
-  - 'htmlcov/'
-  - '.git/'
-  - '__pycache__/'
-  - '*.egg-info/'
+[bandit]
+# Exclude directories from scanning
+exclude_dirs = tests/,.venv/,venv/,htmlcov/,.git/,__pycache__/
 
-### Skips
-# B104: hardcoded_bind_all_interfaces
-skips: ['B104']
-
-### Levels
-severity: medium
-confidence: medium
+# Skip specific checks
+# B104: hardcoded_bind_all_interfaces (intentional in mock/dev servers)
+# B303: Use of MD5 (used for deterministic hashing, not security)
+skips = B104,B303
