@@ -149,7 +149,7 @@ class OutputRouter:
 
             payload = {
                 "parameters": params_dict,
-                "changed_by": "petrosa-cio",
+                "changed_by": f"petrosa-cio:{strategy_id}",
                 "reason": decision.justification
                 or "CIO automated parameter adjustment",
                 "validate_only": False,
@@ -179,6 +179,24 @@ class OutputRouter:
                             response.text,
                             extra={"correlation_id": correlation_id},
                         )
+
+                        # Handle 429 specifically (AC2, AC4)
+                        if response.status_code == 429 and self.cache:
+                            retry_after = 3600
+                            try:
+                                body = response.json()
+                                retry_after = body.get("retry_after", 3600)
+                            except Exception:
+                                pass
+
+                            freeze_key = f"cio:freeze:{strategy_id}"
+                            await self.cache.set(freeze_key, "LOCKED", ttl=retry_after)
+                            logger.info(
+                                "Rate limit freeze set for %s (%ss) due to 429",
+                                strategy_id,
+                                retry_after,
+                                extra={"correlation_id": correlation_id},
+                            )
                     else:
                         # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
                         logger.info(
@@ -222,7 +240,7 @@ class OutputRouter:
             # c. Payload must be exactly:
             payload = {
                 "parameters": {"enabled": False},
-                "changed_by": "petrosa-cio",
+                "changed_by": f"petrosa-cio:{strategy_id}",
                 "reason": "CIO_PAUSE: " + (decision.justification or "automated pause"),
                 "validate_only": False,
             }
@@ -251,13 +269,39 @@ class OutputRouter:
                             response.text,
                             extra={"correlation_id": correlation_id},
                         )
+
+                        # Handle 429 specifically (AC2, AC4)
+                        if response.status_code == 429 and self.cache:
+                            retry_after = 3600
+                            try:
+                                body = response.json()
+                                retry_after = body.get("retry_after", 3600)
+                            except Exception:
+                                pass
+
+                            freeze_key = f"cio:freeze:{strategy_id}"
+                            await self.cache.set(freeze_key, "LOCKED", ttl=retry_after)
+                            logger.info(
+                                "Rate limit freeze set for %s (%ss) due to 429",
+                                strategy_id,
+                                retry_after,
+                                extra={"correlation_id": correlation_id},
+                            )
                     else:
-                        # f. If response 2xx: log SUCCESS
+                        # f. If response 2xx: log SUCCESS, then set freeze in Redis (AC3)
                         logger.info(
                             "SUCCESS: Strategy %s paused via REST",
                             strategy_id,
                             extra={"correlation_id": correlation_id},
                         )
+                        if self.cache:
+                            freeze_key = f"cio:freeze:{strategy_id}"
+                            await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+                            logger.info(
+                                "Pause freeze set for %s (1800s)",
+                                strategy_id,
+                                extra={"correlation_id": correlation_id},
+                            )
                 except Exception as e:
                     logger.error(
                         "Error applying strategy pause via REST: %s",
@@ -288,7 +332,7 @@ class OutputRouter:
             url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
             payload = {
                 "parameters": {"enabled": False},
-                "changed_by": "petrosa-cio",
+                "changed_by": f"petrosa-cio:{strategy_id}",
                 "reason": "CRITICAL_FAIL_SAFE: "
                 + (decision.justification or "system failure"),
                 "validate_only": False,
