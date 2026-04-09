@@ -163,3 +163,113 @@ async def test_response_format_json_set_when_api_base_present():
     assert call_kwargs.get("response_format") == {"type": "json_object"}, (
         f"Expected json_object response_format, got: {call_kwargs.get('response_format')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# LiteLLMClient._schema_fallback: direct implementation coverage
+# ---------------------------------------------------------------------------
+
+
+def _mock_litellm_response(content: str, model: str = "openai/fallback"):
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = content
+    resp.model = model
+    resp.usage.prompt_tokens = 10
+    resp.usage.completion_tokens = 10
+    resp.usage.prompt_tokens_details = None
+    return resp
+
+
+@pytest.mark.asyncio
+async def test_schema_fallback_returns_raw_response_via_litellm():
+    """
+    LiteLLMClient._schema_fallback calls litellm.acompletion with the
+    fallback model and returns a RawLLMResponse with the content.
+    """
+    client = LiteLLMClient()
+    mock_resp = _mock_litellm_response('{"value": "fallback_ok"}')
+
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "LLM_API_BASE": "https://router.requesty.ai/v1",
+                "LLM_FALLBACK_MODEL": "novita/llama-3.1-8b",
+            },
+        ),
+        patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_resp),
+    ):
+        result = await client._schema_fallback(
+            prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+        )
+
+    assert result is not None
+    assert result.error is None
+    assert '{"value": "fallback_ok"}' in result.content
+
+
+@pytest.mark.asyncio
+async def test_schema_fallback_returns_none_on_litellm_exception():
+    """
+    If litellm raises during _schema_fallback, the method returns None
+    rather than propagating the exception.
+    """
+    client = LiteLLMClient()
+
+    with patch(
+        "litellm.acompletion", new_callable=AsyncMock, side_effect=RuntimeError("boom")
+    ):
+        result = await client._schema_fallback(
+            prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+        )
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Fence stripping: with and without closing fence
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fence_stripping_with_closing_fence():
+    """Content wrapped in ```json ... ``` is correctly unwrapped."""
+    client = LiteLLMClient()
+    fenced = '```json\n{"value": "fenced"}\n```'
+    client.complete = AsyncMock(return_value=_raw(fenced))
+    client._schema_fallback = AsyncMock(return_value=None)
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert isinstance(result, _FakeResponse)
+    assert result.value == "fenced"
+
+
+@pytest.mark.asyncio
+async def test_fence_stripping_without_closing_fence():
+    """Content with opening ``` but no closing fence still parses correctly."""
+    client = LiteLLMClient()
+    # No closing fence — last line is part of JSON, must NOT be stripped
+    fenced = '```json\n{"value": "no_close"}'
+    client.complete = AsyncMock(return_value=_raw(fenced))
+    client._schema_fallback = AsyncMock(return_value=None)
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert isinstance(result, _FakeResponse)
+    assert result.value == "no_close"
