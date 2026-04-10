@@ -181,21 +181,9 @@ class OutputRouter:
                         )
 
                         # Handle 429 specifically (AC2, AC4)
-                        if response.status_code == 429 and self.cache:
-                            retry_after = 3600
-                            try:
-                                body = response.json()
-                                retry_after = body.get("retry_after", 3600)
-                            except Exception:
-                                pass
-
-                            freeze_key = f"cio:freeze:{strategy_id}"
-                            await self.cache.set(freeze_key, "LOCKED", ttl=retry_after)
-                            logger.info(
-                                "Rate limit freeze set for %s (%ss) due to 429",
-                                strategy_id,
-                                retry_after,
-                                extra={"correlation_id": correlation_id},
+                        if response.status_code == 429:
+                            await self._apply_rate_limit_freeze(
+                                strategy_id, correlation_id, response
                             )
                     else:
                         # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
@@ -271,21 +259,9 @@ class OutputRouter:
                         )
 
                         # Handle 429 specifically (AC2, AC4)
-                        if response.status_code == 429 and self.cache:
-                            retry_after = 3600
-                            try:
-                                body = response.json()
-                                retry_after = body.get("retry_after", 3600)
-                            except Exception:
-                                pass
-
-                            freeze_key = f"cio:freeze:{strategy_id}"
-                            await self.cache.set(freeze_key, "LOCKED", ttl=retry_after)
-                            logger.info(
-                                "Rate limit freeze set for %s (%ss) due to 429",
-                                strategy_id,
-                                retry_after,
-                                extra={"correlation_id": correlation_id},
+                        if response.status_code == 429:
+                            await self._apply_rate_limit_freeze(
+                                strategy_id, correlation_id, response
                             )
                     else:
                         # f. If response 2xx: log SUCCESS, then set freeze in Redis (AC3)
@@ -396,3 +372,29 @@ class OutputRouter:
                     "targets": [t[0] for t in dispatch_tasks_data],
                 },
             )
+
+    async def _apply_rate_limit_freeze(
+        self, strategy_id: str, correlation_id: str, response: httpx.Response
+    ) -> None:
+        """Helper to parse 429 retry-after and set Redis freeze with clamping."""
+        if not self.cache:
+            return
+
+        retry_after = 3600
+        try:
+            body = response.json()
+            raw_val = body.get("retry_after", 3600)
+            # Coerce and clamp (AC2, PR Review)
+            retry_after = int(float(raw_val))
+            retry_after = max(1, min(retry_after, 86400))  # 1s to 24h
+        except Exception:
+            pass
+
+        freeze_key = f"cio:freeze:{strategy_id}"
+        await self.cache.set(freeze_key, "LOCKED", ttl=retry_after)
+        logger.info(
+            "Rate limit freeze set for %s (%ss) due to 429",
+            strategy_id,
+            retry_after,
+            extra={"correlation_id": correlation_id},
+        )
