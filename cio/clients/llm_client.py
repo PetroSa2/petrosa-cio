@@ -52,11 +52,63 @@ def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:
     return "json_object" in (supported_params or [])
 
 
+# Persona prompts whose JSON may omit thought_trace when LLM_CAPABILITY_PROFILE=minimal.
+_PROMPTS_OPTIONAL_THOUGHT_TRACE = frozenset(
+    {
+        "PETROSA_PROMPT_ACTION_CLASSIFIER",
+        "PETROSA_PROMPT_REGIME_CLASSIFIER",
+        "PETROSA_PROMPT_STRATEGY_ASSESSOR",
+    }
+)
+
+
+def _inject_minimal_thought_trace_json(
+    json_text: str, prompt_id: str, capability_profile: str
+) -> str:
+    """
+    For minimal profile only, allow LLM JSON without thought_trace by injecting ""
+    before Pydantic validation. Standard profile keeps thought_trace required so
+    missing fields still trigger validation → schema fallback / SAFE_DEFAULTS.
+    """
+    if (
+        capability_profile != "minimal"
+        or prompt_id not in _PROMPTS_OPTIONAL_THOUGHT_TRACE
+    ):
+        return json_text
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        return json_text
+    if isinstance(data, dict) and "thought_trace" not in data:
+        data["thought_trace"] = ""
+    return json.dumps(data)
+
+
+def resolve_llm_capability_profile() -> str:
+    """
+    CIO LLM tier: ``minimal`` (small models, no JSON mode / stripped prompts) or
+    ``standard`` (full schema + optional json_object). Read from ``LLM_CAPABILITY_PROFILE``.
+    """
+    raw = os.getenv("LLM_CAPABILITY_PROFILE", "standard").strip().lower()
+    if raw not in ("minimal", "standard"):
+        raise ValueError(
+            f"LLM_CAPABILITY_PROFILE must be 'minimal' or 'standard'; got {raw!r}"
+        )
+    return raw
+
+
 class CIO_LLM_Client(ABC):
     """
     Abstract base class for LLM client implementations.
     Provides the core interface for both real and mock clients.
     """
+
+    def __init__(self) -> None:
+        self._capability_profile = resolve_llm_capability_profile()
+
+    @property
+    def capability_profile(self) -> str:
+        return self._capability_profile
 
     @abstractmethod
     async def complete(
@@ -134,6 +186,9 @@ class CIO_LLM_Client(ABC):
                     inner = inner[:-1]
                 content = "\n".join(inner)
 
+            content = _inject_minimal_thought_trace_json(
+                content, prompt_id, self._capability_profile
+            )
             return response_model.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError) as e:
             # Record metric
@@ -169,6 +224,9 @@ class CIO_LLM_Client(ABC):
                         if inner and inner[-1].strip() == "```":
                             inner = inner[:-1]
                         fb_content = "\n".join(inner)
+                    fb_content = _inject_minimal_thought_trace_json(
+                        fb_content, prompt_id, self._capability_profile
+                    )
                     return response_model.model_validate_json(fb_content)
                 except (ValidationError, json.JSONDecodeError) as fb_e:
                     try:
@@ -228,10 +286,20 @@ class LiteLLMClient(CIO_LLM_Client):
     """Concrete implementation using litellm for multi-provider access."""
 
     def __init__(self):
+        super().__init__()
         # Circuit Breaker state
         self._failure_count = 0
         self._last_failure_time = 0.0
         self._breaker_open_until = 0.0
+
+    def _response_format_for_completion(
+        self, litellm_module: Any, routing_model: str
+    ) -> dict[str, str] | None:
+        if self._capability_profile == "minimal":
+            return None
+        if _supports_json_mode(litellm_module, routing_model):
+            return {"type": "json_object"}
+        return None
 
     def _check_circuit_breaker(self) -> str | None:
         """Check if the circuit breaker is open."""
@@ -326,9 +394,9 @@ class LiteLLMClient(CIO_LLM_Client):
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": json.dumps(user_context)},
                         ],
-                        response_format={"type": "json_object"}
-                        if _supports_json_mode(litellm, routing_primary)
-                        else None,
+                        response_format=self._response_format_for_completion(
+                            litellm, routing_primary
+                        ),
                     )
 
             # Success on primary
@@ -352,9 +420,9 @@ class LiteLLMClient(CIO_LLM_Client):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
                     ],
-                    response_format={"type": "json_object"}
-                    if _supports_json_mode(litellm, routing_fallback)
-                    else None,
+                    response_format=self._response_format_for_completion(
+                        litellm, routing_fallback
+                    ),
                 )
 
                 # Success on fallback
@@ -411,9 +479,9 @@ class LiteLLMClient(CIO_LLM_Client):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_context)},
                 ],
-                response_format={"type": "json_object"}
-                if _supports_json_mode(litellm, routing_fallback)
-                else None,
+                response_format=self._response_format_for_completion(
+                    litellm, routing_fallback
+                ),
             )
             return self._process_response(
                 prompt_id, response, int((time.perf_counter() - start_time) * 1000)
@@ -501,6 +569,7 @@ class MockLLMClient(CIO_LLM_Client):
     """Behaviorally honest mock client for testing and local development."""
 
     def __init__(self, prompts_dir: str | None = None):
+        super().__init__()
         import glob
 
         import yaml
@@ -665,15 +734,15 @@ class MockLLMClient(CIO_LLM_Client):
                 regime, conf = "choppy", "low"
                 trace = "Signals are mixed or weak; defaulting to choppy/low."
 
-            return json.dumps(
-                {
-                    "regime": regime,
-                    "regime_confidence": conf,
-                    "volatility_level": "medium",  # Mock default
-                    "primary_signal": f"mock_vol_{vol}_trend_{trend}",
-                    "thought_trace": trace,
-                }
-            )
+            payload = {
+                "regime": regime,
+                "regime_confidence": conf,
+                "volatility_level": "medium",  # Mock default
+                "primary_signal": f"mock_vol_{vol}_trend_{trend}",
+            }
+            if self._capability_profile != "minimal":
+                payload["thought_trace"] = trace
+            return json.dumps(payload)
 
         if prompt_id == "PETROSA_PROMPT_STRATEGY_ASSESSOR":
             losses = context.get("consecutive_losses", 0) or 0
@@ -689,15 +758,15 @@ class MockLLMClient(CIO_LLM_Client):
                 health, fit, rec = "healthy", "good", "run"
                 trace = "Strategy health signals are within normal parameters."
 
-            return json.dumps(
-                {
-                    "health": health,
-                    "regime_fit": fit,
-                    "activation_recommendation": rec,
-                    "param_change": None,
-                    "thought_trace": trace,
-                }
-            )
+            payload = {
+                "health": health,
+                "regime_fit": fit,
+                "activation_recommendation": rec,
+                "param_change": None,
+            }
+            if self._capability_profile != "minimal":
+                payload["thought_trace"] = trace
+            return json.dumps(payload)
 
         if prompt_id == "PETROSA_PROMPT_ACTION_CLASSIFIER":
             hard_blocked = context.get("hard_blocked", False)
@@ -721,9 +790,10 @@ class MockLLMClient(CIO_LLM_Client):
                 action, just = "skip", "Mixed signals or low conviction."
                 trace = "Defaulting to skip as no strong execute/pause signals met."
 
-            return json.dumps(
-                {"action": action, "justification": just, "thought_trace": trace}
-            )
+            payload = {"action": action, "justification": just}
+            if self._capability_profile != "minimal":
+                payload["thought_trace"] = trace
+            return json.dumps(payload)
 
         return "{}"
 
