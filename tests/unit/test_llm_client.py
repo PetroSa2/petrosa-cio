@@ -4,7 +4,9 @@ Unit tests for LiteLLMClient fixes:
   - AC1: response_format=json_object only when supported/configured
 """
 
+import sys
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -164,6 +166,10 @@ async def test_response_format_json_set_when_supported():
     mock_response.usage.completion_tokens = 10
     mock_response.usage.prompt_tokens_details = None
 
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_return=mock_response,
+        supported_params=["json_object"],
+    )
     with (
         patch.dict(
             "os.environ",
@@ -172,10 +178,7 @@ async def test_response_format_json_set_when_supported():
                 "LLM_MODEL": "novita/llama-3.1-8b",
             },
         ),
-        patch(
-            "litellm.acompletion", new_callable=AsyncMock, return_value=mock_response
-        ) as mock_acompletion,
-        patch("litellm.get_supported_openai_params", return_value=["json_object"]),
+        litellm_patch,
     ):
         await client.complete(
             prompt_id="test",
@@ -183,7 +186,7 @@ async def test_response_format_json_set_when_supported():
             user_context={},
         )
 
-    call_kwargs = mock_acompletion.call_args.kwargs
+    call_kwargs = fake_litellm.acompletion.call_args.kwargs
     assert call_kwargs.get("response_format") == {"type": "json_object"}, (
         f"Expected json_object response_format, got: {call_kwargs.get('response_format')}"
     )
@@ -195,6 +198,10 @@ async def test_response_format_json_not_set_when_env_disables_json_mode():
 
     mock_response = _mock_litellm_response('{"value": "proxy_ok"}')
 
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_return=mock_response,
+        supported_params=["json_object"],
+    )
     with (
         patch.dict(
             "os.environ",
@@ -204,10 +211,7 @@ async def test_response_format_json_not_set_when_env_disables_json_mode():
                 "LLM_SUPPORTS_JSON_MODE": "false",
             },
         ),
-        patch(
-            "litellm.acompletion", new_callable=AsyncMock, return_value=mock_response
-        ) as mock_acompletion,
-        patch("litellm.get_supported_openai_params", return_value=["json_object"]),
+        litellm_patch,
     ):
         await client.complete(
             prompt_id="test",
@@ -215,7 +219,7 @@ async def test_response_format_json_not_set_when_env_disables_json_mode():
             user_context={},
         )
 
-    call_kwargs = mock_acompletion.call_args.kwargs
+    call_kwargs = fake_litellm.acompletion.call_args.kwargs
     assert call_kwargs.get("response_format") is None
 
 
@@ -226,6 +230,10 @@ async def test_model_prefix_can_be_disabled_for_requesty_routes():
         '{"value": "ok"}', model="novita/llama-3.1-8b"
     )
 
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_return=mock_response,
+        supported_params=[],
+    )
     with (
         patch.dict(
             "os.environ",
@@ -235,10 +243,7 @@ async def test_model_prefix_can_be_disabled_for_requesty_routes():
                 "LLM_MODEL_PREFIX": "",
             },
         ),
-        patch(
-            "litellm.acompletion", new_callable=AsyncMock, return_value=mock_response
-        ) as mock_acompletion,
-        patch("litellm.get_supported_openai_params", return_value=[]),
+        litellm_patch,
     ):
         await client.complete(
             prompt_id="test",
@@ -246,7 +251,7 @@ async def test_model_prefix_can_be_disabled_for_requesty_routes():
             user_context={},
         )
 
-    call_kwargs = mock_acompletion.call_args.kwargs
+    call_kwargs = fake_litellm.acompletion.call_args.kwargs
     assert call_kwargs.get("model") == "novita/llama-3.1-8b"
 
 
@@ -266,6 +271,28 @@ def _mock_litellm_response(content: str, model: str = "openai/fallback"):
     return resp
 
 
+def _mock_litellm_runtime(
+    *,
+    acompletion_return: MagicMock | None = None,
+    acompletion_side_effect: Exception | None = None,
+    supported_params: list[str] | None = None,
+):
+    fake_litellm = SimpleNamespace(
+        acompletion=AsyncMock(
+            return_value=acompletion_return, side_effect=acompletion_side_effect
+        ),
+        get_supported_openai_params=MagicMock(return_value=supported_params or []),
+    )
+    fake_exceptions = SimpleNamespace(
+        RateLimitError=RuntimeError,
+        ServiceUnavailableError=RuntimeError,
+    )
+    return patch.dict(
+        sys.modules,
+        {"litellm": fake_litellm, "litellm.exceptions": fake_exceptions},
+    ), fake_litellm
+
+
 @pytest.mark.asyncio
 async def test_schema_fallback_returns_raw_response_via_litellm():
     """
@@ -275,6 +302,7 @@ async def test_schema_fallback_returns_raw_response_via_litellm():
     client = LiteLLMClient()
     mock_resp = _mock_litellm_response('{"value": "fallback_ok"}')
 
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(acompletion_return=mock_resp)
     with (
         patch.dict(
             "os.environ",
@@ -283,7 +311,7 @@ async def test_schema_fallback_returns_raw_response_via_litellm():
                 "LLM_FALLBACK_MODEL": "novita/llama-3.1-8b",
             },
         ),
-        patch("litellm.acompletion", new_callable=AsyncMock, return_value=mock_resp),
+        litellm_patch,
     ):
         result = await client._schema_fallback(
             prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
@@ -304,9 +332,10 @@ async def test_schema_fallback_returns_none_on_litellm_exception():
     """
     client = LiteLLMClient()
 
-    with patch(
-        "litellm.acompletion", new_callable=AsyncMock, side_effect=RuntimeError("boom")
-    ):
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=RuntimeError("boom")
+    )
+    with litellm_patch:
         result = await client._schema_fallback(
             prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
             system_prompt="sys",
