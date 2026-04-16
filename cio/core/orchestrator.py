@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 
 from cio.clients.factory import ClientFactory
@@ -31,6 +32,15 @@ class Orchestrator:
         self.strategy_assessor = StrategyAssessor(self.client)
         self.action_classifier = ActionClassifier(self.client)
 
+        # Read governance flags from environment (Ticket #334/337)
+        self.use_llm_reasoning = (
+            os.getenv("NURSE_USE_LLM_REASONING", "true").lower() == "true"
+        )
+        if not self.use_llm_reasoning:
+            logger.warning(
+                "⚠️ NURSE_USE_LLM_REASONING is disabled. CIO will operate in deterministic bypass mode."
+            )
+
     async def run(self, context: TriggerContext) -> DecisionResult:
         """
         Executes the reasoning loop for a given trigger context.
@@ -38,20 +48,26 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         provider_name = self.client.__class__.__name__
-        
+
         logger.info(
-            f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id}",
+            f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id} | Use LLM: {self.use_llm_reasoning}",
             extra={
                 "correlation_id": context.correlation_id,
                 "trigger_type": context.trigger_type.value,
                 "strategy_id": context.strategy_id,
                 "llm_provider": provider_name,
+                "use_llm_reasoning": self.use_llm_reasoning,
             },
         )
 
         try:
             # 1. CODE ENGINE: Hard Limits (S2)
             code_result = CodeEngine.run(context)
+
+            # Placeholder regime/strategy results for the assembler if we bypass
+            regime_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
+            strategy_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_STRATEGY_ASSESSOR"]
+
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks
                 logger.warning(
@@ -61,16 +77,29 @@ class Orchestrator:
                         "block_reason": code_result.block_reason,
                     },
                 )
-                # We still need placeholder regime/strategy results for the assembler
-                regime_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
-                strategy_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_STRATEGY_ASSESSOR"]
 
                 logger.info(
                     "Executing final Action Classifier for hard-blocked trade",
-                    extra={"correlation_id": context.correlation_id}
+                    extra={"correlation_id": context.correlation_id},
                 )
                 return await self.action_classifier.classify(
                     context, code_result, regime_fallback, strategy_fallback
+                )
+
+            # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
+            if not self.use_llm_reasoning:
+                logger.info(
+                    "Deterministic bypass active. Skipping LLM personas.",
+                    extra={"correlation_id": context.correlation_id},
+                )
+                # In bypass mode, we "blindly" trust the intent IF code engine passes.
+                # The ActionClassifier still handles the final assembly into DecisionResult.
+                return await self.action_classifier.classify(
+                    context,
+                    code_result,
+                    regime_fallback,
+                    strategy_fallback,
+                    bypass_mode=True,
                 )
 
             # 2. REGIME ANALYSIS (S3-S5)
@@ -86,7 +115,10 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached regime: {e}")
 
             if not regime:
-                logger.info("Running Regime Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
+                logger.info(
+                    "Running Regime Classifier (LLM)...",
+                    extra={"correlation_id": context.correlation_id},
+                )
                 regime = await self.regime_analyst.classify(context)
                 if self.cache:
                     await self.cache.set(
@@ -109,7 +141,10 @@ class Orchestrator:
                         logger.warning(f"Failed to validate cached strategy: {e}")
 
             if not strategy:
-                logger.info("Running Strategy Assessor (LLM)...", extra={"correlation_id": context.correlation_id})
+                logger.info(
+                    "Running Strategy Assessor (LLM)...",
+                    extra={"correlation_id": context.correlation_id},
+                )
                 strategy = await self.strategy_assessor.assess(context)
                 if self.cache:
                     await self.cache.set(
@@ -119,7 +154,10 @@ class Orchestrator:
                     )
 
             # 4. ACTION CLASSIFICATION
-            logger.info("Running Final Action Classifier (LLM)...", extra={"correlation_id": context.correlation_id})
+            logger.info(
+                "Running Final Action Classifier (LLM)...",
+                extra={"correlation_id": context.correlation_id},
+            )
             decision = await self.action_classifier.classify(
                 context, code_result, regime, strategy
             )
