@@ -75,7 +75,8 @@ class RegimeResult(BaseModel):
         ..., description="The main data point that drove this classification"
     )
     thought_trace: str = Field(
-        ..., description="Short explanation of the classification reasoning"
+        default="",
+        description="Short explanation of the classification reasoning (optional for minimal LLM profile)",
     )
 
     @classmethod
