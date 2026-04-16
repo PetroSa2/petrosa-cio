@@ -52,6 +52,38 @@ def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:
     return "json_object" in (supported_params or [])
 
 
+# Persona prompts whose JSON may omit thought_trace when LLM_CAPABILITY_PROFILE=minimal.
+_PROMPTS_OPTIONAL_THOUGHT_TRACE = frozenset(
+    {
+        "PETROSA_PROMPT_ACTION_CLASSIFIER",
+        "PETROSA_PROMPT_REGIME_CLASSIFIER",
+        "PETROSA_PROMPT_STRATEGY_ASSESSOR",
+    }
+)
+
+
+def _inject_minimal_thought_trace_json(
+    json_text: str, prompt_id: str, capability_profile: str
+) -> str:
+    """
+    For minimal profile only, allow LLM JSON without thought_trace by injecting ""
+    before Pydantic validation. Standard profile keeps thought_trace required so
+    missing fields still trigger validation → schema fallback / SAFE_DEFAULTS.
+    """
+    if (
+        capability_profile != "minimal"
+        or prompt_id not in _PROMPTS_OPTIONAL_THOUGHT_TRACE
+    ):
+        return json_text
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError:
+        return json_text
+    if isinstance(data, dict) and "thought_trace" not in data:
+        data["thought_trace"] = ""
+    return json.dumps(data)
+
+
 def resolve_llm_capability_profile() -> str:
     """
     CIO LLM tier: ``minimal`` (small models, no JSON mode / stripped prompts) or
@@ -154,6 +186,9 @@ class CIO_LLM_Client(ABC):
                     inner = inner[:-1]
                 content = "\n".join(inner)
 
+            content = _inject_minimal_thought_trace_json(
+                content, prompt_id, self._capability_profile
+            )
             return response_model.model_validate_json(content)
         except (ValidationError, json.JSONDecodeError) as e:
             # Record metric
@@ -189,6 +224,9 @@ class CIO_LLM_Client(ABC):
                         if inner and inner[-1].strip() == "```":
                             inner = inner[:-1]
                         fb_content = "\n".join(inner)
+                    fb_content = _inject_minimal_thought_trace_json(
+                        fb_content, prompt_id, self._capability_profile
+                    )
                     return response_model.model_validate_json(fb_content)
                 except (ValidationError, json.JSONDecodeError) as fb_e:
                     try:

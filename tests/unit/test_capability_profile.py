@@ -2,6 +2,7 @@
 
 import os
 import sys
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +12,7 @@ from cio.clients.llm_client import (
     MockLLMClient,
     resolve_llm_capability_profile,
 )
-from cio.models import ActionResult, RegimeResult, StrategyResult
+from cio.models import ActionResult, RawLLMResponse, RegimeResult, StrategyResult
 from cio.models.enums import ActionType
 from cio.prompts.loader import select_system_prompt
 
@@ -189,6 +190,62 @@ async def test_mock_complete_with_schema_minimal_strategy():
     assert isinstance(out, StrategyResult)
     assert out.thought_trace == ""
     assert out.param_change is None
+
+
+def _raw_regime(content: str) -> RawLLMResponse:
+    return RawLLMResponse(
+        prompt_id="PETROSA_PROMPT_REGIME_CLASSIFIER",
+        content=content,
+        error=None,
+        model="test",
+        input_tokens=1,
+        output_tokens=1,
+        latency_ms=1,
+        timestamp=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_standard_missing_thought_trace_still_triggers_safe_defaults():
+    """Standard profile: omitted thought_trace must not silently validate."""
+    from cio.models import SAFE_DEFAULTS
+
+    content = (
+        '{"regime":"choppy","regime_confidence":"low",'
+        '"volatility_level":"medium","primary_signal":"x"}'
+    )
+    with patch.dict(os.environ, {"LLM_CAPABILITY_PROFILE": "standard"}, clear=False):
+        client = LiteLLMClient()
+        client.complete = AsyncMock(return_value=_raw_regime(content))
+        client._schema_fallback = AsyncMock(return_value=None)
+        out = await client.complete_with_schema(
+            prompt_id="PETROSA_PROMPT_REGIME_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+            response_model=RegimeResult,
+        )
+    assert out == SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
+
+
+@pytest.mark.asyncio
+async def test_minimal_injects_empty_thought_trace_for_valid_regime_json():
+    """Minimal profile: missing thought_trace is injected before validation."""
+    content = (
+        '{"regime":"choppy","regime_confidence":"low",'
+        '"volatility_level":"medium","primary_signal":"x"}'
+    )
+    with patch.dict(os.environ, {"LLM_CAPABILITY_PROFILE": "minimal"}, clear=False):
+        client = LiteLLMClient()
+        client.complete = AsyncMock(return_value=_raw_regime(content))
+        client._schema_fallback = AsyncMock(return_value=None)
+        out = await client.complete_with_schema(
+            prompt_id="PETROSA_PROMPT_REGIME_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+            response_model=RegimeResult,
+        )
+    assert isinstance(out, RegimeResult)
+    assert out.thought_trace == ""
 
 
 @pytest.mark.asyncio
