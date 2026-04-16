@@ -49,12 +49,22 @@ class ActionClassifier:
         Assembles the final DecisionResult.
         """
         if bypass_mode:
-            # Ticket #334: Deterministic bypass
+            # Ticket #334/337: Deterministic bypass
             # If not hard blocked, we default to EXECUTE
             action = (
                 ActionType.EXECUTE if not code_result.hard_blocked else ActionType.BLOCK
             )
-            justification = "Deterministic bypass: Executing based on Code Engine approval (NURSE_USE_LLM_REASONING=false)."
+
+            if action == ActionType.BLOCK:
+                justification = (
+                    "Deterministic bypass: Blocking based on Code Engine hard block"
+                    f" (NURSE_USE_LLM_REASONING=false). Reason: {code_result.block_reason}"
+                    if code_result.block_reason
+                    else "Deterministic bypass: Blocking based on Code Engine hard block "
+                    "(NURSE_USE_LLM_REASONING=false)."
+                )
+            else:
+                justification = "Deterministic bypass: Executing based on Code Engine approval (NURSE_USE_LLM_REASONING=false)."
 
             return DecisionAssembler.assemble(
                 context=context,

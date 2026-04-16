@@ -6,11 +6,16 @@ from cio.clients.factory import ClientFactory
 from cio.core.engine import CodeEngine
 from cio.models import (
     SAFE_DECISION_RESULT,
-    SAFE_DEFAULTS,
+    ActivationRecommendation,
+    ConfidenceLevel,
     DecisionResult,
+    HealthStatus,
+    RegimeEnum,
+    RegimeFit,
     RegimeResult,
     StrategyResult,
     TriggerContext,
+    VolatilityLevel,
 )
 from cio.personas.action_classifier import ActionClassifier
 from cio.personas.regime_analyst import RegimeAnalyst
@@ -64,9 +69,25 @@ class Orchestrator:
             # 1. CODE ENGINE: Hard Limits (S2)
             code_result = CodeEngine.run(context)
 
-            # Placeholder regime/strategy results for the assembler if we bypass
-            regime_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
-            strategy_fallback = SAFE_DEFAULTS["PETROSA_PROMPT_STRATEGY_ASSESSOR"]
+            # Placeholder results for deterministic bypass (Ticket #334/337)
+            # Use explicit "bypass" placeholders instead of SAFE_DEFAULTS to avoid "PARSE_FAILURE" trace
+            bypass_regime = RegimeResult(
+                regime=RegimeEnum.RANGING,
+                regime_confidence=ConfidenceLevel.HIGH,
+                volatility_level=VolatilityLevel.MEDIUM,
+                primary_signal="DETERMINISTIC_BYPASS",
+                confidence=1.0,
+                fit=RegimeFit.GOOD,
+                thought_trace="DETERMINISTIC_BYPASS",
+            )
+            bypass_strategy = StrategyResult(
+                strategy_id=context.strategy_id,
+                health=HealthStatus.HEALTHY,
+                activation_recommendation=ActivationRecommendation.RUN,
+                regime_fit=RegimeFit.GOOD,
+                confidence=1.0,
+                thought_trace="DETERMINISTIC_BYPASS",
+            )
 
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks
@@ -83,7 +104,11 @@ class Orchestrator:
                     extra={"correlation_id": context.correlation_id},
                 )
                 return await self.action_classifier.classify(
-                    context, code_result, regime_fallback, strategy_fallback
+                    context,
+                    code_result,
+                    bypass_regime,
+                    bypass_strategy,
+                    bypass_mode=not self.use_llm_reasoning,
                 )
 
             # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
@@ -97,8 +122,8 @@ class Orchestrator:
                 return await self.action_classifier.classify(
                     context,
                     code_result,
-                    regime_fallback,
-                    strategy_fallback,
+                    bypass_regime,
+                    bypass_strategy,
                     bypass_mode=True,
                 )
 
