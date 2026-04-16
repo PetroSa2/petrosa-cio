@@ -24,3 +24,9 @@ LLM_VALIDATION_FAILURES = Counter(
     "Total number of LLM response schema validation failures",
     ["prompt_id", "model"],
 )
+
+LLM_FALLBACK_SKIPS = Counter(
+    "cio_llm_fallback_skips_total",
+    "Total SAFE_DEFAULT fallbacks that force SKIP-like behavior",
+    ["prompt_id", "reason"],
+)

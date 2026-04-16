@@ -19,6 +19,34 @@ from cio.models import SAFE_DEFAULTS, RawLLMResponse
 logger = logging.getLogger(__name__)
 
 
+def _env_bool(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_model_prefix() -> str:
+    return os.getenv("LLM_MODEL_PREFIX", "openai/")
+
+
+def _build_routing_model(model: str, api_base: str | None) -> str:
+    if not api_base:
+        return model
+    prefix = _get_model_prefix()
+    return f"{prefix}{model}" if prefix else model
+
+
+def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:
+    if not _env_bool("LLM_SUPPORTS_JSON_MODE", default=True):
+        return False
+    try:
+        supported_params = litellm_module.get_supported_openai_params(routing_model)
+    except Exception:
+        return False
+    return "json_object" in (supported_params or [])
+
+
 class CIO_LLM_Client(ABC):
     """
     Abstract base class for LLM client implementations.
@@ -70,6 +98,22 @@ class CIO_LLM_Client(ABC):
             logger.error(
                 "LLM transport error",
                 extra={"prompt_id": prompt_id, "error": raw.error},
+            )
+            try:
+                from cio.core.metrics import LLM_FALLBACK_SKIPS
+
+                LLM_FALLBACK_SKIPS.labels(
+                    prompt_id=prompt_id, reason="transport_error"
+                ).inc()
+            except ImportError:
+                pass
+            logger.error(
+                "LLM_PARSE_FAILURE_SKIP",
+                extra={
+                    "prompt_id": prompt_id,
+                    "reason": "transport_error",
+                    "error": raw.error,
+                },
             )
             return SAFE_DEFAULTS[prompt_id]
 
@@ -139,6 +183,22 @@ class CIO_LLM_Client(ABC):
                 "LLM response validation failed — returning safe default",
                 extra={"prompt_id": prompt_id},
             )
+            try:
+                from cio.core.metrics import LLM_FALLBACK_SKIPS
+
+                LLM_FALLBACK_SKIPS.labels(
+                    prompt_id=prompt_id, reason="validation_error"
+                ).inc()
+            except ImportError:
+                pass
+            logger.error(
+                "LLM_PARSE_FAILURE_SKIP",
+                extra={
+                    "prompt_id": prompt_id,
+                    "reason": "validation_error",
+                    "error": str(e),
+                },
+            )
             return SAFE_DEFAULTS[prompt_id]
 
     @abstractmethod
@@ -188,9 +248,15 @@ class LiteLLMClient(CIO_LLM_Client):
 
         if self._failure_count >= 5:
             self._breaker_open_until = now + 60
+            recovery_in_seconds = int(max(self._breaker_open_until - now, 0))
             logger.error(
-                "LLM Circuit Breaker tripped! Opening for 60 seconds.",
-                extra={"failure_count": self._failure_count},
+                "LLM Circuit Breaker tripped",
+                extra={
+                    "breaker_state": "open",
+                    "failure_count": self._failure_count,
+                    "recovery_in_seconds": recovery_in_seconds,
+                    "recovery_at_epoch": int(self._breaker_open_until),
+                },
             )
 
     def _record_success(self):
@@ -225,10 +291,8 @@ class LiteLLMClient(CIO_LLM_Client):
         fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         api_base = os.getenv("LLM_API_BASE")
 
-        # When using a proxy like Requesty, we prefix with 'openai/' to ensure
-        # litellm uses the OpenAI-compatible route for all models.
-        routing_primary = f"openai/{primary_model}" if api_base else primary_model
-        routing_fallback = f"openai/{fallback_model}" if api_base else fallback_model
+        routing_primary = _build_routing_model(primary_model, api_base)
+        routing_fallback = _build_routing_model(fallback_model, api_base)
 
         start_time = time.perf_counter()
 
@@ -257,13 +321,9 @@ class LiteLLMClient(CIO_LLM_Client):
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": json.dumps(user_context)},
                         ],
-                        response_format=(
-                            {"type": "json_object"}
-                            if api_base
-                            or "json_object"
-                            in litellm.get_supported_openai_params(routing_primary)
-                            else None
-                        ),
+                        response_format={"type": "json_object"}
+                        if _supports_json_mode(litellm, routing_primary)
+                        else None,
                     )
 
             # Success on primary
@@ -287,13 +347,9 @@ class LiteLLMClient(CIO_LLM_Client):
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
                     ],
-                    response_format=(
-                        {"type": "json_object"}
-                        if api_base
-                        or "json_object"
-                        in litellm.get_supported_openai_params(routing_fallback)
-                        else None
-                    ),
+                    response_format={"type": "json_object"}
+                    if _supports_json_mode(litellm, routing_fallback)
+                    else None,
                 )
 
                 # Success on fallback
@@ -334,7 +390,7 @@ class LiteLLMClient(CIO_LLM_Client):
 
         fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         api_base = os.getenv("LLM_API_BASE")
-        routing_fallback = f"openai/{fallback_model}" if api_base else fallback_model
+        routing_fallback = _build_routing_model(fallback_model, api_base)
 
         logger.info(
             "Schema fallback: retrying with fallback model",
@@ -350,13 +406,9 @@ class LiteLLMClient(CIO_LLM_Client):
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_context)},
                 ],
-                response_format=(
-                    {"type": "json_object"}
-                    if api_base
-                    or "json_object"
-                    in litellm.get_supported_openai_params(routing_fallback)
-                    else None
-                ),
+                response_format={"type": "json_object"}
+                if _supports_json_mode(litellm, routing_fallback)
+                else None,
             )
             return self._process_response(
                 prompt_id, response, int((time.perf_counter() - start_time) * 1000)
@@ -372,13 +424,10 @@ class LiteLLMClient(CIO_LLM_Client):
         """Generates real embeddings via litellm.embedding."""
         import litellm
 
-        primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
         embedding_model = os.getenv("EMBEDDING_MODEL", "openai/text-embedding-3-small")
         api_base = os.getenv("LLM_API_BASE")
 
-        # When using a proxy like Requesty, we prefix with 'openai/' to ensure
-        # litellm uses the OpenAI-compatible route for all models.
-        routing_model = f"openai/{primary_model}" if api_base else embedding_model
+        routing_model = _build_routing_model(embedding_model, api_base)
 
         try:
             response = await litellm.aembedding(
