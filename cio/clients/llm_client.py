@@ -34,7 +34,12 @@ def _build_routing_model(model: str, api_base: str | None) -> str:
     if not api_base:
         return model
     prefix = _get_model_prefix()
-    return f"{prefix}{model}" if prefix else model
+    if not prefix:
+        return model
+    # Avoid openai/openai/... when env already uses provider-prefixed model ids.
+    if model.startswith(prefix):
+        return model
+    return f"{prefix}{model}"
 
 
 def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:

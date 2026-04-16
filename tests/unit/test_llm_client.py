@@ -464,6 +464,21 @@ def test_build_routing_model_no_api_base_unchanged():
     assert llm_client_module._build_routing_model("anthropic/x", None) == "anthropic/x"
 
 
+def test_build_routing_model_idempotent_when_model_already_has_prefix():
+    with patch.dict(
+        os.environ,
+        {"LLM_MODEL_PREFIX": "openai/", "LLM_API_BASE": "https://x/v1"},
+    ):
+        assert (
+            llm_client_module._build_routing_model("openai/gpt-4o-mini", "https://x/v1")
+            == "openai/gpt-4o-mini"
+        )
+        assert (
+            llm_client_module._build_routing_model("novita/llama", "https://x/v1")
+            == "openai/novita/llama"
+        )
+
+
 def test_env_bool_variants():
     with patch.dict(os.environ, {"EB": "false"}, clear=False):
         assert llm_client_module._env_bool("EB", default=True) is False
@@ -540,8 +555,8 @@ async def test_embed_success_returns_vector():
 
 
 @pytest.mark.asyncio
-async def test_embed_with_api_base_prefixes_embedding_model():
-    """Embedding uses _build_routing_model when LLM_API_BASE is set."""
+async def test_embed_with_api_base_does_not_double_prefix_embedding_model():
+    """Embedding model ids that already include LLM_MODEL_PREFIX are not doubled."""
     client = LiteLLMClient()
     resp = SimpleNamespace(data=[{"embedding": [1.0]}])
     fake_litellm = SimpleNamespace(aembedding=AsyncMock(return_value=resp))
@@ -559,7 +574,7 @@ async def test_embed_with_api_base_prefixes_embedding_model():
         await client.embed("x")
 
     kwargs = fake_litellm.aembedding.await_args.kwargs
-    assert kwargs["model"] == "openai/openai/text-embedding-3-small"
+    assert kwargs["model"] == "openai/text-embedding-3-small"
     assert kwargs["api_base"] == "https://router.requesty.ai/v1"
 
 
