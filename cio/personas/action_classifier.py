@@ -14,6 +14,7 @@ from cio.models import (
     StrategyResult,
     TriggerContext,
 )
+from cio.prompts.loader import select_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ class ActionClassifier:
         try:
             with open(yaml_path) as f:
                 data = yaml.safe_load(f)
-                return data.get("system_prompt", "")
+                return select_system_prompt(data, self.client.capability_profile)
         except Exception as e:
             logger.error(f"Failed to load system prompt from {yaml_path}: {e}")
             return ""

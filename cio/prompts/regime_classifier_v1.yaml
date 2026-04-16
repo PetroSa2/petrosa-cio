@@ -20,3 +20,19 @@ system_prompt: |
 
   REGIME ENUMS: [trending_bull, trending_bear, ranging, breakout_phase, high_volatility, capitulation, recovery, choppy]
   CONFIDENCE ENUMS: [high, medium, low]
+
+  Output Schema:
+  {
+    "regime": "<enum>",
+    "regime_confidence": "high|medium|low",
+    "volatility_level": "low|medium|high|extreme",
+    "primary_signal": "string",
+    "thought_trace": "string (max 120 chars)"
+  }
+
+system_prompt_minimal: |
+  PETROSA regime classifier. Reply with ONLY JSON. No thought_trace field.
+  Schema:
+  {"regime":"<enum>","regime_confidence":"high|medium|low","volatility_level":"low|medium|high|extreme","primary_signal":"string"}
+  REGIME ENUMS: [trending_bull, trending_bear, ranging, breakout_phase, high_volatility, capitulation, recovery, choppy]
+  If required inputs are absent: {"error":"MISSING_INPUT"}

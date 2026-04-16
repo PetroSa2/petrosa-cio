@@ -40,3 +40,10 @@ system_prompt: |
     } | null,
     "thought_trace": "string (max 120 chars)"
   }
+
+system_prompt_minimal: |
+  PETROSA strategy assessor. Reply with ONLY JSON. No thought_trace field.
+  param_change must always be null.
+  Schema:
+  {"health":"healthy|degraded|failing","regime_fit":"good|neutral|poor","activation_recommendation":"run|reduce|pause","param_change":null}
+  If required inputs are absent: {"error":"MISSING_INPUT"}
