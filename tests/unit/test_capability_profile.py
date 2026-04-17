@@ -1,7 +1,7 @@
 """LLM_CAPABILITY_PROFILE: minimal vs standard prompts and LiteLLM json_object gating."""
 
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -70,9 +70,7 @@ async def test_minimal_profile_injects_missing_thought_trace():
         assert out.thought_trace == ""
 
         # 3. Strategy Assessor
-        client._call_litellm.return_value = (
-            '{"strategy_id": "test", "health": "healthy", "activation_recommendation": "run", "confidence": 1.0, "regime_fit": "good"}'
-        )
+        client._call_litellm.return_value = '{"strategy_id": "test", "health": "healthy", "activation_recommendation": "run", "confidence": 1.0, "regime_fit": "good"}'
         out = await client.complete_with_schema(
             prompt_id="PETROSA_PROMPT_STRATEGY_ASSESSOR",
             system_prompt="",
@@ -85,12 +83,12 @@ async def test_minimal_profile_injects_missing_thought_trace():
 
 
 def _raw_regime(content: str) -> RawLLMResponse:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         from datetime import UTC
     except ImportError:
-        UTC = timezone.utc
+        UTC = UTC
     return RawLLMResponse(
         prompt_id="PETROSA_PROMPT_REGIME_CLASSIFIER",
         content=content,

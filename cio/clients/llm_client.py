@@ -1,14 +1,12 @@
 import json
 import logging
 import os
-import time
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
 
 try:
     from datetime import UTC
 except ImportError:
-    UTC = timezone.utc
+    UTC = UTC
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
@@ -19,7 +17,7 @@ from tenacity import (
     wait_random_exponential,
 )
 
-from cio.models import SAFE_DEFAULTS, RawLLMResponse
+from cio.models import SAFE_DEFAULTS
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +138,10 @@ class LiteLLMClient(CIO_LLM_Client):
             )
 
             # S5: Post-processing for minimal profile (inject empty thought_trace if missing)
-            if self.capability_profile == "minimal" and prompt_id in _PROMPTS_OPTIONAL_THOUGHT_TRACE:
+            if (
+                self.capability_profile == "minimal"
+                and prompt_id in _PROMPTS_OPTIONAL_THOUGHT_TRACE
+            ):
                 try:
                     data = json.loads(raw_content)
                     if "thought_trace" not in data:
@@ -162,7 +163,11 @@ class LiteLLMClient(CIO_LLM_Client):
             return SAFE_DEFAULTS.get(prompt_id)
 
     async def _call_litellm(
-        self, model: str, system_prompt: str, user_context: dict[str, Any], json_mode: bool
+        self,
+        model: str,
+        system_prompt: str,
+        user_context: dict[str, Any],
+        json_mode: bool,
     ) -> str:
         """Internal retrying caller for litellm.completion."""
         api_base = os.getenv("LLM_API_BASE")
@@ -210,7 +215,10 @@ class MockLLMClient(CIO_LLM_Client):
         if cache_key in self._cache:
             raw = self._cache[cache_key]
             # S5: Post-processing for minimal profile (inject empty thought_trace if missing)
-            if self.capability_profile == "minimal" and prompt_id in _PROMPTS_OPTIONAL_THOUGHT_TRACE:
+            if (
+                self.capability_profile == "minimal"
+                and prompt_id in _PROMPTS_OPTIONAL_THOUGHT_TRACE
+            ):
                 try:
                     data = json.loads(raw)
                     if "thought_trace" not in data:
