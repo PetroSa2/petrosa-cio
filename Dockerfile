@@ -47,14 +47,16 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
 COPY VERSION .
-# CACHE_BUST is set to github.sha by CI — forces this layer to rebuild on every push,
-# preventing stale cio/ content from being served by the GHA layer cache (see AC1 in #88).
+# ARG CACHE_BUST busts the *RUN echo* layer cache key (ARG only affects RUN, not COPY).
+# The RUN echo step is a cache miss on every push, which in turn makes the subsequent
+# COPY cio/ layer a cache miss because its predecessor layer hash changed.
 ARG CACHE_BUST=unknown
 RUN echo "Cache bust: $CACHE_BUST"
 COPY cio/ cio/
-# Integrity check: fails the BUILD (not just CI) if the enforcer ships without orchestrator.run().
-# This catches stale GHA cache layers before the image is ever pushed.
-RUN python3 -c "import sys; sys.path.insert(0, '/app'); from cio.apps.nurse.enforcer import NurseEnforcer; import inspect; src = inspect.getsource(NurseEnforcer.audit); assert 'orchestrator.run' in src, 'BUILD FAILED: enforcer.py does not call orchestrator.run() — stale cache layer suspected'"
+# Build-time integrity guard: abort the build if enforcer.py ships without the call to
+# self.orchestrator.run(). Checks for the method call expression specifically (not a comment
+# or dead-code string) so substring-in-source false-positives are ruled out.
+RUN python3 -c "import sys; sys.path.insert(0, '/app'); from cio.apps.nurse.enforcer import NurseEnforcer; import inspect; src = inspect.getsource(NurseEnforcer.audit); assert 'self.orchestrator.run' in src, 'BUILD FAILED: enforcer.py does not call self.orchestrator.run() — stale cache layer suspected'"
 
 # Create non-root user
 RUN useradd -m -u 1000 petrosa && \

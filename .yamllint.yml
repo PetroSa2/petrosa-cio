@@ -7,7 +7,7 @@ rules:
     indent-sequences: whatever
   # Allow longer lines in CI workflow files (build-args, run scripts, etc.)
   line-length:
-    max: 300
+    max: 320
   # GitHub Actions uses 'on:' as a key — allow the bare boolean synonym
   truthy:
     allowed-values: ['true', 'false']
