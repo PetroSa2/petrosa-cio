@@ -2,7 +2,7 @@ name: Deploy
 
 on:
   push:
-    branches: [ 'main' ]
+    branches: ['main']
   workflow_dispatch:
     inputs:
       version_bump:
@@ -107,6 +107,17 @@ jobs:
         build-args: |
           VERSION=${{ steps.version.outputs.version }}
           COMMIT_SHA=${{ github.sha }}
+          CACHE_BUST=${{ github.sha }}
+    - name: Validate image integrity
+      run: |
+        IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+        docker run --rm "$IMAGE" python3 -c "
+        import inspect
+        from cio.apps.nurse.enforcer import NurseEnforcer
+        src = inspect.getsource(NurseEnforcer.audit)
+        assert 'orchestrator.run' in src, 'FAIL: enforcer does not call orchestrator.run()'
+        print('PASS: enforcer calls orchestrator.run()')
+        "
 
   gitops-update:
     name: GitOps Update
@@ -134,8 +145,6 @@ jobs:
       - name: Rebase on main
         run: ./scripts/gitops-rebase-main.sh
         working-directory: petrosa_k8s
-
-
 
       - name: Update cio image tag in GitOps manifests
         run: |
