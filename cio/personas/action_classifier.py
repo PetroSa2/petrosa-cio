@@ -8,6 +8,7 @@ from cio.clients.llm_client import CIO_LLM_Client
 from cio.core.assembler import DecisionAssembler
 from cio.models import (
     ActionResult,
+    ActionType,
     CodeEngineResult,
     DecisionResult,
     RegimeResult,
@@ -41,11 +42,39 @@ class ActionClassifier:
         code_result: CodeEngineResult,
         regime_result: RegimeResult,
         strategy_result: StrategyResult,
+        bypass_mode: bool = False,
     ) -> DecisionResult:
         """
         Runs the final LLM classification loop to determine the ActionType.
         Assembles the final DecisionResult.
         """
+        if bypass_mode:
+            # Ticket #334/337: Deterministic bypass
+            # If not hard blocked, we default to EXECUTE
+            action = (
+                ActionType.EXECUTE if not code_result.hard_blocked else ActionType.BLOCK
+            )
+
+            if action == ActionType.BLOCK:
+                justification = (
+                    "Deterministic bypass: Blocking based on Code Engine hard block"
+                    f" (NURSE_USE_LLM_REASONING=false). Reason: {code_result.block_reason}"
+                    if code_result.block_reason
+                    else "Deterministic bypass: Blocking based on Code Engine hard block "
+                    "(NURSE_USE_LLM_REASONING=false)."
+                )
+            else:
+                justification = "Deterministic bypass: Executing based on Code Engine approval (NURSE_USE_LLM_REASONING=false)."
+
+            return DecisionAssembler.assemble(
+                context=context,
+                code_result=code_result,
+                regime_result=regime_result,
+                strategy_result=strategy_result,
+                llm_action=action,
+                llm_justification=justification,
+            )
+
         user_context = self._build_user_context(
             context, code_result, regime_result, strategy_result
         )
