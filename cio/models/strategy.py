@@ -46,7 +46,7 @@ class StrategyResult(BaseModel):
     activation_recommendation: ActivationRecommendation
     param_change: ParamChangeSignal | None = None
     thought_trace: str = Field(
-        default="",
+        ...,
         max_length=120,
         description="1 sentence reasoning trace (optional for minimal LLM profile)",
     )

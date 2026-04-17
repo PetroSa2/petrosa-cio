@@ -1,11 +1,6 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-try:
-    from datetime import UTC
-except ImportError:
-    UTC = UTC
-
 import pytest
 
 from cio.core.orchestrator import Orchestrator

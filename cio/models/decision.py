@@ -20,7 +20,7 @@ class ActionResult(BaseModel):
     action: ActionType
     justification: str = Field(..., max_length=200)
     thought_trace: str = Field(
-        default="",
+        ...,
         max_length=120,
         description="Omitted in minimal capability profile responses",
     )
