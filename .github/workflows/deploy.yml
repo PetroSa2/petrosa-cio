@@ -111,13 +111,7 @@ jobs:
     - name: Validate image integrity
       run: |
         IMAGE=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
-        docker run --rm "$IMAGE" python3 -c "
-        import inspect
-        from cio.apps.nurse.enforcer import NurseEnforcer
-        src = inspect.getsource(NurseEnforcer.audit)
-        assert 'orchestrator.run' in src, 'FAIL: enforcer does not call orchestrator.run()'
-        print('PASS: enforcer calls orchestrator.run()')
-        "
+        docker run --rm "$IMAGE" python3 -c "import inspect; from cio.apps.nurse.enforcer import NurseEnforcer; src = inspect.getsource(NurseEnforcer.audit); assert 'orchestrator.run' in src, 'FAIL: enforcer does not call orchestrator.run()'; print('PASS: enforcer calls orchestrator.run()')"
 
   gitops-update:
     name: GitOps Update
