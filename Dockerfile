@@ -47,6 +47,10 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
 COPY VERSION .
+# CACHE_BUST is set to github.sha by CI — forces this layer to rebuild on every push,
+# preventing stale cio/ content from being served by the GHA layer cache (see AC1 in #88).
+ARG CACHE_BUST=unknown
+RUN echo "Cache bust: $CACHE_BUST"
 COPY cio/ cio/
 
 # Create non-root user
