@@ -103,7 +103,7 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-to: type=gha,mode=min
         build-args: |
           VERSION=${{ steps.version.outputs.version }}
           COMMIT_SHA=${{ github.sha }}

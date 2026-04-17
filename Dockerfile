@@ -52,6 +52,9 @@ COPY VERSION .
 ARG CACHE_BUST=unknown
 RUN echo "Cache bust: $CACHE_BUST"
 COPY cio/ cio/
+# Integrity check: fails the BUILD (not just CI) if the enforcer ships without orchestrator.run().
+# This catches stale GHA cache layers before the image is ever pushed.
+RUN python3 -c "import sys; sys.path.insert(0, '/app'); from cio.apps.nurse.enforcer import NurseEnforcer; import inspect; src = inspect.getsource(NurseEnforcer.audit); assert 'orchestrator.run' in src, 'BUILD FAILED: enforcer.py does not call orchestrator.run() — stale cache layer suspected'"
 
 # Create non-root user
 RUN useradd -m -u 1000 petrosa && \
