@@ -1,0 +1,221 @@
+# TEMPLATE — Copy to `.github/workflows/copilot-review-gate.yml` in each Petrosa repo
+# before requiring the `copilot-review / copilot-review` status check on `main`.
+#
+# Enforces merge gating: Copilot must have reviewed the current PR head SHA and
+# all Copilot-started review threads must be resolved.
+#
+# Branch protection must require the check name: copilot-review / copilot-review
+# (workflow name / job name). See docs/COPILOT_REVIEW_ENFORCEMENT.md
+#
+# Related: Issue #330
+
+name: copilot-review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  workflow_run:
+    workflows: ["Request Copilot Review"]
+    types: [completed]
+
+concurrency:
+  group: copilot-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  copilot-review:
+    name: copilot-review
+    runs-on: petrosa-org-runners
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node 24 early.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Verify Copilot review and resolved threads
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            async function resolvePullRequest() {
+              if (context.eventName === 'pull_request') {
+                return context.payload.pull_request;
+              }
+              if (context.eventName === 'pull_request_review') {
+                return context.payload.pull_request;
+              }
+              if (context.eventName === 'workflow_run') {
+                const run = context.payload.workflow_run;
+                const prs = run.pull_requests || [];
+                if (prs.length === 0) {
+                  core.info('workflow_run has no linked PR; skipping.');
+                  return null;
+                }
+                const { data } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: prs[0].number,
+                });
+                return data;
+              }
+              core.info(`Unhandled event ${context.eventName}; skipping.`);
+              return null;
+            }
+
+            const pr = await resolvePullRequest();
+            if (!pr) {
+              return;
+            }
+
+            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+              core.info(`Skipping fork PR ${pr.head.repo.full_name}`);
+              return;
+            }
+
+            const pull_number = pr.number;
+            const headSha = pr.head.sha;
+
+            const isCopilotPrReviewer = (login) => {
+              if (!login) return false;
+              const l = String(login).toLowerCase();
+              return (
+                l === 'copilot-pull-request-reviewer' ||
+                l.startsWith('copilot-pull-request-reviewer[')
+              );
+            };
+
+            async function hasCopilotReviewForHeadSha() {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner,
+                repo,
+                pull_number,
+                per_page: 100,
+              });
+
+              return reviews.some(
+                (r) =>
+                  r.user &&
+                  isCopilotPrReviewer(r.user.login) &&
+                  r.commit_id === headSha &&
+                  r.state !== 'DISMISSED' &&
+                  r.state !== 'PENDING'
+              );
+            }
+
+            // Copilot reviews are asynchronous and often land after CI completes and after the
+            // review request workflow runs. To avoid flaky “rerun until Copilot posts” behavior,
+            // poll for a bounded time before failing.
+            const maxWaitSeconds = 20 * 60; // 20 minutes
+            const pollIntervalSeconds = 30;
+            let waited = 0;
+
+            while (waited <= maxWaitSeconds) {
+              if (await hasCopilotReviewForHeadSha()) {
+                core.info(`Found submitted Copilot review for head ${headSha}.`);
+                break;
+              }
+
+              if (waited === 0) {
+                core.info(
+                  `Waiting for Copilot PR review on current head ${headSha} (polling up to ${maxWaitSeconds}s).`
+                );
+              }
+
+              if (waited >= maxWaitSeconds) {
+                core.setFailed(
+                  `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
+                    `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`
+                );
+                return;
+              }
+
+              await new Promise((r) => setTimeout(r, pollIntervalSeconds * 1000));
+              waited += pollIntervalSeconds;
+            }
+
+            async function loadAllReviewThreads() {
+              const threadQuery = `query ($owner: String!, $repoName: String!, $pull: Int!, $tcursor: String) {
+                repository(owner: $owner, name: $repoName) {
+                  pullRequest(number: $pull) {
+                    reviewThreads(first: 100, after: $tcursor) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes {
+                        isResolved
+                        isOutdated
+                        comments(first: 100) {
+                          nodes { author { login } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }`;
+
+              const threadsOut = [];
+              let tCursor = null;
+              for (let p = 0; p < 20; p++) {
+                const tr = await github.graphql(threadQuery, {
+                  owner,
+                  repoName: repo,
+                  pull: pull_number,
+                  tcursor: tCursor,
+                });
+                const conn = tr.repository?.pullRequest?.reviewThreads;
+                const nodes = conn?.nodes || [];
+                for (const t of nodes) {
+                  const authorLogins = (t.comments?.nodes || []).map(
+                    (c) => c.author?.login
+                  );
+                  threadsOut.push({
+                    isResolved: t.isResolved,
+                    isOutdated: t.isOutdated,
+                    authorLogins,
+                  });
+                }
+                if (!conn?.pageInfo?.hasNextPage) break;
+                tCursor = conn.pageInfo.endCursor;
+              }
+              return threadsOut;
+            }
+
+            const threads = await loadAllReviewThreads();
+
+            const isCopilotAuthor = (login) => {
+              if (!login) return false;
+              const l = String(login).toLowerCase();
+              return (
+                l === 'copilot' ||
+                l === 'copilot-pull-request-reviewer' ||
+                l.startsWith('copilot-pull-request-reviewer[')
+              );
+            };
+
+            const unresolved = [];
+            for (const t of threads) {
+              if (t.isOutdated) continue;
+              const copilotThread = t.authorLogins.some((login) =>
+                isCopilotAuthor(login)
+              );
+              if (copilotThread && !t.isResolved) {
+                unresolved.push('unresolved Copilot thread');
+              }
+            }
+
+            if (unresolved.length > 0) {
+              core.setFailed(
+                'One or more Copilot review threads are still unresolved. Resolve or justify each thread in the PR before merge.'
+              );
+              return;
+            }
+
+            core.info(
+              `Copilot review gate passed for ${repo}#${pull_number} @ ${headSha}`
+            );
