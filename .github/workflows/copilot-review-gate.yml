@@ -5,9 +5,9 @@
 # all Copilot-started review threads must be resolved.
 #
 # Branch protection must require the check name: copilot-review / copilot-review
-# (workflow name / job name). See docs/COPILOT_REVIEW_ENFORCEMENT.md
+# (workflow name / job name). See petrosa_k8s/docs/COPILOT_REVIEW_ENFORCEMENT.md
 #
-# Related: Issue #330
+# Related: petrosa_k8s Issue #354 (rollout), Issue #330 (original enforcement design)
 
 name: copilot-review
 
@@ -171,13 +171,16 @@ jobs:
                 const conn = tr.repository?.pullRequest?.reviewThreads;
                 const nodes = conn?.nodes || [];
                 for (const t of nodes) {
-                  const authorLogins = (t.comments?.nodes || []).map(
-                    (c) => c.author?.login
-                  );
+                  const commentNodes = t.comments?.nodes || [];
+                  // Only track the thread-starter (first comment author) to avoid
+                  // blocking on human threads where Copilot later replies.
+                  const starterLogin = commentNodes.length > 0
+                    ? commentNodes[0].author?.login
+                    : null;
                   threadsOut.push({
                     isResolved: t.isResolved,
                     isOutdated: t.isOutdated,
-                    authorLogins,
+                    starterLogin,
                   });
                 }
                 if (!conn?.pageInfo?.hasNextPage) break;
@@ -201,9 +204,9 @@ jobs:
             const unresolved = [];
             for (const t of threads) {
               if (t.isOutdated) continue;
-              const copilotThread = t.authorLogins.some((login) =>
-                isCopilotAuthor(login)
-              );
+              // A "Copilot thread" is one started by Copilot (first comment author).
+              // This avoids blocking on human threads where Copilot later replies.
+              const copilotThread = isCopilotAuthor(t.starterLogin);
               if (copilotThread && !t.isResolved) {
                 unresolved.push('unresolved Copilot thread');
               }
