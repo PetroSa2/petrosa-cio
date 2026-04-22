@@ -10,14 +10,21 @@ on:
   workflow_run:
     workflows: ["CI Checks"]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      pull_number:
+        description: 'PR number to request Copilot review for'
+        required: true
+        type: number
 
 jobs:
   request-copilot-review:
     if: >
-      github.event.workflow_run.conclusion == 'success' &&
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.pull_requests[0] != null &&
-      github.event.workflow_run.pull_requests[0].head.repo.full_name == github.repository
+      github.event.workflow_run.pull_requests[0].head.repo.full_name == github.repository)
     runs-on: petrosa-org-runners
     permissions:
       pull-requests: write
@@ -30,20 +37,33 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const { owner, repo } = context.repo;
-            const run = context.payload.workflow_run;
-            const pr = run.pull_requests[0];
 
-            if (!pr) {
-              console.log('No pull request associated with this workflow_run.');
-              return;
+            let pull_number;
+            if (context.eventName === 'workflow_dispatch') {
+              pull_number = parseInt(context.payload.inputs.pull_number, 10);
+              if (!Number.isInteger(pull_number) || pull_number <= 0) {
+                core.setFailed(`Invalid pull_number input: must be a positive integer, got "${context.payload.inputs.pull_number}".`);
+                return;
+              }
+              // Fetch and validate the PR exists and is not a fork
+              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+              if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+                console.log(`Skipping fork PR from ${pr.head.repo.full_name}`);
+                return;
+              }
+            } else {
+              const run = context.payload.workflow_run;
+              const pr = run.pull_requests[0];
+              if (!pr) {
+                console.log('No pull request associated with this workflow_run.');
+                return;
+              }
+              if (pr.head.repo.full_name !== `${owner}/${repo}`) {
+                console.log(`Skipping fork PR from ${pr.head.repo.full_name}`);
+                return;
+              }
+              pull_number = pr.number;
             }
-
-            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
-              console.log(`Skipping fork PR from ${pr.head.repo.full_name}`);
-              return;
-            }
-
-            const pull_number = pr.number;
 
             console.log(`Requesting Copilot review for PR #${pull_number}...`);
 
