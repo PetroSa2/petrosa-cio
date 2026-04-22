@@ -34,7 +34,7 @@ jobs:
       pull-requests: read
     env:
       # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node.js 24 early.
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"  # Node.js 24 opt-in
 
     steps:
       - name: Verify Copilot review and resolved threads
