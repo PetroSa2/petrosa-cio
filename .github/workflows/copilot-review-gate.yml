@@ -33,6 +33,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+      actions: read
     env:
       # Opt into Node.js 24 for JS actions ahead of the June 2026 mandatory switch.
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -95,6 +96,7 @@ jobs:
             };
 
             async function hasCopilotReviewForHeadSha() {
+              // Check formal PR review entries (Copilot posted inline comments or a summary).
               const reviews = await github.paginate(github.rest.pulls.listReviews, {
                 owner,
                 repo,
@@ -102,13 +104,27 @@ jobs:
                 per_page: 100,
               });
 
-              return reviews.some(
+              const hasFormalReview = reviews.some(
                 (r) =>
                   r.user &&
                   isCopilotPrReviewer(r.user.login) &&
                   r.commit_id === headSha &&
                   r.state !== 'DISMISSED' &&
                   r.state !== 'PENDING'
+              );
+              if (hasFormalReview) return true;
+
+              // Copilot may complete a clean review (no inline comments) without posting a
+              // formal PR review entry. Check if the Copilot code review workflow ran
+              // successfully on this exact headSha as a fallback.
+              const runs = await github.paginate(
+                github.rest.actions.listWorkflowRunsForRepo,
+                { owner, repo, head_sha: headSha, status: 'success', per_page: 100 }
+              );
+              return runs.some(
+                (r) =>
+                  r.name === 'Copilot code review' ||
+                  (r.path && r.path.includes('copilot-pull-request-reviewer'))
               );
             }
 
