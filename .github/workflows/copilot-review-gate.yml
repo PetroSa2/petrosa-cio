@@ -27,6 +27,8 @@ concurrency:
 jobs:
   copilot-review:
     name: copilot-review
+    # Skip workflow_run events that have no linked PR (e.g., upstream job was skipped).
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.pull_requests[0] != null
     runs-on: petrosa-org-runners
     permissions:
       contents: read
@@ -116,29 +118,29 @@ jobs:
             const maxWaitSeconds = 20 * 60; // 20 minutes
             const pollIntervalSeconds = 30;
             let waited = 0;
+            let reviewFound = false;
+
+            core.info(
+              `Waiting for Copilot PR review on current head ${headSha} (polling up to ${maxWaitSeconds}s).`
+            );
 
             while (waited <= maxWaitSeconds) {
               if (await hasCopilotReviewForHeadSha()) {
+                reviewFound = true;
                 core.info(`Found submitted Copilot review for head ${headSha}.`);
                 break;
               }
-
-              if (waited === 0) {
-                core.info(
-                  `Waiting for Copilot PR review on current head ${headSha} (polling up to ${maxWaitSeconds}s).`
-                );
-              }
-
-              if (waited >= maxWaitSeconds) {
-                core.setFailed(
-                  `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
-                    `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`
-                );
-                return;
-              }
-
+              if (waited >= maxWaitSeconds) break;
               await new Promise((r) => setTimeout(r, pollIntervalSeconds * 1000));
               waited += pollIntervalSeconds;
+            }
+
+            if (!reviewFound) {
+              core.setFailed(
+                `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
+                  `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`
+              );
+              return;
             }
 
             async function loadAllReviewThreads() {
@@ -184,12 +186,20 @@ jobs:
                   });
                 }
                 if (!conn?.pageInfo?.hasNextPage) break;
+                if (p === 19) {
+                  core.setFailed(
+                    'Review thread pagination cap (2000 threads) reached. ' +
+                      'The gate cannot verify all threads on this PR. Reduce the number of review threads before merging.'
+                  );
+                  return null;
+                }
                 tCursor = conn.pageInfo.endCursor;
               }
               return threadsOut;
             }
 
             const threads = await loadAllReviewThreads();
+            if (threads === null) return; // pagination cap hit; already failed
 
             const isCopilotAuthor = (login) => {
               if (!login) return false;
