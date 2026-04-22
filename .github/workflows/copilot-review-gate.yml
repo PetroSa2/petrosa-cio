@@ -33,7 +33,7 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node 24 early.
+      # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node.js 24 early.
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
