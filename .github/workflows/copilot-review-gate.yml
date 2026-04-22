@@ -1,8 +1,5 @@
-# TEMPLATE — Copy to `.github/workflows/copilot-review-gate.yml` in each Petrosa repo
-# before requiring the `copilot-review / copilot-review` status check on `main`.
-#
-# Enforces merge gating: Copilot must have reviewed the current PR head SHA and
-# all Copilot-started review threads must be resolved.
+# Enforces merge gating on PRs targeting main: Copilot must have reviewed the
+# current PR head SHA and all Copilot-started review threads must be resolved.
 #
 # Branch protection must require the check name: copilot-review / copilot-review
 # (workflow name / job name). See petrosa_k8s/docs/COPILOT_REVIEW_ENFORCEMENT.md
@@ -16,7 +13,9 @@ on:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
-    types: [submitted, edited, dismissed]
+    types: [submitted, dismissed]
+  pull_request_review_thread:
+    types: [resolved, unresolved]
   workflow_run:
     workflows: ["Request Copilot Review"]
     types: [completed]
@@ -33,8 +32,8 @@ jobs:
       contents: read
       pull-requests: read
     env:
-      # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node.js 24 early.
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"  # Node.js 24 opt-in
+      # Opt into Node.js 24 for JS actions ahead of the June 2026 mandatory switch.
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
     steps:
       - name: Verify Copilot review and resolved threads
@@ -46,10 +45,11 @@ jobs:
             const repo = context.repo.repo;
 
             async function resolvePullRequest() {
-              if (context.eventName === 'pull_request') {
-                return context.payload.pull_request;
-              }
-              if (context.eventName === 'pull_request_review') {
+              if (
+                context.eventName === 'pull_request' ||
+                context.eventName === 'pull_request_review' ||
+                context.eventName === 'pull_request_review_thread'
+              ) {
                 return context.payload.pull_request;
               }
               if (context.eventName === 'workflow_run') {
@@ -111,7 +111,7 @@ jobs:
             }
 
             // Copilot reviews are asynchronous and often land after CI completes and after the
-            // review request workflow runs. To avoid flaky “rerun until Copilot posts” behavior,
+            // review request workflow runs. To avoid flaky "rerun until Copilot posts" behavior,
             // poll for a bounded time before failing.
             const maxWaitSeconds = 20 * 60; // 20 minutes
             const pollIntervalSeconds = 30;

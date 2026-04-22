@@ -40,7 +40,11 @@ jobs:
 
             let pull_number;
             if (context.eventName === 'workflow_dispatch') {
-              pull_number = parseInt(context.payload.inputs.pull_number);
+              pull_number = parseInt(context.payload.inputs.pull_number, 10);
+              if (isNaN(pull_number) || pull_number <= 0) {
+                core.setFailed('Invalid pull_number input: must be a positive integer.');
+                return;
+              }
             } else {
               const run = context.payload.workflow_run;
               const pr = run.pull_requests[0];
