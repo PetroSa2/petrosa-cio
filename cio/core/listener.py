@@ -6,6 +6,7 @@ from typing import Protocol
 from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 
+from cio.core.arbiter import SignalArbiter
 from cio.core.context_builder import ContextBuilder
 from cio.core.router import OutputRouter
 from cio.models import DecisionResult, TriggerContext, TriggerType
@@ -31,11 +32,13 @@ class NATSListener:
         enforcer: EnforcerProtocol,
         context_builder: ContextBuilder,
         router: OutputRouter,
+        arbiter: SignalArbiter | None = None,
     ):
         self.nc = nats_client
         self.enforcer = enforcer
         self.context_builder = context_builder
         self.router = router
+        self.arbiter = arbiter
         self.subscription = None
 
     async def start(self, subject: str = "trade.intent.*"):
@@ -79,7 +82,34 @@ class NATSListener:
             )
             return
 
-        # 3. Assemble Context
+        # 3. Signal Arbitration (dedup + conflict resolution)
+        if self.arbiter:
+            symbol = payload.get("symbol", "")
+            action = (
+                payload.get("side")
+                or payload.get("action")
+                or payload.get("signal_type")
+                or ""
+            )
+            confidence = float(payload.get("confidence", 0.5))
+            strategy_id_raw = payload.get("strategy_id") or payload.get(
+                "strategy", "unknown"
+            )
+            allowed, arb_reason = await self.arbiter.check(
+                symbol=symbol,
+                action=action,
+                confidence=confidence,
+                strategy_id=strategy_id_raw,
+                correlation_id=correlation_id,
+            )
+            if not allowed:
+                logger.info(
+                    f"ARBITER_SUPPRESSED: {arb_reason}",
+                    extra={"correlation_id": correlation_id},
+                )
+                return
+
+        # 4. Assemble Context
         try:
             # For trade.intent.*, we assume TriggerType.TRADE_INTENT
             context = await self.context_builder.build(
@@ -95,7 +125,7 @@ class NATSListener:
             )
             return
 
-        # 4. Run NurseEnforcer (with Timeout Guard)
+        # 5. Run NurseEnforcer (with Timeout Guard)
         try:
             decision = await self.enforcer.audit(context)
         except Exception as e:
@@ -105,7 +135,7 @@ class NATSListener:
             )
             return
 
-        # 5. Route Output
+        # 6. Route Output
         try:
             await self.router.route(context, decision)
         except Exception as e:
