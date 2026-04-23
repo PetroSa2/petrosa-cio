@@ -214,3 +214,96 @@ async def test_different_symbols_independent():
     # SELL on a completely different symbol should pass
     ok, _ = await arbiter.check("ETHUSDT", "sell", 0.3, "strat_b", "cid2")
     assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_corrupt_bias_value_resets_and_allows():
+    """Malformed bias value in Redis resets and allows the incoming signal through."""
+    store = {"arbiter:bias:BTCUSDT": "not:valid:float:here:extra"}
+    cache = _make_cache(store)
+    arbiter = SignalArbiter(cache)
+
+    # Should not raise; corrupt value is reset and signal passes
+    ok, reason = await arbiter.check("BTCUSDT", "buy", 0.8, "strat_a", "cid1")
+    assert ok is True
+
+
+@pytest.mark.asyncio
+async def test_nats_listener_arbiter_suppresses_signal():
+    """NATSListener with active arbiter suppresses a deduplicated signal."""
+    store = {"arbiter:dedup:BTCUSDT:buy": "1"}  # dedup key already set
+    cache = _make_cache(store)
+    arbiter = SignalArbiter(cache)
+
+    enforcer = MagicMock()
+    enforcer.audit = AsyncMock()
+    context_builder = MagicMock()
+    context_builder.build = AsyncMock(return_value=MagicMock())
+    router = MagicMock()
+    router.route = AsyncMock()
+    nc = MagicMock()
+
+    listener = NATSListener(
+        nats_client=nc,
+        enforcer=enforcer,
+        context_builder=context_builder,
+        router=router,
+        arbiter=arbiter,
+    )
+
+    msg = MagicMock(spec=Msg)
+    msg.headers = None
+    msg.subject = "cio.intent.trading.strat_b"
+    msg.data = json.dumps(
+        {
+            "symbol": "BTCUSDT",
+            "action": "buy",
+            "confidence": 0.9,
+            "strategy_id": "strat_b",
+        }
+    ).encode()
+
+    await listener._handle_message(msg)
+
+    # Enforcer must NOT have been called — arbiter suppressed the message
+    enforcer.audit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_nats_listener_arbiter_malformed_confidence_uses_default():
+    """NATSListener handles non-numeric confidence gracefully."""
+    store = {}
+    cache = _make_cache(store)
+    arbiter = SignalArbiter(cache)
+
+    enforcer = MagicMock()
+    enforcer.audit = AsyncMock(return_value=MagicMock(action="execute"))
+    context_builder = MagicMock()
+    context_builder.build = AsyncMock(return_value=MagicMock())
+    router = MagicMock()
+    router.route = AsyncMock()
+    nc = MagicMock()
+
+    listener = NATSListener(
+        nats_client=nc,
+        enforcer=enforcer,
+        context_builder=context_builder,
+        router=router,
+        arbiter=arbiter,
+    )
+
+    msg = MagicMock(spec=Msg)
+    msg.headers = None
+    msg.subject = "cio.intent.trading.strat_x"
+    msg.data = json.dumps(
+        {
+            "symbol": "ETHUSDT",
+            "action": "sell",
+            "confidence": None,  # malformed
+            "strategy_id": "strat_x",
+        }
+    ).encode()
+
+    # Should not raise — confidence defaults to 0.5
+    await listener._handle_message(msg)
+    enforcer.audit.assert_called_once()
