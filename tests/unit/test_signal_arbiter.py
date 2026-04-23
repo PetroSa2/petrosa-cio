@@ -3,14 +3,17 @@
 AC coverage:
 - AC-Dedup: same symbol + action within 60s is dropped
 - AC-Conflict: opposing signals within 5min → higher confidence wins
-- AC-Integration: 3 strategies (2 BUY, 1 SELL) on BTCUSDT — only highest confidence passes
+- AC-Integration: 3 strategies (2 BUY, 1 SELL) on BTCUSDT — first BUY passes; later same-action BUY is deduplicated even if higher confidence
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from nats.aio.msg import Msg
 
 from cio.core.arbiter import SignalArbiter
+from cio.core.listener import NATSListener
 
 
 def _make_cache(store: dict | None = None) -> MagicMock:
@@ -131,14 +134,72 @@ async def test_integration_three_strategies_btcusdt():
 
 
 @pytest.mark.asyncio
-async def test_no_arbiter_means_all_pass_through():
-    """If arbiter is None on NATSListener, signals are not filtered (backwards compat)."""
-    # Validate that SignalArbiter with no-op cache still returns allowed for fresh signals
+async def test_nats_listener_no_arbiter_passes_to_enforcer():
+    """NATSListener with arbiter=None bypasses arbitration and calls enforcer."""
+    enforcer = MagicMock()
+    enforcer.audit = AsyncMock(return_value=MagicMock(action="skip"))
+
+    context_builder = MagicMock()
+    context_builder.build = AsyncMock(return_value=MagicMock())
+
+    router = MagicMock()
+    router.route = AsyncMock()
+
+    nc = MagicMock()
+
+    listener = NATSListener(
+        nats_client=nc,
+        enforcer=enforcer,
+        context_builder=context_builder,
+        router=router,
+        arbiter=None,  # no arbiter
+    )
+
+    msg = MagicMock(spec=Msg)
+    msg.headers = None
+    msg.subject = "cio.intent.trading.strat_x"
+    msg.data = json.dumps(
+        {
+            "symbol": "ETHUSDT",
+            "action": "buy",
+            "confidence": 0.8,
+            "strategy_id": "strat_x",
+        }
+    ).encode()
+
+    await listener._handle_message(msg)
+
+    # Enforcer must have been called — arbitration did not suppress the message
+    enforcer.audit.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_side_normalisation_long_equals_buy():
+    """'long' and 'buy' are treated as the same canonical action for deduplication."""
     store = {}
     cache = _make_cache(store)
     arbiter = SignalArbiter(cache)
-    allowed, _ = await arbiter.check("ETHUSDT", "sell", 0.5, "strat_x", "cid99")
-    assert allowed is True
+
+    # First signal uses 'long'
+    ok1, _ = await arbiter.check("BTCUSDT", "long", 0.8, "strat_a", "cid1")
+    assert ok1 is True
+
+    # Second signal uses 'buy' — same canonical action → deduplicated
+    ok2, r2 = await arbiter.check("BTCUSDT", "buy", 0.9, "strat_b", "cid2")
+    assert ok2 is False
+    assert "SIGNAL_DEDUPLICATED" in r2
+
+
+@pytest.mark.asyncio
+async def test_missing_symbol_bypasses_arbitration():
+    """Empty symbol bypasses arbitration (signal passes through)."""
+    store = {}
+    cache = _make_cache(store)
+    arbiter = SignalArbiter(cache)
+
+    ok, reason = await arbiter.check("", "buy", 0.8, "strat_a", "cid1")
+    assert ok is True
+    assert "ARBITER_BYPASS" in reason
 
 
 @pytest.mark.asyncio

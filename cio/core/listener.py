@@ -84,14 +84,22 @@ class NATSListener:
 
         # 3. Signal Arbitration (dedup + conflict resolution)
         if self.arbiter:
-            symbol = payload.get("symbol", "")
+            symbol = payload.get("symbol") or ""
             action = (
                 payload.get("side")
                 or payload.get("action")
                 or payload.get("signal_type")
                 or ""
             )
-            confidence = float(payload.get("confidence", 0.5))
+            raw_confidence = payload.get("confidence", 0.5)
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"ARBITER: non-numeric confidence {raw_confidence!r}; defaulting to 0.5",
+                    extra={"correlation_id": correlation_id},
+                )
+                confidence = 0.5
             strategy_id_raw = payload.get("strategy_id") or payload.get(
                 "strategy", "unknown"
             )

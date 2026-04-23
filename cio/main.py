@@ -166,7 +166,12 @@ async def main():
         realtime_strategies_url=realtime_strategies_url,
         cache=cache,
     )
-    arbiter = SignalArbiter(cache=cache)
+    arbiter = None
+    if os.getenv("SIGNAL_ARBITRATION_ENABLED", "true").lower() in ("true", "1", "yes"):
+        arbiter = SignalArbiter(cache=cache)
+        logger.info("Signal arbitration enabled.")
+    else:
+        logger.info("Signal arbitration disabled (SIGNAL_ARBITRATION_ENABLED=false).")
 
     listener = NATSListener(
         nats_client=nc,
