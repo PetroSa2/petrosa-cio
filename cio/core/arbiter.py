@@ -1,3 +1,5 @@
+"""Signal arbitration layer for cross-strategy deduplication and conflict resolution."""
+
 import logging
 
 from cio.core.cache import AsyncRedisCache
