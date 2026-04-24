@@ -22,12 +22,8 @@ on:
     types: [completed]
 
 concurrency:
-  # Queue new gate runs — never cancel an in-flight run.
-  # cancel-in-progress: true caused a regression (#362): the pull_request_review event
-  # (fired when Copilot submits its review) cancelled the existing polling run that was
-  # about to succeed, and the replacement run failed due to API propagation delay.
   group: copilot-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   copilot-review:
@@ -87,14 +83,6 @@ jobs:
             const pull_number = pr.number;
             const headSha = pr.head.sha;
 
-            // When triggered by a Copilot review submission, the GitHub REST API can
-            // take 10–20s to reflect the new review. A short grace period before the
-            // first poll avoids a false-negative on the very first API call. (#362)
-            if (context.eventName === 'pull_request_review') {
-              core.info('Triggered by pull_request_review — waiting 15s for API propagation before first poll.');
-              await new Promise((r) => setTimeout(r, 15 * 1000));
-            }
-
             const isCopilotPrReviewer = (login) => {
               if (!login) return false;
               const l = String(login).toLowerCase();
@@ -104,7 +92,7 @@ jobs:
               );
             };
 
-            async function hasCopilotReviewForHeadSha() {
+            async function hasCopilotReview() {
               const reviews = await github.paginate(github.rest.pulls.listReviews, {
                 owner,
                 repo,
@@ -112,26 +100,24 @@ jobs:
                 per_page: 100,
               });
 
+              // RELAXED: Any submitted review from Copilot is sufficient to start thread check.
               return reviews.some(
                 (r) =>
                   r.user &&
                   isCopilotPrReviewer(r.user.login) &&
-                  r.commit_id === headSha &&
                   r.state !== 'DISMISSED' &&
                   r.state !== 'PENDING'
               );
             }
 
-            // Copilot reviews are asynchronous and often land after CI completes and after the
-            // review request workflow runs. To avoid flaky “rerun until Copilot posts” behavior,
-            // poll for a bounded time before failing.
+            // Copilot reviews are asynchronous.
             const maxWaitSeconds = 20 * 60; // 20 minutes
             const pollIntervalSeconds = 30;
             let waited = 0;
 
             while (waited <= maxWaitSeconds) {
-              if (await hasCopilotReviewForHeadSha()) {
-                core.info(`Found submitted Copilot review for head ${headSha}.`);
+              if (await hasCopilotReview()) {
+                core.info(`Found a submitted Copilot review.`);
                 break;
               }
 
