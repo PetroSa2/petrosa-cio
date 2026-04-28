@@ -1,6 +1,13 @@
 # Defers GitHub Copilot review until CI Checks complete successfully.
 # Replaces the pull_request trigger with workflow_run to enforce post-CI ordering.
 #
+# Merge blocking is handled separately by `copilot-review-gate.yml`, which must pass
+# for the required check `copilot-review / copilot-review` (see docs/COPILOT_REVIEW_ENFORCEMENT.md).
+#
+# Fix for Issue #371: workflow_run.pull_requests[] is always empty in GitHub's event
+# payload even for same-repo PRs. PR resolution is done via the REST API using
+# head_sha + head_branch from the workflow_run context instead.
+#
 # Related: Issue #314 - Defer Copilot Review Until CI Checks Succeed
 # Supersedes: Issue #54, #188
 
@@ -10,21 +17,14 @@ on:
   workflow_run:
     workflows: ["CI Checks"]
     types: [completed]
-  workflow_dispatch:
-    inputs:
-      pull_number:
-        description: 'PR number to request Copilot review for'
-        required: true
-        type: number
 
 jobs:
   request-copilot-review:
+    # workflow_run.pull_requests[] is always empty (GitHub bug/limitation); the
+    # fork check and PR resolution happen inside the script via the REST API.
     if: >
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.pull_requests[0] != null &&
-      github.event.workflow_run.pull_requests[0].head.repo.name == github.event.repository.name)
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
     runs-on: petrosa-org-runners
     permissions:
       pull-requests: write
@@ -38,36 +38,63 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
 
-            let pull_number;
-            if (context.eventName === 'workflow_dispatch') {
-              pull_number = parseInt(context.payload.inputs.pull_number, 10);
-              if (!Number.isInteger(pull_number) || pull_number <= 0) {
-                core.setFailed(`Invalid pull_number input: must be a positive integer, got "${context.payload.inputs.pull_number}".`);
-                return;
-              }
-              // Fetch and validate the PR exists and is not a fork
-              const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
-              if (pr.head.repo.full_name !== `${owner}/${repo}`) {
-                console.log(`Skipping fork PR from ${pr.head.repo.full_name}`);
-                return;
-              }
-            } else {
-              const run = context.payload.workflow_run;
-              const pr = run.pull_requests[0];
-              if (!pr) {
-                console.log('No pull request associated with this workflow_run.');
-                return;
-              }
-              // `pull_requests[0].head.repo` only contains id/name/url (no full_name).
-              // Compare repo name to guard against cross-repo forks.
-              if (pr.head.repo.name !== repo) {
-                console.log(`Skipping fork PR from repo ${pr.head.repo.name}`);
-                return;
-              }
-              pull_number = pr.number;
+            // workflow_run.pull_requests[] is unreliable — resolve the PR by
+            // matching head_sha + head_branch via the REST API instead.
+            const run = context.payload.workflow_run;
+            const { data: prs } = await github.rest.pulls.list({
+              owner, repo, state: 'open',
+              head: `${owner}:${run.head_branch}`,
+              per_page: 10,
+            });
+            const pr = prs.find(
+              (p) => p.head.sha === run.head_sha &&
+                      p.head.repo.full_name === `${owner}/${repo}`
+            );
+            if (!pr) {
+              console.log(`No open same-repo PR for ${run.head_branch}@${run.head_sha}; skipping.`);
+              return;
             }
 
-            console.log(`Requesting Copilot review for PR #${pull_number}...`);
+            const pull_number = pr.number;
+            // Use live PR head SHA (matches run.head_sha; avoids stale payload)
+            const headSha = pr.head.sha;
+
+            // Short-circuit: skip if Copilot already reviewed the current head SHA.
+            // This prevents duplicate review requests on CI reruns with no code changes.
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number, per_page: 100,
+            });
+            const isCopilot = (login) => {
+              const l = (login || '').toLowerCase();
+              return l === 'copilot-pull-request-reviewer' || l.startsWith('copilot-pull-request-reviewer[');
+            };
+            const alreadyReviewed = reviews.some(
+              (r) => isCopilot(r.user?.login) && r.commit_id === headSha &&
+                r.state !== 'DISMISSED' && r.state !== 'PENDING'
+            );
+            if (alreadyReviewed) {
+              console.log(`Copilot already reviewed HEAD ${headSha}; skipping re-request.`);
+              return;
+            }
+
+            console.log(`Requesting Copilot review for PR #${pull_number} @ ${headSha}...`);
+
+            // Remove first so that re-requesting triggers a fresh review even when
+            // Copilot has already reviewed a previous commit (mirrors the GitHub UI
+            // "Re-request review" button behavior).
+            try {
+              await github.rest.pulls.removeRequestedReviewers({
+                owner,
+                repo,
+                pull_number,
+                reviewers: ['github-copilot'],
+              });
+            } catch (e) {
+              // 422 = reviewer was not in the pending list; safe to ignore.
+              // All other statuses (404 resource not found, 403 permissions, 5xx)
+              // are re-thrown so the step fails visibly.
+              if (e.status !== 422) throw e;
+            }
 
             try {
               await github.rest.pulls.requestReviewers({
@@ -78,9 +105,8 @@ jobs:
               });
               console.log(`Requested Copilot review for PR #${pull_number}`);
             } catch (error) {
-              if (error.status === 422) {
-                console.log('Copilot already requested or unavailable; continuing.');
-              } else {
-                console.log(`Non-blocking error: ${error.message}`);
-              }
+              // 422 = Copilot unavailable or already in review queue; safe to ignore.
+              // All other errors are re-thrown so the step fails visibly.
+              if (error.status !== 422) throw error;
+              console.log('Copilot already requested or unavailable (422); continuing.');
             }
