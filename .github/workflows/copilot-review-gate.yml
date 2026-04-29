@@ -23,7 +23,7 @@ on:
 
 concurrency:
   group: copilot-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   copilot-review:
@@ -70,6 +70,14 @@ jobs:
               return null;
             }
 
+            // Grace period: after pull_request_review events, GitHub's API may take
+            // 10-20s to propagate the review. Wait 15s before first poll to avoid
+            // a false-fail on the initial check.
+            if (context.eventName === 'pull_request_review') {
+              core.info('pull_request_review trigger: waiting 15s for GitHub API propagation...');
+              await new Promise((r) => setTimeout(r, 15000));
+            }
+
             const pr = await resolvePullRequest();
             if (!pr) {
               return;
@@ -100,11 +108,11 @@ jobs:
                 per_page: 100,
               });
 
-              // RELAXED: Any submitted review from Copilot is sufficient to start thread check.
               return reviews.some(
                 (r) =>
                   r.user &&
                   isCopilotPrReviewer(r.user.login) &&
+                  r.commit_id === headSha &&
                   r.state !== 'DISMISSED' &&
                   r.state !== 'PENDING'
               );
