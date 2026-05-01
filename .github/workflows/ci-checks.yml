@@ -15,7 +15,4 @@ jobs:
       image-name: 'yurisa2/petrosa-cio'
       python-version: '3.11'
       skip-docker-build: true
-    secrets:
-      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
-      codecov-token: ${{ secrets.CODECOV_TOKEN }}
+    secrets: inherit
