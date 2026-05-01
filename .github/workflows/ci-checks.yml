@@ -9,7 +9,7 @@ on:
 jobs:
   pipeline:
     name: CI Pipeline
-    uses: PetroSa2/petrosa_k8s/.github/workflows/reusable/ci-pipeline.yml@main
+    uses: PetroSa2/petrosa_k8s/.github/workflows/ci-pipeline.yml@main
     with:
       service-name: 'cio'
       image-name: 'yurisa2/petrosa-cio'
