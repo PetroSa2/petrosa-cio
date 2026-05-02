@@ -11,16 +11,19 @@ from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
 
+
 class AlertChannel(ABC):
     @abstractmethod
     async def send(self, message: str, context: dict[str, Any]) -> bool:
         pass
+
 
 class GrafanaChannel(AlertChannel):
     """
     Sends alerts to Grafana via HTTP API (e.g., Annotations or specialized endpoint).
     Also relies on Loki logs as a secondary path.
     """
+
     def __init__(self):
         self.api_url = os.getenv("GRAFANA_API_URL")
         self.api_key = os.getenv("GRAFANA_API_KEY")
@@ -33,13 +36,13 @@ class GrafanaChannel(AlertChannel):
                     payload = {
                         "text": message,
                         "tags": ["alert", "cio", context.get("alert_type", "RED")],
-                        "time": int(context.get("timestamp", 0) * 1000) or None
+                        "time": int(context.get("timestamp", 0) * 1000) or None,
                     }
                     response = await client.post(
                         f"{self.api_url}/api/annotations",
                         json=payload,
                         headers={"Authorization": f"Bearer {self.api_key}"},
-                        timeout=5.0
+                        timeout=5.0,
                     )
                     if response.status_code not in (200, 201):
                         logger.error(f"Grafana API alert failed: {response.text}")
@@ -50,10 +53,12 @@ class GrafanaChannel(AlertChannel):
         logger.critical(f"GRAFANA_ALERT: {message}", extra=context)
         return True
 
+
 class OtelChannel(AlertChannel):
     """
     Exports alerts as OpenTelemetry Error Spans.
     """
+
     def __init__(self):
         self.tracer = trace.get_tracer("cio.alerting")
 
@@ -66,10 +71,12 @@ class OtelChannel(AlertChannel):
                 span.set_attribute(f"alert.context.{key}", str(value))
         return True
 
+
 class EmailChannel(AlertChannel):
     """
     Sends alerts via SMTP.
     """
+
     def __init__(self):
         self.smtp_host = os.getenv("SMTP_HOST", "localhost")
         self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
@@ -91,14 +98,18 @@ class EmailChannel(AlertChannel):
             return False
 
         try:
-            msg = MIMEText(f"CRITICAL ALERT FROM CIO\n\nMessage: {message}\n\nContext: {context}")
-            msg["Subject"] = f"[CIO ALERT] {context.get('alert_type', 'RED')}: {message[:50]}..."
+            msg = MIMEText(
+                f"CRITICAL ALERT FROM CIO\n\nMessage: {message}\n\nContext: {context}"
+            )
+            msg["Subject"] = (
+                f"[CIO ALERT] {context.get('alert_type', 'RED')}: {message[:50]}..."
+            )
             msg["From"] = self.from_email
             msg["To"] = self.to_email
 
             # Use asyncio.to_thread to avoid blocking the event loop (Fix for Copilot)
             await asyncio.to_thread(self._send_sync, msg)
-            
+
             logger.info("Email alert sent successfully.")
             return True
         except Exception as e:

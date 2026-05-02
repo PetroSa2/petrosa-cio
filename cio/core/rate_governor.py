@@ -5,18 +5,18 @@ Subscribes to Binance rate limit updates and provides throttling logic.
 
 import json
 import logging
-import time
-from typing import Any, Optional
+from typing import Any
 
 import nats
 import nats.aio.client
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
 
 class RateLimitStatus(BaseModel):
     """Rate limit status model (mirrored from TradeEngine)."""
+
     weight_1m: int
     timestamp: float
 
@@ -30,7 +30,7 @@ class RateGovernor:
         self.current_weight: int = 0
         self.max_weight: int = 1200  # Binance default for 1m
         self.threshold_pct: float = 0.85
-        self.nats_client: Optional[nats.aio.client.Client] = None
+        self.nats_client: nats.aio.client.Client | None = None
         self.is_running: bool = False
 
     async def start(self):
@@ -72,5 +72,5 @@ class RateGovernor:
             "max_weight": self.max_weight,
             "threshold": int(self.max_weight * self.threshold_pct),
             "is_throttled": self.is_throttled(),
-            "usage_pct": round((self.current_weight / self.max_weight) * 100, 2)
+            "usage_pct": round((self.current_weight / self.max_weight) * 100, 2),
         }

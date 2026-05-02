@@ -80,7 +80,7 @@ class MCPServer:
         self.memory_service = memory_service or InstitutionalMemoryService()
         self.config_manager.set_payload_validator(self._validate_model_payload)
         self.tools = generate_tools(module_path)
-        
+
         # Initialize Rate Governor
         nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
         self.rate_governor = RateGovernor(nats_url=nats_url)
@@ -189,15 +189,19 @@ class MCPServer:
             raise ValueError(f"unknown tool: {tool_name}")
 
         # Check Rate Governor for "write" operations (set_* or rollback)
-        if (tool_name.startswith("set_") or tool_name == "rollback_to_version") and self.rate_governor.is_throttled():
+        if (
+            tool_name.startswith("set_") or tool_name == "rollback_to_version"
+        ) and self.rate_governor.is_throttled():
             status = self.rate_governor.get_status()
             return {
-                "content": [{
-                    "type": "text", 
-                    "text": f"ERROR: 429_SIMULATED. Binance API rate limit usage is at {status['usage_pct']}%. "
-                            f"Please BACK OFF and wait for the weight to reset before making further configuration changes."
-                }],
-                "isError": True
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"ERROR: 429_SIMULATED. Binance API rate limit usage is at {status['usage_pct']}%. "
+                        f"Please BACK OFF and wait for the weight to reset before making further configuration changes.",
+                    }
+                ],
+                "isError": True,
             }
 
         if tool_name.startswith("get_"):
@@ -308,7 +312,7 @@ class MCPServer:
         """Run JSON-RPC loop over stdin/stdout (one JSON request per line)."""
         # Start rate governor
         await self.rate_governor.start()
-        
+
         try:
             while True:
                 line = await asyncio.to_thread(input)

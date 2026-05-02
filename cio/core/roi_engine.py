@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ class ShadowROIEngine:
                 "actual_pnl": 0.0,  # Placeholder for actual calculation
                 "shadow_roi": 0.0,  # Placeholder for shadow calculation
                 "window_hours": window_hours,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "message": "Shadow ROI Engine is active and tracking blocked trades.",
             }
         except Exception as e:

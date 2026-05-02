@@ -9,12 +9,16 @@ from nats.aio.msg import Msg
 
 logger = logging.getLogger(__name__)
 
+
 class HeartbeatResponder:
     """
     Provides deterministic governance liveness via NATS request-reply.
     Clients ping 'cio.heartbeat' and receive a status response.
     """
-    def __init__(self, nats_client: NATS, redis_client: Any = None, mongo_client: Any = None):
+
+    def __init__(
+        self, nats_client: NATS, redis_client: Any = None, mongo_client: Any = None
+    ):
         self.nc = nats_client
         self.redis = redis_client
         self.mongo = mongo_client
@@ -49,16 +53,12 @@ class HeartbeatResponder:
             return
 
         start_time = time.perf_counter()
-        
+
         # 1. Dependency Health Checks (Shallow)
-        health = {
-            "redis": True,
-            "mongodb": True,
-            "latency_ms": 0
-        }
-        
+        health = {"redis": True, "mongodb": True, "latency_ms": 0}
+
         # TODO: Add actual connectivity checks if clients are provided
-        
+
         status = "GOVERNANCE_ACTIVE"
         if not health["redis"] or not health["mongodb"]:
             status = "DEGRADED"
@@ -70,7 +70,7 @@ class HeartbeatResponder:
             "status": status,
             "version": "1.0.0",
             "timestamp": time.time(),
-            "health": health
+            "health": health,
         }
 
         await self.nc.publish(msg.reply, json.dumps(response).encode())
@@ -83,6 +83,7 @@ class HeartbeatPublisher:
     This ensures that passive monitors like petrosa-tradeengine can detect
     that the CIO is alive without performing active pings.
     """
+
     def __init__(self, nats_client: NATS, interval_seconds: float = 10.0):
         self.nc = nats_client
         self.interval = interval_seconds
@@ -96,7 +97,9 @@ class HeartbeatPublisher:
 
         self.running = True
         self.task = asyncio.create_task(self._run_loop(subject))
-        logger.info(f"Heartbeat Publisher started on subject: {subject} (interval: {self.interval}s)")
+        logger.info(
+            f"Heartbeat Publisher started on subject: {subject} (interval: {self.interval}s)"
+        )
 
     async def stop(self):
         """Stops the heartbeat publisher."""
@@ -117,7 +120,7 @@ class HeartbeatPublisher:
                     "service": "petrosa-cio",
                     "status": "GOVERNANCE_ACTIVE",
                     "timestamp": time.time(),
-                    "version": "1.0.0"
+                    "version": "1.0.0",
                 }
                 await self.nc.publish(subject, json.dumps(heartbeat_data).encode())
                 logger.debug(f"Heartbeat published to {subject}")

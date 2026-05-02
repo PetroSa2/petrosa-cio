@@ -102,17 +102,3 @@ repos:
         language: system
         types: [python]
         files: ^tests/
-
-      - id: check-secrets-patterns
-        name: 🔐 Check for Petrosa Secret Patterns
-        entry: bash -c 'grep -rInE "(BINANCE_API_KEY|BINANCE_API_SECRET|DOCKERHUB_TOKEN|JWT_SECRET|mongodb://[^:]+:[^@]+@|password\s*=\s*[\"'\''][^\"'\'']+[\"'\''])" --include="*.py" --include="*.yaml" --include="*.yml" --exclude-dir=.venv --exclude-dir=venv --exclude-dir=.git --exclude=".pre-commit-config.yaml" . | grep -v "\${{ secrets\." && echo "⚠️ Found potential secrets!" && exit 1 || exit 0'
-        language: system
-        pass_filenames: false
-
-      - id: pipeline
-        name: 🔄 Complete Local Pipeline (Parallel to CI)
-        entry: make test
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [push]

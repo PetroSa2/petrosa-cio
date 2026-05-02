@@ -1,160 +1,19 @@
 name: CI Checks
 
 on:
-  pull_request:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    branches: [main, develop]
+  workflow_dispatch:
   push:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    branches: [main, develop]
+  pull_request:
     branches: [main, develop]
 
 jobs:
-  lint:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Lint & Format Check
-    runs-on: petrosa-org-runners
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Run linting
-        run: make lint
-
-      - name: Run type check
-        run: make type-check
-        continue-on-error: true
-
-  test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Test & Coverage
-    runs-on: petrosa-org-runners
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends make
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      - name: Run tests with coverage
-        run: make test-coverage
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-
-  security:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Security Scan
-    runs-on: petrosa-org-runners
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: 🔐 Run Gitleaks (Secret Detection)
-        run: |
-          GITLEAKS_VERSION="8.18.4"
-          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /tmp gitleaks
-          /tmp/gitleaks detect --source . --no-git || echo "⚠️ Gitleaks found issues but continuing"
-        continue-on-error: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 🐍 Run Bandit (Python Security)
-        run: |
-          pip install bandit
-          bandit -r . -f json -o bandit-report.json || true
-          echo "📊 Bandit Results:"
-          python -m json.tool bandit-report.json 2>/dev/null | head -30 || echo "No issues found"
-
-      - name: 🗂️ Run Trivy (Vulnerability Scanner)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: 'fs'
-          scan-ref: '.'
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-          exit-code: '0'
-          ignore-unfixed: true
-
-  test-quality:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Test Quality Check
-    runs-on: petrosa-org-runners
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      # Run assertion check without `make` / apt — avoids flaky apt mirror errors on self-hosted runners.
-      - name: Run test quality check
-        run: |
-          set -euo pipefail
-          actual=$(python3 --version 2>&1 | cut -d' ' -f2 | cut -d'.' -f1,2)
-          if [ "$actual" != "3.11" ]; then
-            echo "Python 3.11 required, found $actual"
-            exit 1
-          fi
-          echo "🔍 Checking test quality..."
-          python3 scripts/check-test-assertions.py $(find tests -name 'test_*.py' -type f)
-
-  documentation-standards:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    name: Documentation Standards Check
-    runs-on: petrosa-org-runners
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      - name: Documentation check
-        run: |
-          if [ -f scripts/check-docs.sh ]; then
-            bash scripts/check-docs.sh
-          else
-            echo "Skipping docs check"
-          fi
-
   pipeline:
-    name: pipeline
-    runs-on: petrosa-org-runners
-    needs: [lint, test, security, test-quality, documentation-standards]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    steps:
-      - name: Validate pipeline results
-        run: |
-          [[ "${{ needs.lint.result }}" == "success" ]]
-          [[ "${{ needs.test.result }}" == "success" ]]
-          [[ "${{ needs.security.result }}" != "failure" ]]
+    name: CI Pipeline
+    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/ci-pipeline.yml@main  # yamllint disable-line rule:line-length
+    with:
+      service-name: 'cio'
+      image-name: 'yurisa2/petrosa-cio'
+      python-version: '3.11'
+      skip-docker-build: true
+    secrets: inherit

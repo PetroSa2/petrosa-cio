@@ -5,6 +5,13 @@ description = "Autonomous trading intelligence and strategy controller"
 authors = [{name = "Petrosa Systems"}]
 requires-python = ">=3.11"
 
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cio*"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"
