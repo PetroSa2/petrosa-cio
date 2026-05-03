@@ -1,5 +1,9 @@
+# yamllint disable rule:line-length rule:truthy rule:document-start
 # Defers GitHub Copilot review until CI Checks complete successfully.
 # Replaces the pull_request trigger with workflow_run to enforce post-CI ordering.
+#
+# Merge blocking is handled separately by `copilot-review-gate.yml`, which must pass
+# for the required check `copilot-review` (see docs/COPILOT_REVIEW_ENFORCEMENT.md).
 #
 # Fix for Issue #371: workflow_run.pull_requests[] is always empty in GitHub's event
 # payload even for same-repo PRs. PR resolution is done via the REST API using
@@ -23,9 +27,9 @@ on:
 
 jobs:
   request-copilot-review:
-    # workflow_run.pull_requests[] is always empty (GitHub bug/limitation); the
-    # fork check and PR resolution happen inside the script via the REST API.
-    # head_repository guard ensures we only act on same-repo workflow_run events.
+    # `if` head_repository guard below. For workflow_dispatch, the fork guard
+    # runs inside the script. PR resolution happens via the REST API using
+    # head_sha + head_branch (workflow_run.pull_requests[] is unreliable).
     if: >
       (github.event_name == 'workflow_dispatch') ||
       (github.event.workflow_run.conclusion == 'success' &&
@@ -82,8 +86,11 @@ jobs:
               headSha = pr.head.sha;
             }
 
-            // Short-circuit: skip if Copilot already reviewed the current head SHA.
-            // This prevents duplicate review requests on CI reruns with no code changes.
+            // Short-circuit: skip if Copilot has already submitted any review on this PR.
+            // One Copilot review per PR is the correct standard (#380) — re-review via
+            // API is a no-op (requestReviewers returns 200 but fires no review_requested
+            // event for Copilot). The thread-resolution check in the gate is the real
+            // quality enforcement; requesting again would have no effect.
             const reviews = await github.paginate(github.rest.pulls.listReviews, {
               owner, repo, pull_number, per_page: 100,
             });
@@ -92,32 +99,15 @@ jobs:
               return l === 'copilot-pull-request-reviewer' || l.startsWith('copilot-pull-request-reviewer[');
             };
             const alreadyReviewed = reviews.some(
-              (r) => isCopilot(r.user?.login) && r.commit_id === headSha &&
+              (r) => isCopilot(r.user?.login) &&
                 r.state !== 'DISMISSED' && r.state !== 'PENDING'
             );
             if (alreadyReviewed) {
-              console.log(`Copilot already reviewed HEAD ${headSha}; skipping re-request.`);
+              console.log(`Copilot already reviewed this PR; skipping re-request.`);
               return;
             }
 
-            console.log(`Requesting Copilot review for PR #${pull_number} @ ${headSha}...`);
-
-            // Remove first so that re-requesting triggers a fresh review even when
-            // Copilot has already reviewed a previous commit (mirrors the GitHub UI
-            // "Re-request review" button behavior).
-            try {
-              await github.rest.pulls.removeRequestedReviewers({
-                owner,
-                repo,
-                pull_number,
-                reviewers: ['github-copilot'],
-              });
-            } catch (e) {
-              // 422 = reviewer was not in the pending list; safe to ignore.
-              // All other statuses (404 resource not found, 403 permissions, 5xx)
-              // are re-thrown so the step fails visibly.
-              if (e.status !== 422) throw e;
-            }
+            console.log(`Requesting Copilot review for PR #${pull_number}...`);
 
             try {
               await github.rest.pulls.requestReviewers({
