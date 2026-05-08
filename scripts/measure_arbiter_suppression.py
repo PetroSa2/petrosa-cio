@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,13 +28,13 @@ def pct(part: int, whole: int) -> float:
     return 100.0 * (part / whole)
 
 
-def measure(text: str) -> Counts:
+def measure_lines(lines: list[str]) -> Counts:
     received = 0
     suppressed = 0
     dedup = 0
     conflict = 0
 
-    for line in text.splitlines():
+    for line in lines:
         if RECEIVED in line:
             received += 1
         if SUPPRESSED in line:
@@ -48,6 +49,11 @@ def measure(text: str) -> Counts:
     )
 
 
+def measure_file(path: Path) -> Counts:
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        return measure_lines(f)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Measure CIO arbiter suppression rates from exported logs."
@@ -55,8 +61,18 @@ def main() -> int:
     ap.add_argument("logfile", type=Path, help="Path to a CIO log export file")
     args = ap.parse_args()
 
-    text = args.logfile.read_text(errors="replace")
-    c = measure(text)
+    if not args.logfile.exists():
+        print(f"error: file not found: {args.logfile}", file=sys.stderr)
+        return 1
+    if not args.logfile.is_file():
+        print(f"error: not a regular file: {args.logfile}", file=sys.stderr)
+        return 1
+
+    try:
+        c = measure_file(args.logfile)
+    except OSError as e:
+        print(f"error: unable to read {args.logfile}: {e}", file=sys.stderr)
+        return 1
 
     other = max(0, c.suppressed - c.dedup - c.conflict)
 
