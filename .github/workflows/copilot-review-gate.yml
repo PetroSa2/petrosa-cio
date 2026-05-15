@@ -20,11 +20,6 @@ on:
   workflow_dispatch:
   pull_request_review:
     types: [submitted, edited, dismissed]
-  pull_request_review_thread:
-    # Re-run the gate when any review thread is resolved so developers don't need
-    # to manually re-trigger the workflow after addressing feedback. The gate's
-    # script already filters to Copilot-started threads for the pass/fail check.
-    types: [resolved]
   workflow_run:
     workflows: ["Request Copilot Review"]
     types: [completed]
