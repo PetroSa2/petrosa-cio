@@ -17,8 +17,7 @@
 name: copilot-review
 
 on:
-  pull_request:
-    types: [synchronize]
+  workflow_dispatch:
   pull_request_review:
     types: [submitted, edited, dismissed]
   workflow_run:
@@ -60,27 +59,22 @@ jobs:
               if (context.eventName === 'pull_request_review') {
                 return context.payload.pull_request;
               }
-              if (context.eventName === 'pull_request') {
+              if (context.eventName === 'pull_request_review_thread') {
                 return context.payload.pull_request;
               }
               if (context.eventName === 'workflow_run') {
                 const run = context.payload.workflow_run;
-                // workflow_run.pull_requests[] is unreliable — resolve the PR by
-                // matching head_sha + head_branch via the REST API instead.
-                const prs = await github.paginate(github.rest.pulls.list, {
-                  owner, repo, state: 'open',
-                  head: `${owner}:${run.head_branch}`,
-                  per_page: 100,
-                });
-                const pr = prs.find(
-                  (p) => p.head.sha === run.head_sha &&
-                          p.head.repo.full_name === `${owner}/${repo}`
-                );
-                if (!pr) {
-                  core.info(`No open same-repo PR for ${run.head_branch}@${run.head_sha}; skipping.`);
+                const prs = run.pull_requests || [];
+                if (prs.length === 0) {
+                  core.info('workflow_run has no linked PR; skipping.');
                   return null;
                 }
-                return pr;
+                const { data } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: prs[0].number,
+                });
+                return data;
               }
               core.info(`Unhandled event ${context.eventName}; skipping.`);
               return null;
