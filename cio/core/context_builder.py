@@ -202,7 +202,7 @@ class ContextBuilder:
             # Safe conservative defaults (trigger blocks)
             return (
                 PortfolioSummary(
-                    net_directional_exposure=1.0,
+                    gross_exposure=1.0,
                     same_asset_pct=1.0,
                     open_positions_count=999,
                 ),

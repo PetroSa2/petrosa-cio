@@ -66,9 +66,6 @@ class Orchestrator:
         )
 
         try:
-            # 1. CODE ENGINE: Hard Limits (S2)
-            code_result = CodeEngine.run(context)
-
             # Placeholder results for deterministic bypass (Ticket #334/337)
             # Use explicit "bypass" placeholders instead of SAFE_DEFAULTS to avoid "PARSE_FAILURE" trace
             bypass_regime = RegimeResult(
@@ -88,6 +85,23 @@ class Orchestrator:
                 confidence=1.0,
                 thought_trace="DETERMINISTIC_BYPASS",
             )
+
+            # 1. CODE ENGINE: Hard Limits (S2)
+            # In bypass mode, substitute bypass_regime so that policy-based regime hard
+            # blocks (CHOPPY / CAPITULATION) do not fire. Risk-gate hard limits (drawdown,
+            # open orders) still apply because they are derived from env_stats/risk_limits,
+            # not from the regime field.
+            if not self.use_llm_reasoning:
+                engine_context = context.model_copy(
+                    update={
+                        "regime": bypass_regime,
+                        "volatility_level": bypass_regime.volatility_level,
+                    }
+                )
+            else:
+                engine_context = context
+
+            code_result = CodeEngine.run(engine_context)
 
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks
@@ -117,8 +131,7 @@ class Orchestrator:
                     "Deterministic bypass active. Skipping LLM personas.",
                     extra={"correlation_id": context.correlation_id},
                 )
-                # In bypass mode, we "blindly" trust the intent IF code engine passes.
-                # The ActionClassifier still handles the final assembly into DecisionResult.
+                # In bypass mode we "blindly" trust the intent when risk gates pass.
                 return await self.action_classifier.classify(
                     context,
                     code_result,
