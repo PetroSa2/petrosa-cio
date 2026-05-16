@@ -2,12 +2,8 @@
 # TEMPLATE — Copy to `.github/workflows/copilot-review-gate.yml` in each Petrosa repo
 # before requiring the `copilot-review` status check on `main`.
 #
-# Enforces merge gating: Copilot must have reviewed the PR (any commit) and
+# Enforces merge gating: Copilot must have reviewed the current PR head SHA and
 # all non-outdated Copilot-started review threads must be resolved.
-#
-# Design: one Copilot review per PR is the correct standard (issue #380).
-# Re-review via API is a no-op — the GitHub UI "Re-request review" button is the
-# only working mechanism. The thread-resolution check is the real quality gate.
 #
 # Branch protection must require the check name: copilot-review
 # (workflow name / job name). See petrosa_k8s/docs/COPILOT_REVIEW_ENFORCEMENT.md
@@ -29,7 +25,7 @@ concurrency:
   # cancel-in-progress: true caused a regression (#362): the pull_request_review event
   # (fired when Copilot submits its review) cancelled the existing polling run that was
   # about to succeed, and the replacement run failed due to API propagation delay.
-  group: copilot-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  group: copilot-review-${{ github.repository }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -56,25 +52,25 @@ jobs:
             const repo = context.repo.repo;
 
             async function resolvePullRequest() {
-              if (context.eventName === 'pull_request_review') {
-                return context.payload.pull_request;
-              }
-              if (context.eventName === 'pull_request_review_thread') {
+              if (context.eventName === 'pull_request_review' || context.eventName === 'pull_request_review_thread') {
                 return context.payload.pull_request;
               }
               if (context.eventName === 'workflow_run') {
                 const run = context.payload.workflow_run;
-                const prs = run.pull_requests || [];
-                if (prs.length === 0) {
-                  core.info('workflow_run has no linked PR; skipping.');
+                const prs = await github.paginate(github.rest.pulls.list, {
+                  owner, repo, state: 'open',
+                  head: `${owner}:${run.head_branch}`,
+                  per_page: 100,
+                });
+                const pr = prs.find(
+                  (p) => p.head.sha === run.head_sha &&
+                          p.head.repo.full_name === `${owner}/${repo}`
+                );
+                if (!pr) {
+                  core.info(`No open same-repo PR for ${run.head_branch}@${run.head_sha}; skipping.`);
                   return null;
                 }
-                const { data } = await github.rest.pulls.get({
-                  owner,
-                  repo,
-                  pull_number: prs[0].number,
-                });
-                return data;
+                return pr;
               }
               core.info(`Unhandled event ${context.eventName}; skipping.`);
               return null;
@@ -91,6 +87,7 @@ jobs:
             }
 
             const pull_number = pr.number;
+            const headSha = pr.head.sha;
 
             // When triggered by a Copilot review submission, the GitHub REST API can
             // take 10–20s to reflect the new review. A short grace period before the
@@ -109,10 +106,7 @@ jobs:
               );
             };
 
-            // Accept any submitted non-dismissed Copilot review on the PR, regardless of
-            // which commit was reviewed. Re-review via API is a no-op (#380) — the
-            // thread-resolution check below is the real enforcement mechanism.
-            async function hasCopilotReviewForPR() {
+            async function hasCopilotReview() {
               const reviews = await github.paginate(github.rest.pulls.listReviews, {
                 owner,
                 repo,
@@ -124,6 +118,7 @@ jobs:
                 (r) =>
                   r.user &&
                   isCopilotPrReviewer(r.user.login) &&
+                  r.commit_id === headSha &&
                   r.state !== 'DISMISSED' &&
                   r.state !== 'PENDING'
               );
@@ -137,21 +132,21 @@ jobs:
             let waited = 0;
 
             while (waited <= maxWaitSeconds) {
-              if (await hasCopilotReviewForPR()) {
+              if (await hasCopilotReview()) {
                 core.info(`Found submitted Copilot review for PR #${pull_number}.`);
                 break;
               }
 
               if (waited === 0) {
                 core.info(
-                  `Waiting for Copilot PR review on PR #${pull_number} (any commit accepted, polling up to ${maxWaitSeconds}s).`
+                  `Waiting for Copilot PR review on current head ${headSha} (polling up to ${maxWaitSeconds}s).`
                 );
               }
 
               if (waited >= maxWaitSeconds) {
                 core.setFailed(
-                  `No submitted Copilot PR review for PR #${pull_number} after waiting ${maxWaitSeconds}s. ` +
-                    `Request a Copilot review via the GitHub UI and retry once it submits one.`
+                  `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
+                    `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`
                 );
                 return;
               }
@@ -239,5 +234,5 @@ jobs:
             }
 
             core.info(
-              `Copilot review gate passed for ${repo}#${pull_number}.`
+              `Copilot review gate passed for ${repo}#${pull_number} @ ${headSha}.`
             );
