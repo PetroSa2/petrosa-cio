@@ -1,0 +1,165 @@
+---
+# yamllint disable rule:line-length
+name: Manual Deployment with Version Bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+      reason:
+        description: 'Reason for deployment (audit trail)'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    runs-on: petrosa-org-runners
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current_version
+        run: |
+          CURRENT=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          echo "Current version: $CURRENT"
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+
+      - name: Bump version
+        id: bump_version
+        run: |
+          chmod +x scripts/bump-version.sh
+          NEW_VERSION=$(./scripts/bump-version.sh \
+            "${{ steps.current_version.outputs.version }}" \
+            "${{ inputs.version_bump }}")
+          echo "New version: $NEW_VERSION"
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.bump_version.outputs.new_version }}" \
+            -m "Manual deployment: ${{ inputs.reason }}"
+          git push origin "${{ steps.bump_version.outputs.new_version }}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:${{
+              steps.bump_version.outputs.new_version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/petrosa-cio:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Generate GitOps Bot Token
+        uses: tibdex/github-app-token@v2
+        id: generate-token
+        with:
+          app_id: ${{ secrets.GITOPS_APP_ID }}
+          private_key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          installation_retrieval_mode: id
+          installation_retrieval_payload: >-
+            ${{ secrets.GITOPS_APP_INSTALLATION_ID }}
+
+      - name: Checkout petrosa_k8s
+        uses: actions/checkout@v4
+        with:
+          repository: PetroSa2/petrosa_k8s
+          ref: main
+          token: ${{ steps.generate-token.outputs.token }}
+          path: petrosa_k8s
+
+      - name: Rebase on main
+        run: ./scripts/gitops-rebase-main.sh
+        working-directory: petrosa_k8s
+
+      - name: Update cio image tag in GitOps manifests
+        run: |
+          VERSION="${{ steps.bump_version.outputs.new_version }}"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) \
+            -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) \
+            -print0 | xargs -0 -r sed -i \
+            "s/version: VERSION_PLACEHOLDER/version: $VERSION/g"
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) \
+            -print0 | xargs -0 -r sed -E -i \
+            "s|(image:[[:space:]]*)([^[:space:]]*/)?(petrosa-cio):[^[:space:]]*|\1\2\3:$VERSION|g"
+
+      - name: Commit and push to petrosa_k8s
+        working-directory: petrosa_k8s
+        run: |
+          git config user.name "gitops-bot"
+          git config user.email "gitops-bot@users.noreply.github.com"
+          git add k8s/cio/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            MSG="gitops: cio image ${{
+              steps.bump_version.outputs.new_version }}"
+            git commit -m "$MSG"
+            git push origin main
+          fi
+
+      - name: Create deployment record
+        run: |
+          mkdir -p deployments
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          cat >> deployments/history.log << EOF
+          ========================================
+          Deployment Record
+          ========================================
+          Service: cio
+          Version: ${{ steps.bump_version.outputs.new_version }}
+          Previous Version: ${{ steps.current_version.outputs.version }}
+          Triggered by: ${{ github.actor }}
+          Reason: ${{ inputs.reason }}
+          Timestamp: $TIMESTAMP
+          Workflow Run: ${{ github.server_url }}/${{
+            github.repository }}/actions/runs/${{ github.run_id }}
+          ========================================
+          EOF
+
+      - name: Create summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Deployment Successful ✅
+
+          ## Details
+          - **Service**: \`cio\`
+          - **Version**: \`${{
+            steps.current_version.outputs.version }}\` → \`${{
+            steps.bump_version.outputs.new_version }}\`
+          - **Bump Type**: \`${{ inputs.version_bump }}\`
+          - **Triggered by**: @${{ github.actor }}
+          - **Reason**: ${{ inputs.reason }}
+          EOF
