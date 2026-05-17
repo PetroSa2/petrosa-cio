@@ -44,8 +44,9 @@ jobs:
     - name: Set version
       id: version
       run: |
-        # Default version for CIO
-        BASE_VERSION="v0.1.0"
+        # Sourced from VERSION file (unified per #154); preserves leading 'v'
+        RAW=$(cat VERSION | tr -d '[:space:]')
+        BASE_VERSION="v${RAW#v}"
         SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
         VERSION="${BASE_VERSION}-r${{ github.run_number }}-${SHORT_SHA}"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
