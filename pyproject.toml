@@ -1,6 +1,6 @@
 [project]
 name = "petrosa-cio"
-version = "1.0.0"
+version = "1.0.7"
 description = "Autonomous trading intelligence and strategy controller"
 authors = [{name = "Petrosa Systems"}]
 requires-python = ">=3.11"
