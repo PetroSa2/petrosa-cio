@@ -51,9 +51,10 @@ Runs automatically on push to `main`:
 
 **Jobs:**
 1. **Create Release**
-   - Auto-increments semantic version (e.g., v1.0.0 → v1.0.1)
-   - Creates and pushes git tag
-   - Uses patch version increment for every deployment
+   - Reads `BASE_VERSION` from the repo `VERSION` file (leading `v` preserved if present)
+   - Composes the release tag as `${BASE_VERSION}-r${{ github.run_number }}-${SHORT_SHA}`
+   - Creates and pushes the git tag
+   - SemVer bumps are made by editing the `VERSION` file in a PR; the `run_number` suffix increments per deploy
 
 2. **Build & Push**
    - Builds Docker image with multi-platform support
@@ -123,17 +124,24 @@ open htmlcov/index.html  # View HTML report
 
 ## Semantic Versioning
 
-The service uses automated semantic versioning:
+The service follows the unified Petrosa versioning strategy (parent: petrosa_k8s#154):
 
-- **Format**: `vMAJOR.MINOR.PATCH` (e.g., v1.2.3)
-- **Auto-increment**: Patch version incremented on every main push
-- **Manual bump**: Create a tag manually for major/minor changes
-- **Tag location**: Git tags, visible in GitHub releases
+- **Format**: `v{SEMVER}-r{RUN_NUMBER}-{SHORT_SHA}` (e.g., `v1.0.7-r89-a778331`)
+- **SemVer source**: The `VERSION` file at the repo root (e.g., `1.0.7`). The deploy job auto-prefixes a `v` if the file does not start with one — so `1.0.7` and `v1.0.7` both produce `v1.0.7-...`.
+- **`pyproject.toml`** must be kept in lockstep with `VERSION` (Python packaging metadata).
+- **SemVer bumps**: Edit `VERSION` in a PR (major/minor/patch — your call). The next push to `main` will tag accordingly.
+- **Per-deploy uniqueness**: `r${{ github.run_number }}` ensures every deploy from the same `VERSION` produces a unique tag.
+- **Tag location**: Git tags, visible in GitHub releases.
 
-**Version determination:**
-1. Gets latest tag from git (e.g., v1.0.5)
-2. Increments patch version (→ v1.0.6)
-3. If no tags exist, starts at v1.0.0
+**Version determination (deploy.yml, line 46-50):**
+```bash
+RAW=$(cat VERSION | tr -d '[:space:]')
+BASE_VERSION="v${RAW#v}"
+SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+VERSION="${BASE_VERSION}-r${{ github.run_number }}-${SHORT_SHA}"
+```
+
+Reference for the no-`v` variant of the same pattern: `petrosa-data-manager/.github/workflows/deploy.yml`.
 
 ## Secrets Required
 
