@@ -156,6 +156,10 @@ jobs:
           # Also handle any lingering placeholders for backward compatibility
           find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -i "s/VERSION_PLACEHOLDER/$VERSION/g"
 
+          # Update OTEL service.version substring inside OTEL_RESOURCE_ATTRIBUTES env values
+          # Bounded by [^,"[:space:]]+ so it stops at the next attribute, closing quote, or whitespace
+          find petrosa_k8s/k8s/cio -type f \( -name "*.yaml" -o -name "*.yml" \) -print0 | xargs -0 -r sed -E -i "s|(service\.version=)[^,\"[:space:]]+|\1$VERSION|g"
+
           echo "Updated cio image tag to $VERSION in petrosa_k8s/k8s/cio/"
 
       - name: Commit and push to petrosa_k8s
