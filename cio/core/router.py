@@ -107,8 +107,10 @@ class OutputRouter:
                 symbol=context.trigger_payload.get("symbol", ""),
                 correlation_id=correlation_id,
             )
-        except Exception:
+        except ImportError:
             pass
+        except Exception as _otel_exc:
+            logger.debug("set_decision_context failed: %s", _otel_exc)
 
         # 1. Prepare Audit Path (Memory storage - Always executed)
         audit_task = self.vector_client.upsert(

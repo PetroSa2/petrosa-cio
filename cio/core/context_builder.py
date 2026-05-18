@@ -67,7 +67,7 @@ class ContextBuilder:
         source_subject: str,
         trigger_type: TriggerType,
         payload: dict[str, Any],
-        decision_id: str = "",
+        decision_id: str | None = None,
     ) -> TriggerContext:
         """
         Assembles a full TriggerContext.
@@ -114,12 +114,12 @@ class ContextBuilder:
         historical_context = results[3] if vector_task else None
 
         # Assemble TriggerContext
-        import uuid as _uuid
-
+        # Pass decision_id only when provided; TriggerContext.default_factory generates one otherwise
+        extra = {"decision_id": decision_id} if decision_id is not None else {}
         return TriggerContext(
             correlation_id=correlation_id,
-            decision_id=decision_id or _uuid.uuid4().hex,
             source_subject=source_subject,
+            **extra,
             trigger_type=trigger_type,
             trigger_payload=payload,
             regime=regime,

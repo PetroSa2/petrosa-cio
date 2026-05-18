@@ -62,7 +62,7 @@ class TriggerContext(BaseModel):
     )
     decision_id: str = Field(
         default_factory=lambda: uuid.uuid4().hex,
-        description="UUID assigned by the CIO for this specific decision; propagated to signals and Qdrant audit trail",
+        description="uuid4 hex string (32 chars, no hyphens) assigned by the CIO per intent; propagated to signals and Qdrant audit trail",
     )
     source_subject: str = Field(
         ..., description="Original NATS subject the trigger was received on"
