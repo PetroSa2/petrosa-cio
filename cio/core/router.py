@@ -83,6 +83,7 @@ class OutputRouter:
         3. Audit Path -> DecisionResult + Context -> Vector DB (Always enabled for all actions)
         """
         correlation_id = context.correlation_id
+        decision_id = context.decision_id
         strategy_id = context.strategy_id
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
@@ -92,6 +93,25 @@ class OutputRouter:
 
         DECISION_ACTIONS.labels(action_type=action.value, strategy_id=strategy_id).inc()
 
+        # Set OTel decision context attributes on the current span
+        try:
+            from opentelemetry import trace as _trace
+            from petrosa_otel import set_decision_context
+
+            _span = _trace.get_current_span()
+            set_decision_context(
+                _span,
+                decision_id=decision_id,
+                strategy_id=strategy_id,
+                action=action.value,
+                symbol=context.trigger_payload.get("symbol", ""),
+                correlation_id=correlation_id,
+            )
+        except ImportError:
+            pass
+        except Exception as _otel_exc:
+            logger.debug("set_decision_context failed: %s", _otel_exc)
+
         # 1. Prepare Audit Path (Memory storage - Always executed)
         audit_task = self.vector_client.upsert(
             strategy_id=strategy_id,
@@ -99,6 +119,7 @@ class OutputRouter:
                 "event_type": "decision",
                 "action": action.value,
                 "correlation_id": correlation_id,
+                "decision_id": decision_id,
                 "summary": decision.justification,
                 "thought_trace": decision.thought_trace,
                 "decision_data": decision.model_dump(),

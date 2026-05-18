@@ -79,6 +79,7 @@ class TradeEngineTranslator:
                 "strength": "strong",
                 "strategy_mode": "llm_reasoning",
                 "timestamp": datetime.now(UTC).isoformat(),
+                "decision_id": context.decision_id,
                 # Map risk management parameters from decision (primary) or payload
                 "stop_loss": context.trigger_payload.get("stop_loss"),
                 "stop_loss_pct": decision.stop_loss_pct
@@ -88,6 +89,7 @@ class TradeEngineTranslator:
                 or context.trigger_payload.get("take_profit_pct"),
                 "metadata": {
                     "correlation_id": correlation_id,
+                    "decision_id": context.decision_id,
                     "cio_justification": decision.justification,
                     "thought_trace": decision.thought_trace,
                     "original_size_usd": quantity_usd,

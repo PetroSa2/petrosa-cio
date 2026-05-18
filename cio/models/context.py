@@ -1,3 +1,4 @@
+import uuid
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -58,6 +59,10 @@ class TriggerContext(BaseModel):
     # Orchestration and Routing (Winston's requirements)
     correlation_id: str = Field(
         ..., description="NATS message ID or unique GUID for this request flow"
+    )
+    decision_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        description="uuid4 hex string (32 chars, no hyphens) assigned by the CIO per intent; propagated to signals and Qdrant audit trail",
     )
     source_subject: str = Field(
         ..., description="Original NATS subject the trigger was received on"

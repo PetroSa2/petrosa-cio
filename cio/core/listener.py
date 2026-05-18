@@ -118,10 +118,12 @@ class NATSListener:
                 return
 
         # 4. Assemble Context
+        decision_id = uuid.uuid4().hex
         try:
             # For trade.intent.*, we assume TriggerType.TRADE_INTENT
             context = await self.context_builder.build(
                 correlation_id=correlation_id,
+                decision_id=decision_id,
                 source_subject=msg.subject,
                 trigger_type=TriggerType.TRADE_INTENT,
                 payload=payload,

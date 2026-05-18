@@ -34,6 +34,7 @@ async def test_output_router_rest_modify_params_active():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "momentum_pulse"  # TA_BOT
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-active-id"
 
     decision = DecisionResult(
@@ -82,6 +83,7 @@ async def test_output_router_rest_429_handling():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "test_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-id"
 
     decision = DecisionResult(
@@ -130,6 +132,7 @@ async def test_output_router_rest_pause_strategy_freeze():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "pause_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-pause-id"
 
     decision = DecisionResult(
@@ -178,6 +181,7 @@ async def test_output_router_rest_429_fallback_ttl():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "test_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-fallback"
 
     decision = DecisionResult(
@@ -225,6 +229,7 @@ async def test_output_router_rest_cache_unavailable_warning(caplog):
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "no_cache_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "no-cache-id"
 
     decision = DecisionResult(
@@ -263,6 +268,7 @@ async def test_output_router_rest_fail_safe_identity():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "fail_safe_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "fail-safe-id"
 
     decision = DecisionResult(
@@ -307,6 +313,7 @@ async def test_output_router_rest_429_clamping():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "clamp_strat"
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-clamp"
 
     decision = DecisionResult(
@@ -363,6 +370,7 @@ async def test_output_router_rest_dry_run():
 
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "orderbook_skew"  # REALTIME
+    context.decision_id = "test-decision-id"
     context.correlation_id = "rest-dryrun-id"
 
     decision = DecisionResult(
