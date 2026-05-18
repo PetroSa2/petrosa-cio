@@ -14,10 +14,30 @@ name: copilot-review
 
 on:
   workflow_dispatch:
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+    inputs:
+      pull_number:
+        description: 'PR number to gate'
+        required: true
+        type: number
+  # NOTE (PetroSa2/petrosa_k8s#559): the `pull_request_review` trigger was
+  # removed because Copilot bot's review submission fires this workflow with
+  # triggering_actor=Copilot (a Bot account, BOT_kgDOCnlnWA node_id). GitHub's
+  # workflow-approval policy (`fork-pr-contributor-approval`) treats Bot
+  # accounts as external actors regardless of the policy value, producing the
+  # "1 workflow awaiting approval" banner on every PR.
+  #
+  # We trigger from "CI Checks" (one workflow_run hop) instead of
+  # "Request Copilot Review" (two workflow_run hops). At two hops,
+  # `payload.workflow_run.head_branch/head_sha` collapses to the
+  # default branch's HEAD, so PR resolution fails ("No open same-repo PR
+  # for main@..."). With CI Checks as the upstream, payload reports the
+  # actual PR branch + PR head SHA, and the gate can find the PR.
+  #
+  # The Request Copilot Review workflow still triggers from CI Checks in
+  # parallel — Copilot review request happens alongside the gate's polling
+  # loop, so there is no scheduling regression.
   workflow_run:
-    workflows: ["Request Copilot Review"]
+    workflows: ["CI Checks"]
     types: [completed]
 
 concurrency:
@@ -33,11 +53,13 @@ jobs:
     name: copilot-review
     if: >
       github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
     runs-on: petrosa-org-runners
     permissions:
       contents: read
       pull-requests: read
+      checks: write
     env:
       # GitHub Actions deprecates Node.js 20 for JS actions in 2026; opt into Node 24 early.
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
@@ -52,8 +74,14 @@ jobs:
             const repo = context.repo.repo;
 
             async function resolvePullRequest() {
-              if (context.eventName === 'pull_request_review' || context.eventName === 'pull_request_review_thread') {
-                return context.payload.pull_request;
+              if (context.eventName === 'workflow_dispatch') {
+                const pull_number_input = parseInt(context.payload.inputs?.pull_number, 10);
+                if (!Number.isInteger(pull_number_input) || pull_number_input <= 0) {
+                  core.setFailed('workflow_dispatch requires a valid pull_number input');
+                  return null;
+                }
+                const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: pull_number_input });
+                return pr;
               }
               if (context.eventName === 'workflow_run') {
                 const run = context.payload.workflow_run;
@@ -89,12 +117,50 @@ jobs:
             const pull_number = pr.number;
             const headSha = pr.head.sha;
 
-            // When triggered by a Copilot review submission, the GitHub REST API can
-            // take 10–20s to reflect the new review. A short grace period before the
-            // first poll avoids a false-negative on the very first API call. (#362)
-            if (context.eventName === 'pull_request_review') {
-              core.info('Triggered by pull_request_review — waiting 15s for API propagation before first poll.');
-              await new Promise((r) => setTimeout(r, 15 * 1000));
+            // workflow_run-triggered runs attach their natural check_run to the
+            // workflow file's commit (default branch HEAD), NOT to the PR head.
+            // Branch protection looks at PR head checks only — so we explicitly
+            // create a check_run on the PR head SHA here. This decouples the
+            // gate-result check from the trigger event's SHA.
+            // See PetroSa2/petrosa_k8s#559 for the full rationale.
+            let gateCheckRunId = null;
+            try {
+              const { data: createdCheck } = await github.rest.checks.create({
+                owner,
+                repo,
+                name: 'copilot-review',
+                head_sha: headSha,
+                status: 'in_progress',
+                started_at: new Date().toISOString(),
+                output: {
+                  title: 'Copilot review gate',
+                  summary: `Polling for Copilot review and verifying thread resolution on ${headSha}.`,
+                },
+              });
+              gateCheckRunId = createdCheck.id;
+              core.info(`Created copilot-review check_run ${gateCheckRunId} on PR head ${headSha}.`);
+            } catch (err) {
+              core.warning(`Could not create check_run on PR head: ${err.message}`);
+            }
+
+            async function finalizeCheck(conclusion, summary) {
+              if (!gateCheckRunId) return;
+              try {
+                await github.rest.checks.update({
+                  owner,
+                  repo,
+                  check_run_id: gateCheckRunId,
+                  status: 'completed',
+                  conclusion,
+                  completed_at: new Date().toISOString(),
+                  output: {
+                    title: 'Copilot review gate',
+                    summary,
+                  },
+                });
+              } catch (err) {
+                core.warning(`Could not finalize check_run: ${err.message}`);
+              }
             }
 
             const isCopilotPrReviewer = (login) => {
@@ -114,11 +180,14 @@ jobs:
                 per_page: 100,
               });
 
+              // Accept any non-dismissed Copilot review on this PR. Copilot cannot
+              // re-review after already reviewing (requestReviewers is a no-op for
+              // Copilot once it has reviewed). Thread resolution is the real quality
+              // gate — if all Copilot threads are resolved, the code is approved.
               return reviews.some(
                 (r) =>
                   r.user &&
                   isCopilotPrReviewer(r.user.login) &&
-                  r.commit_id === headSha &&
                   r.state !== 'DISMISSED' &&
                   r.state !== 'PENDING'
               );
@@ -133,7 +202,7 @@ jobs:
 
             while (waited <= maxWaitSeconds) {
               if (await hasCopilotReview()) {
-                core.info(`Found submitted Copilot review for PR #${pull_number}.`);
+                core.info(`Found submitted Copilot review for PR #${pull_number} @ ${headSha}.`);
                 break;
               }
 
@@ -144,10 +213,10 @@ jobs:
               }
 
               if (waited >= maxWaitSeconds) {
-                core.setFailed(
-                  `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
-                    `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`
-                );
+                const msg = `No submitted Copilot PR review for current head ${headSha} after waiting ${maxWaitSeconds}s. ` +
+                  `Copilot may be delayed; re-request Copilot review and retry once it submits a review on the latest commit.`;
+                await finalizeCheck('failure', msg);
+                core.setFailed(msg);
                 return;
               }
 
@@ -227,12 +296,13 @@ jobs:
             }
 
             if (unresolved.length > 0) {
-              core.setFailed(
-                'One or more Copilot review threads are still unresolved. Resolve or justify each thread in the PR before merge.'
-              );
+              const msg = 'One or more Copilot review threads are still unresolved. Resolve or justify each thread in the PR before merge.';
+              await finalizeCheck('failure', msg);
+              core.setFailed(msg);
               return;
             }
 
+            await finalizeCheck('success', `Copilot review gate passed for ${repo}#${pull_number} @ ${headSha}.`);
             core.info(
               `Copilot review gate passed for ${repo}#${pull_number} @ ${headSha}.`
             );
