@@ -314,6 +314,25 @@ class OutputRouter:
             dispatch_tasks_data.append(
                 (f"cio.retry.{strategy_id}", decision.model_dump_json().encode())
             )
+        elif action == ActionType.DOWN_WEIGHT:
+            # Governance: reduce strategy's per-decision allocation. Subscribers
+            # (lifecycle authority, dashboard) consume cio.weight.{strategy_id}
+            # to adjust per-decision sizing without halting signal flow.
+            dispatch_tasks_data.append(
+                (f"cio.weight.{strategy_id}", decision.model_dump_json().encode())
+            )
+        elif action == ActionType.THROTTLE:
+            # Governance: rate-limit a strategy's signals over a window.
+            dispatch_tasks_data.append(
+                (f"cio.throttle.{strategy_id}", decision.model_dump_json().encode())
+            )
+        elif action == ActionType.VETO:
+            # Governance: reject this specific intent without changing the strategy's
+            # standing weight. Distinct from SKIP in that downstream subscribers are
+            # notified (audit/dashboard) instead of silently dropping the intent.
+            dispatch_tasks_data.append(
+                (f"cio.veto.{strategy_id}", decision.model_dump_json().encode())
+            )
         elif action == ActionType.FAIL_SAFE:
             # 1. NATS Failure Signal
             dispatch_tasks_data.append(
