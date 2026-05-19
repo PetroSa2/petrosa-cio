@@ -91,6 +91,12 @@ class ActionType(StrEnum):
     ESCALATE = "escalate"
     RETRY_SAFE = "retry_safe"
     FAIL_SAFE = "fail_safe"
+    # Governance actions (per #589 P1.1). Arbitration logic (when to emit) is owned
+    # by P1.2 (lifecycle authority) and P2.6 (verdict-driven pause); this layer
+    # only defines the vocabulary and emission paths.
+    DOWN_WEIGHT = "down_weight"
+    THROTTLE = "throttle"
+    VETO = "veto"
 
 
 class TriggerType(StrEnum):

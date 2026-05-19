@@ -50,7 +50,10 @@ repos:
     hooks:
       - id: bandit
         name: 🔐 Bandit (Python Security)
-        args: [-ll, -r, ., -x, ".venv,venv,htmlcov"]
+        # Scope the scan to project source under cio/ — the previous root-level
+        # scan with -x globs did not actually skip venv contents and produced
+        # thousands of findings in third-party packages.
+        args: [-ll, -r, cio]
         exclude: ^tests/
         pass_filenames: false
 
