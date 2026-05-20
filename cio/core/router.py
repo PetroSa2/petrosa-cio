@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -48,9 +48,14 @@ class OutputRouter:
         ta_bot_url: str | None = None,
         realtime_strategies_url: str | None = None,
         cache: AsyncRedisCache | None = None,
+        authority_store: Any = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
+        # Per-action authority (P1.3, #115). When None, the router behaves as
+        # if every action were ENABLED — preserving pre-P1.3 behavior and
+        # keeping the construction surface backwards-compatible.
+        self.authority_store = authority_store
         # Allow explicit arguments to override environment-based configuration.
         self.ta_bot_url = ta_bot_url or os.getenv("TA_BOT_URL", "")
         self.realtime_strategies_url = realtime_strategies_url or os.getenv(
@@ -126,18 +131,78 @@ class OutputRouter:
         except Exception as _otel_exc:
             logger.debug("set_decision_context failed: %s", _otel_exc)
 
+        # 0b. Apply per-action authority (P1.3, #115). When configured, may:
+        #     * divert to the pending-approval queue (returns early, no dispatch)
+        #     * substitute the action with a next-best safe fallback
+        original_action = action
+        authority_pending = None
+        authority_was_disabled = False
+        if self.authority_store is not None:
+            from cio.core.authority import apply_authority
+
+            authority_decision = apply_authority(
+                self.authority_store,
+                action=action,
+                strategy_id=strategy_id,
+                decision_id=decision_id,
+                correlation_id=correlation_id,
+                context_payload=context.trigger_payload,
+                decision_payload=decision.model_dump(),
+            )
+            if authority_decision.pending is not None:
+                # Divert: record the diversion in the audit trail and stop.
+                authority_pending = authority_decision.pending
+                await self.vector_client.upsert(
+                    strategy_id=strategy_id,
+                    payload={
+                        "event_type": "decision_pending_approval",
+                        "action": original_action.value,
+                        "correlation_id": correlation_id,
+                        "decision_id": decision_id,
+                        "queue_id": authority_pending.queue_id,
+                        "summary": decision.justification,
+                        "thought_trace": decision.thought_trace,
+                        "decision_data": decision.model_dump(),
+                    },
+                )
+                logger.info(
+                    "Decision diverted to operator-approval queue",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "action": original_action.value,
+                        "strategy_id": strategy_id,
+                        "queue_id": authority_pending.queue_id,
+                    },
+                )
+                return
+            if authority_decision.was_disabled:
+                action = authority_decision.action
+                authority_was_disabled = True
+                logger.info(
+                    "Action substituted by authority fallback",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "original_action": original_action.value,
+                        "fallback_action": action.value,
+                        "strategy_id": strategy_id,
+                    },
+                )
+
         # 1. Prepare Audit Path (Memory storage - Always executed)
+        audit_payload: dict[str, Any] = {
+            "event_type": "decision",
+            "action": action.value,
+            "correlation_id": correlation_id,
+            "decision_id": decision_id,
+            "summary": decision.justification,
+            "thought_trace": decision.thought_trace,
+            "decision_data": decision.model_dump(),
+        }
+        if authority_was_disabled:
+            audit_payload["authority_fallback_from"] = original_action.value
         audit_task = self.vector_client.upsert(
             strategy_id=strategy_id,
-            payload={
-                "event_type": "decision",
-                "action": action.value,
-                "correlation_id": correlation_id,
-                "decision_id": decision_id,
-                "summary": decision.justification,
-                "thought_trace": decision.thought_trace,
-                "decision_data": decision.model_dump(),
-            },
+            payload=audit_payload,
         )
 
         # 2. Prepare NATS Dispatch Path (T-Junction)
