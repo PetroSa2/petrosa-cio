@@ -8,10 +8,12 @@ import uvicorn
 from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
+from cio.apps.authority_api import router as authority_router
 from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.clients.factory import ClientFactory
 from cio.core.arbiter import SignalArbiter
+from cio.core.authority import AuthorityStore
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
@@ -61,6 +63,12 @@ app = FastAPI(title="Petrosa CIO Health")
 # is pluggable behind the StrategyLifecycleStore API.
 app.state.lifecycle_store = StrategyLifecycleStore()
 app.include_router(lifecycle_router)
+
+# Per-action authority + pending-approval queue (P1.3, #115). The OutputRouter
+# consults `app.state.authority_store` at dispatch time; the HTTP surface
+# (operator-only) mutates it via the authority_router endpoints.
+app.state.authority_store = AuthorityStore()
+app.include_router(authority_router)
 
 
 @app.get("/health/liveness")
