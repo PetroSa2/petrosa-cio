@@ -15,6 +15,20 @@ from cio.output.translator import TradeEngineTranslator
 logger = logging.getLogger(__name__)
 
 
+# Lifecycle ActionType values (per #114 P1.2). Kept as a module-level set so the
+# router's elif chain can use a single membership check instead of six branches.
+_LIFECYCLE_ACTIONS = frozenset(
+    {
+        ActionType.ADMIT,
+        ActionType.ADMIT_SMALL,
+        ActionType.REJECT,
+        ActionType.PROMOTE,
+        ActionType.DEMOTE,
+        ActionType.RETIRE,
+    }
+)
+
+
 class NATSClientProtocol(Protocol):
     """Structural protocol for NATS client to ensure testability."""
 
@@ -332,6 +346,18 @@ class OutputRouter:
             # notified (audit/dashboard) instead of silently dropping the intent.
             dispatch_tasks_data.append(
                 (f"cio.veto.{strategy_id}", decision.model_dump_json().encode())
+            )
+        elif action in _LIFECYCLE_ACTIONS:
+            # Lifecycle (per #114 P1.2): every transition emitted by the strategy
+            # lifecycle state machine publishes on `cio.lifecycle.<kind>.<sid>`.
+            # Subscribers (data-manager audit-trail, dashboard, lifecycle reader)
+            # observe the standing-state changes without touching the per-intent
+            # signal path.
+            dispatch_tasks_data.append(
+                (
+                    f"cio.lifecycle.{action.value}.{strategy_id}",
+                    decision.model_dump_json().encode(),
+                )
             )
         elif action == ActionType.FAIL_SAFE:
             # 1. NATS Failure Signal

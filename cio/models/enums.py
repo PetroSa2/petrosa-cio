@@ -97,6 +97,15 @@ class ActionType(StrEnum):
     DOWN_WEIGHT = "down_weight"
     THROTTLE = "throttle"
     VETO = "veto"
+    # Lifecycle actions (per #114 P1.2). Emitted by the strategy lifecycle state
+    # machine when a registered strategy transitions between states. Each maps
+    # to a `cio.lifecycle.<kind>.<strategy_id>` subject — see cio/core/router.py.
+    ADMIT = "admit"
+    ADMIT_SMALL = "admit_small"
+    REJECT = "reject"
+    PROMOTE = "promote"
+    DEMOTE = "demote"
+    RETIRE = "retire"
 
 
 class TriggerType(StrEnum):

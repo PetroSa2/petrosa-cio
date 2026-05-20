@@ -8,12 +8,14 @@ import uvicorn
 from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
+from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.clients.factory import ClientFactory
 from cio.core.arbiter import SignalArbiter
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
+from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
 from cio.core.router import OutputRouter
@@ -53,6 +55,12 @@ logger = logging.getLogger("cio-strategist")
 
 # Initialize FastAPI for health checks
 app = FastAPI(title="Petrosa CIO Health")
+
+# Strategy lifecycle store (P1.2, #114) is shared between the HTTP surface and
+# the in-process arbitration loop. The store is in-memory today; persistence
+# is pluggable behind the StrategyLifecycleStore API.
+app.state.lifecycle_store = StrategyLifecycleStore()
+app.include_router(lifecycle_router)
 
 
 @app.get("/health/liveness")
