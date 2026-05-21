@@ -1,13 +1,23 @@
 """Signal arbitration layer for cross-strategy deduplication and conflict resolution."""
 
 import logging
+from typing import TYPE_CHECKING
 
 from cio.core.cache import AsyncRedisCache
+
+if TYPE_CHECKING:
+    from cio.core.evaluator_subscriber import EvaluatorSubscriber
 
 logger = logging.getLogger(__name__)
 
 _DEDUP_TTL_SECONDS = 60
 _CONFLICT_TTL_SECONDS = 300  # 5 minutes
+
+# P2.6 (#597): subsystems whose unhealthy verdict pauses arbitration on
+# every incoming signal. `ingest` is the first wired source (data-manager
+# ingest evaluator, #593). Future tickets can extend this set per-subject
+# (e.g. strategy-specific pauses keyed off `evaluator.strategy.<id>`).
+_PAUSE_GUARD_SUBSYSTEMS: tuple[str, ...] = ("ingest",)
 
 # Canonical action mapping: normalise producer-specific side names to buy/sell.
 _SIDE_NORMALISE: dict[str, str] = {
@@ -42,8 +52,17 @@ class SignalArbiter:
     a Redis SETNX / Lua atomic upgrade can be added when replica counts increase.
     """
 
-    def __init__(self, cache: AsyncRedisCache) -> None:
+    def __init__(
+        self,
+        cache: AsyncRedisCache,
+        evaluator_subscriber: "EvaluatorSubscriber | None" = None,
+    ) -> None:
         self._cache = cache
+        # P2.6 (#597): optional collaborator. When wired, every arbiter
+        # check first asks the subscriber whether any pause-guarded
+        # subsystem is currently unhealthy. None = legacy behavior (no
+        # upstream gate).
+        self._evaluator_subscriber = evaluator_subscriber
 
     async def check(
         self,
@@ -59,6 +78,19 @@ class SignalArbiter:
         Returns:
             (allowed, reason) — ``allowed=False`` means the signal must be suppressed.
         """
+        # P2.6 (#597, FR45): pause-on-unhealthy-upstream check runs FIRST so
+        # we never burn arbitration state on a signal we're about to
+        # suppress. The subscriber's read API is in-memory and lock-free.
+        if self._evaluator_subscriber is not None:
+            for guarded in _PAUSE_GUARD_SUBSYSTEMS:
+                if self._evaluator_subscriber.is_paused(guarded):
+                    reason = (
+                        f"ARBITER_PAUSED: upstream '{guarded}' evaluator unhealthy — "
+                        f"suppressing {symbol} {action} from {strategy_id}"
+                    )
+                    logger.info(reason, extra={"correlation_id": correlation_id})
+                    return False, reason
+
         # Guard: missing symbol or action means we cannot key arbitration state reliably.
         if not symbol or not action:
             reason = (

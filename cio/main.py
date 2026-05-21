@@ -11,11 +11,13 @@ from nats.aio.client import Client as NATS
 from cio.apps.authority_api import router as authority_router
 from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
+from cio.apps.state_api import router as state_router
 from cio.clients.factory import ClientFactory
 from cio.core.arbiter import SignalArbiter
 from cio.core.authority import AuthorityStore
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
+from cio.core.evaluator_subscriber import EvaluatorSubscriber
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
@@ -69,6 +71,12 @@ app.include_router(lifecycle_router)
 # (operator-only) mutates it via the authority_router endpoints.
 app.state.authority_store = AuthorityStore()
 app.include_router(authority_router)
+
+# Evaluator-driven pause gate (P2.6, #597). The subscriber lives at
+# `app.state.evaluator_subscriber` so the /state HTTP routes can read it.
+# It's set in `main()` after the NATS client connects — until then the
+# attribute is missing and the /state routes report 503.
+app.include_router(state_router)
 
 
 @app.get("/health/liveness")
@@ -182,10 +190,21 @@ async def main():
         realtime_strategies_url=realtime_strategies_url,
         cache=cache,
     )
+    # P2.6 (#597): evaluator-verdict subscriber + arbiter pause gate.
+    # Started before arbiter construction so the arbiter wires the
+    # subscriber reference, not None. Subscription itself begins below
+    # via `await evaluator_subscriber.start()` once the NATS connection
+    # is live.
+    evaluator_subscriber = EvaluatorSubscriber(nats_client=nc)
+    app.state.evaluator_subscriber = evaluator_subscriber
+
     arbiter = None
     if os.getenv("SIGNAL_ARBITRATION_ENABLED", "true").lower() in ("true", "1", "yes"):
-        arbiter = SignalArbiter(cache=cache)
-        logger.info("Signal arbitration enabled.")
+        arbiter = SignalArbiter(
+            cache=cache,
+            evaluator_subscriber=evaluator_subscriber,
+        )
+        logger.info("Signal arbitration enabled (with P2.6 pause gate).")
     else:
         logger.info("Signal arbitration disabled (SIGNAL_ARBITRATION_ENABLED=false).")
 
@@ -205,6 +224,12 @@ async def main():
 
     publisher = HeartbeatPublisher(nats_client=nc, interval_seconds=10.0)
     await publisher.start(subject=heartbeat_subject)
+
+    # P2.6 (#597): start the evaluator subscriber after NATS is live so
+    # arbitration begins consulting the latest upstream verdicts within
+    # one tick window of CIO startup.
+    await evaluator_subscriber.start()
+    logger.info("Evaluator subscriber listening on evaluator.>")
 
     # 3. Graceful Shutdown Setup
     stop_event = asyncio.Event()
@@ -248,6 +273,7 @@ async def main():
     logger.info("Cleaning up resources...")
     await publisher.stop()
     await responder.stop()
+    await evaluator_subscriber.stop()
     await listener.stop()
     await router.close()
     await builder.close()
