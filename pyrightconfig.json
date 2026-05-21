@@ -1,0 +1,20 @@
+{
+  "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": "venv",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "exclude": [
+    ".venv",
+    "venv",
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".pytest_cache",
+    "k8s",
+    "_bmad",
+    "_bmad-output",
+    ".serena/cache"
+  ]
+}
