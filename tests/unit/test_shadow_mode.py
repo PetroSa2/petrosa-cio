@@ -116,8 +116,10 @@ async def test_output_router_shadow_mode():
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
-        # Assertion: NATS publish SHOULD have been called (Twice for T-Junction)
-        assert mock_nc.publish.call_count == 2
+        # Assertion: NATS publish SHOULD have been called 3 times —
+        # legacy signal + modern trade.execute + decision audit copy
+        # (cio.decision.audit.execute added by #610 P7.1).
+        assert mock_nc.publish.call_count == 3
         mock_vc.upsert.assert_called_once()
         print(
             "✅ Verified: OutputRouter performed T-Junction NATS publish and Vector upsert in active mode."
@@ -199,6 +201,7 @@ async def test_output_router_defaults_to_active_mode_when_dry_run_unset(
     with caplog.at_level("INFO"):
         await router.route(context, decision)
 
-    assert mock_nc.publish.call_count == 2
+    # Legacy signal + modern trade.execute + decision audit copy (#610).
+    assert mock_nc.publish.call_count == 3
     mock_vc.upsert.assert_called_once()
     assert caplog.messages.count("T-Junction dispatch successful") == 1

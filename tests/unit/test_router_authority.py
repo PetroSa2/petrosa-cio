@@ -78,10 +78,12 @@ async def test_enabled_action_dispatches_normally_via_authority_store():
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(_make_context(), _make_decision(ActionType.ADMIT))
 
-    # ADMIT (a lifecycle action) publishes on cio.lifecycle.admit.<sid>.
-    router.nats_client.publish.assert_called_once()
-    subject, _payload = router.nats_client.publish.call_args.args
-    assert subject == "cio.lifecycle.admit.strat_a"
+    # ADMIT (a lifecycle action) publishes on cio.lifecycle.admit.<sid>,
+    # plus the audit copy on cio.decision.audit.admit (#610 P7.1).
+    assert router.nats_client.publish.call_count == 2
+    subjects = [c.args[0] for c in router.nats_client.publish.call_args_list]
+    assert "cio.lifecycle.admit.strat_a" in subjects
+    assert "cio.decision.audit.admit" in subjects
     # No pending-approval entries because action was ENABLED.
     assert store.list_pending() == []
 
@@ -164,8 +166,15 @@ async def test_disabled_action_substitutes_fallback_and_records_original():
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(_make_context(), _make_decision(ActionType.EXECUTE))
 
-    # EXECUTE → SKIP fallback. SKIP does not publish.
-    mock_nc.publish.assert_not_called()
+    # EXECUTE → SKIP fallback. SKIP itself does not publish, but the
+    # decision audit copy (#610 P7.1) is published unconditionally so
+    # the CIO health evaluator sees every decision — including SKIPs.
+    assert mock_nc.publish.call_count == 1
+    subject, payload_bytes = mock_nc.publish.call_args.args
+    assert subject == "cio.decision.audit.skip"
+    audit_payload = json.loads(payload_bytes.decode())
+    assert audit_payload["action"] == "skip"
+    assert audit_payload["authority_fallback_from"] == "execute"
 
     mock_vc.upsert.assert_called_once()
     payload = mock_vc.upsert.call_args.kwargs["payload"]
@@ -201,15 +210,21 @@ async def test_disabled_lifecycle_action_dispatches_safe_fallback():
         await router.route(_make_context(), _make_decision(ActionType.ADMIT))
 
     # Fallback publishes on cio.lifecycle.reject.<sid>, NOT cio.lifecycle.admit.<sid>.
-    mock_nc.publish.assert_called_once()
-    subject, payload_bytes = mock_nc.publish.call_args.args
-    assert subject == "cio.lifecycle.reject.strat_a"
+    # Plus the audit copy on cio.decision.audit.reject (#610 P7.1).
+    assert mock_nc.publish.call_count == 2
+    calls = {c.args[0]: c.args[1] for c in mock_nc.publish.call_args_list}
+    assert "cio.lifecycle.reject.strat_a" in calls
+    assert "cio.decision.audit.reject" in calls
 
-    payload = json.loads(payload_bytes.decode())
+    payload = json.loads(calls["cio.lifecycle.reject.strat_a"].decode())
     # The decision payload's `action` field is the original — we do not mutate
     # the DecisionResult on the wire; only the dispatch subject reflects the
     # fallback. (Audit-trail captures the swap via authority_fallback_from.)
     assert payload["action"] == "admit"
+
+    audit = json.loads(calls["cio.decision.audit.reject"].decode())
+    assert audit["action"] == "reject"
+    assert audit["authority_fallback_from"] == "admit"
 
     audit_payload = mock_vc.upsert.call_args.kwargs["payload"]
     assert audit_payload["action"] == "reject"
@@ -235,9 +250,11 @@ async def test_router_without_authority_store_preserves_behavior():
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(_make_context(), _make_decision(ActionType.ADMIT))
 
-    mock_nc.publish.assert_called_once()
-    subject, _payload = mock_nc.publish.call_args.args
-    assert subject == "cio.lifecycle.admit.strat_a"
+    # Lifecycle publish + decision audit copy (#610 P7.1).
+    assert mock_nc.publish.call_count == 2
+    subjects = [c.args[0] for c in mock_nc.publish.call_args_list]
+    assert "cio.lifecycle.admit.strat_a" in subjects
+    assert "cio.decision.audit.admit" in subjects
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +291,15 @@ async def test_decision_id_propagates_in_every_outcome(
 
     if expect_publish:
         assert mock_nc.publish.called
-    else:
+    elif expect_pending:
+        # OPERATOR_APPROVAL_REQUIRED diverts before any dispatch (incl. audit).
         mock_nc.publish.assert_not_called()
+    else:
+        # DISABLED EXECUTE→SKIP: no dispatch publish, but the audit copy
+        # (#610 P7.1) IS published so the CIO health evaluator sees the
+        # SKIP. So the subject set must be exactly the audit copy.
+        subjects = [c.args[0] for c in mock_nc.publish.call_args_list]
+        assert subjects == ["cio.decision.audit.skip"]
 
     if expect_pending:
         pending = store.list_pending()

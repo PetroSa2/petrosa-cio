@@ -99,11 +99,15 @@ async def test_lifecycle_action_publishes_on_dedicated_subject(action: ActionTyp
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
-    mock_nc.publish.assert_called_once()
-    subject, payload_bytes = mock_nc.publish.call_args.args
-    assert subject == f"cio.lifecycle.{action.value}.{strategy_id}"
+    # Lifecycle dispatch + decision audit copy (#610 P7.1).
+    assert mock_nc.publish.call_count == 2
+    calls = {c.args[0]: c.args[1] for c in mock_nc.publish.call_args_list}
+    lifecycle_subject = f"cio.lifecycle.{action.value}.{strategy_id}"
+    audit_subject = f"cio.decision.audit.{action.value}"
+    assert lifecycle_subject in calls
+    assert audit_subject in calls
 
-    payload = json.loads(payload_bytes.decode())
+    payload = json.loads(calls[lifecycle_subject].decode())
     assert payload["action"] == action.value
     assert payload["justification"] == "lifecycle reasoning"
 

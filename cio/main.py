@@ -18,6 +18,7 @@ from cio.core.authority import AuthorityStore
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.evaluator_subscriber import EvaluatorSubscriber
+from cio.core.health_evaluator import CIOHealthEvaluator
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
@@ -231,6 +232,16 @@ async def main():
     await evaluator_subscriber.start()
     logger.info("Evaluator subscriber listening on evaluator.>")
 
+    # P7.1 (#610): CIO health evaluator. Subscribes to its own decision
+    # audit copies + intent/signal cadence and publishes
+    # evaluator.cio.verdict, closing Outcome 5's 8/8 evaluator coverage
+    # gate. Started after the upstream subscriber so the loop has fresh
+    # state by the time it ticks.
+    health_evaluator = CIOHealthEvaluator(nats_client=nc)
+    app.state.cio_health_evaluator = health_evaluator
+    await health_evaluator.start()
+    logger.info("CIO health evaluator publishing on evaluator.cio.verdict")
+
     # 3. Graceful Shutdown Setup
     stop_event = asyncio.Event()
 
@@ -273,6 +284,7 @@ async def main():
     logger.info("Cleaning up resources...")
     await publisher.stop()
     await responder.stop()
+    await health_evaluator.stop()
     await evaluator_subscriber.stop()
     await listener.stop()
     await router.close()
