@@ -321,3 +321,5 @@ trade_data/
 strategy_configs/
 backtest_results/
 k8s/kubeconfig.yaml
+
+.serena/cache/
