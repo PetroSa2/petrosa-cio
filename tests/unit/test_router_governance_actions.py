@@ -82,11 +82,15 @@ async def test_governance_action_publishes_on_dedicated_subject(
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
-    mock_nc.publish.assert_called_once()
-    subject, payload_bytes = mock_nc.publish.call_args.args
-    assert subject == f"{expected_subject_prefix}.{strategy_id}"
+    # Governance dispatch + decision audit copy (#610 P7.1).
+    assert mock_nc.publish.call_count == 2
+    calls = {c.args[0]: c.args[1] for c in mock_nc.publish.call_args_list}
+    governance_subject = f"{expected_subject_prefix}.{strategy_id}"
+    audit_subject = f"cio.decision.audit.{action.value}"
+    assert governance_subject in calls
+    assert audit_subject in calls
 
-    payload = json.loads(payload_bytes.decode())
+    payload = json.loads(calls[governance_subject].decode())
     assert payload["action"] == action.value
     assert payload["justification"] == "governance reasoning"
 

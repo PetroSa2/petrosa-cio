@@ -451,6 +451,28 @@ class OutputRouter:
                 except Exception as e:
                     logger.error(f"Failed to fire fail-safe REST pause: {e}")
 
+        # 2b. Audit copy on cio.decision.audit.<action> — feeds the CIO
+        # health evaluator (P7.1, #610) and is the Phase-2 substrate for
+        # decision/outcome correlation. Published for *every* action so
+        # the evaluator can compute reasoning-context presence and
+        # FAIL_SAFE/SKIP dominance over a sliding window.
+        audit_copy_payload = {
+            "decision_id": decision_id,
+            "correlation_id": correlation_id,
+            "strategy_id": strategy_id,
+            "action": action.value,
+            "thought_trace": decision.thought_trace,
+            "justification": decision.justification,
+        }
+        if authority_was_disabled:
+            audit_copy_payload["authority_fallback_from"] = original_action.value
+        dispatch_tasks_data.append(
+            (
+                f"cio.decision.audit.{action.value}",
+                json.dumps(audit_copy_payload).encode(),
+            )
+        )
+
         # 3. Handle Dispatch execution (Checking DRY_RUN)
         nats_publish_tasks = []
 

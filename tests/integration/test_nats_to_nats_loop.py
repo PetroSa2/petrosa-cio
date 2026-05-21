@@ -144,8 +144,12 @@ async def test_full_nats_to_nats_loop():
             await listener._handle_message(mock_msg)
 
             # 5. Assertions
-            # Verify NATS publish was called TWICE (Legacy + Modern)
-            assert mock_nc.publish.call_count == 2
+            # Verify NATS publish was called THREE times:
+            #   1) Legacy signal      (signals.trading.<strategy_id>)
+            #   2) Modern decision    (trade.execute.<strategy_id>)
+            #   3) Decision audit copy for the CIO health evaluator
+            #      (cio.decision.audit.<action>, added in P7.1 / #610)
+            assert mock_nc.publish.call_count == 3
             assert orchestrator.run.await_count == 1
 
             # Check Legacy Call (signals.trading.<strategy_id> — matches tradeengine signals.trading.>)
@@ -163,6 +167,14 @@ async def test_full_nats_to_nats_loop():
             modern_payload = json.loads(modern_call[0][1].decode())
             assert modern_payload["action"] == "execute"
             assert modern_payload["computed_position_size_usd"] == pytest.approx(5000.0)
+
+            # Check Audit-Copy Call (cio.decision.audit.execute)
+            audit_call = mock_nc.publish.call_args_list[2]
+            assert audit_call[0][0] == "cio.decision.audit.execute"
+            audit_payload = json.loads(audit_call[0][1].decode())
+            assert audit_payload["action"] == "execute"
+            assert audit_payload["strategy_id"] == "momentum_v1"
+            assert audit_payload["correlation_id"] == "test-loop-id"
 
             # Verify Vector Upsert (Audit Path)
             mock_vc.upsert.assert_called_once()
