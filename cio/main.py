@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
 from cio.apps.authority_api import router as authority_router
+from cio.apps.dashboard_api import router as dashboard_router
 from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.apps.state_api import router as state_router
@@ -17,6 +18,7 @@ from cio.core.arbiter import SignalArbiter
 from cio.core.authority import AuthorityStore
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
+from cio.core.decision_store import DecisionStore
 from cio.core.evaluator_subscriber import EvaluatorSubscriber
 from cio.core.health_evaluator import CIOHealthEvaluator
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
@@ -78,6 +80,11 @@ app.include_router(authority_router)
 # It's set in `main()` after the NATS client connects — until then the
 # attribute is missing and the /state routes report 503.
 app.include_router(state_router)
+
+# Dashboard API (#654, P5.1a follow-up). decision_store wired here so it is
+# available immediately; OutputRouter also receives the reference in main().
+app.state.decision_store = DecisionStore()
+app.include_router(dashboard_router)
 
 
 @app.get("/health/liveness")
@@ -190,6 +197,7 @@ async def main():
         ta_bot_url=ta_bot_url,
         realtime_strategies_url=realtime_strategies_url,
         cache=cache,
+        decision_store=app.state.decision_store,
     )
     # P2.6 (#597): evaluator-verdict subscriber + arbiter pause gate.
     # Started before arbiter construction so the arbiter wires the
