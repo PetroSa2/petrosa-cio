@@ -165,7 +165,9 @@ def hibernate_account(futures_exchange: Any) -> bool:
         # For Binance Futures, we can disable multi-asset mode or ensure position side is 'BOTH'
         # A more direct 'hibernate' is setting the account to a 'Close Only' status if the API supports it
         # ccxt doesn't have a single 'hibernate' call, so we implement common safety toggles
-        futures_exchange.fapiPrivatePostMultiAssetsMargin({"multiAssetsMargin": "false"})
+        futures_exchange.fapiPrivatePostMultiAssetsMargin(
+            {"multiAssetsMargin": "false"}
+        )
         return True
     except Exception as e:
         print(f"Warning: Hibernate command failed: {e}")
@@ -273,7 +275,9 @@ def main(argv: list[str] | None = None) -> int:
         hibernate_account(futures_exchange)
 
     if dry_run:
-        print("Dry-run mode completed. Use --force-execute --confirm-i-am-sure to place orders.")
+        print(
+            "Dry-run mode completed. Use --force-execute --confirm-i-am-sure to place orders."
+        )
 
     return 0
 

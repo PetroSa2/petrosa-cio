@@ -7,6 +7,7 @@ from typing import Any, Protocol
 import httpx
 
 from cio.core.cache import AsyncRedisCache
+from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
@@ -49,6 +50,7 @@ class OutputRouter:
         realtime_strategies_url: str | None = None,
         cache: AsyncRedisCache | None = None,
         authority_store: Any = None,
+        decision_store: "DecisionStore | None" = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
@@ -56,6 +58,7 @@ class OutputRouter:
         # if every action were ENABLED — preserving pre-P1.3 behavior and
         # keeping the construction surface backwards-compatible.
         self.authority_store = authority_store
+        self.decision_store = decision_store
         # Allow explicit arguments to override environment-based configuration.
         self.ta_bot_url = ta_bot_url or os.getenv("TA_BOT_URL", "")
         self.realtime_strategies_url = realtime_strategies_url or os.getenv(
@@ -524,6 +527,22 @@ class OutputRouter:
                     "strategy_id": strategy_id,
                     "targets": [t[0] for t in dispatch_tasks_data],
                 },
+            )
+
+        # Record in the dashboard decision store (#654).
+        if self.decision_store is not None:
+            _confidence_map = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}
+            self.decision_store.record(
+                DecisionRecord(
+                    strategy_id=strategy_id,
+                    action=action.value,
+                    reasoning_trace=(
+                        decision.thought_trace or decision.justification or ""
+                    ),
+                    confidence=_confidence_map.get(
+                        getattr(decision.regime_confidence, "value", "").upper(), 0.5
+                    ),
+                )
             )
 
     async def _apply_rate_limit_freeze(
