@@ -72,6 +72,7 @@ class SignalArbiter:
         self,
         cache: AsyncRedisCache,
         evaluator_subscriber: "EvaluatorSubscriber | None" = None,
+        pause_policy: "dict[str, str] | None" = None,
     ) -> None:
         self._cache = cache
         # P2.6 (#597): optional collaborator. When wired, every arbiter
@@ -79,6 +80,12 @@ class SignalArbiter:
         # subsystem is currently unhealthy. None = legacy behavior (no
         # upstream gate).
         self._evaluator_subscriber = evaluator_subscriber
+        # P2.6-EXT (#123): caller can inject a custom policy map (e.g. loaded
+        # from env/config at startup) to tune strict/lax per subsystem without
+        # changing module code. Falls back to the module-level default.
+        self._pause_policy: dict[str, str] = (
+            pause_policy if pause_policy is not None else _PAUSE_GUARD_POLICY
+        )
 
     async def check(
         self,
@@ -100,7 +107,14 @@ class SignalArbiter:
         if self._evaluator_subscriber is not None:
             for guarded in _PAUSE_GUARD_SUBSYSTEMS:
                 if self._evaluator_subscriber.is_paused(guarded):
-                    policy = _PAUSE_GUARD_POLICY.get(guarded, "strict")
+                    policy = self._pause_policy.get(guarded, "strict")
+                    if policy not in ("strict", "lax"):
+                        logger.warning(
+                            f"ARBITER_POLICY_UNKNOWN: unrecognised policy {policy!r} for "
+                            f"'{guarded}', defaulting to strict",
+                            extra={"correlation_id": correlation_id},
+                        )
+                        policy = "strict"
                     if policy == "strict":
                         reason = (
                             f"ARBITER_PAUSED: upstream '{guarded}' evaluator unhealthy — "

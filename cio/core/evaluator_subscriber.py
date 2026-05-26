@@ -59,9 +59,10 @@ class PauseAuditEntry:
 class PauseAuditStore:
     """Ring buffer of recent pause/resume events (AC3, #123).
 
-    Persists events under the decision_id chain by assigning each entry a
-    UUID (``entry_id``) that operators and dashboards can correlate against
-    open positions' ``decision_id`` fields.
+    Each entry is assigned a UUID (``entry_id``) for deduplication and
+    log correlation. The store does not hold position-level identifiers;
+    callers that need to cross-reference open positions should join on
+    the timestamp window instead.
     """
 
     _DEFAULT_MAXLEN = 200
@@ -256,9 +257,10 @@ class EvaluatorSubscriber:
     def pause_audit_log(self, limit: int = 50) -> list[dict]:
         """Recent pause/resume audit entries (AC3, #123).
 
-        Each entry carries an ``entry_id`` (UUID) that operators can
-        correlate against the ``decision_id`` of any open position that
-        was affected by the pause window.
+        Each entry includes an ``entry_id`` (UUID), subsystem, event
+        (paused/resumed), verdict, reason, and ISO timestamp. Callers
+        that need to correlate entries with open positions should join
+        on the timestamp range rather than a shared identifier.
         """
         return [
             {
