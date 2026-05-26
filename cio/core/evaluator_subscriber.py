@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -39,6 +42,40 @@ EVALUATOR_SUBJECT_PATTERN = "evaluator.>"
 HEALTHY = "healthy"
 UNHEALTHY = "unhealthy"
 UNKNOWN = "unknown"
+
+
+@dataclass
+class PauseAuditEntry:
+    """Single pause or resume event in the arbitration audit trail (AC3, #123)."""
+
+    subsystem: str
+    event: str  # "paused" or "resumed"
+    verdict: str
+    reason: str
+    entry_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+class PauseAuditStore:
+    """Ring buffer of recent pause/resume events (AC3, #123).
+
+    Each entry is assigned a UUID (``entry_id``) for deduplication and
+    log correlation. The store does not hold position-level identifiers;
+    callers that need to cross-reference open positions should join on
+    the timestamp window instead.
+    """
+
+    _DEFAULT_MAXLEN = 200
+
+    def __init__(self, maxlen: int = _DEFAULT_MAXLEN) -> None:
+        self._entries: deque[PauseAuditEntry] = deque(maxlen=maxlen)
+
+    def record(self, entry: PauseAuditEntry) -> None:
+        self._entries.append(entry)
+
+    def recent(self, limit: int = 50) -> list[PauseAuditEntry]:
+        entries = list(self._entries)
+        return sorted(entries, key=lambda e: e.timestamp, reverse=True)[:limit]
 
 
 class EvaluatorSubscriber:
@@ -74,6 +111,8 @@ class EvaluatorSubscriber:
         # subsystem -> override_verdict.
         self._overrides: dict[str, str] = {}
         self._subscription = None
+        # AC3 (#123): ring buffer of pause/resume audit events.
+        self._audit_store = PauseAuditStore()
 
     async def start(self) -> None:
         """Subscribe to ``evaluator.>``."""
@@ -144,6 +183,18 @@ class EvaluatorSubscriber:
                     await self._on_change(subsystem, verdict, reason)
                 except Exception as exc:  # noqa: BLE001 — never crash subscribe
                     logger.warning(f"on_change callback failed: {exc}")
+            # AC3 (#123): record pause/resume transitions in the audit trail.
+            prev_verdict = previous[0] if previous else None
+            if verdict == UNHEALTHY or prev_verdict == UNHEALTHY:
+                event = "paused" if verdict == UNHEALTHY else "resumed"
+                self._audit_store.record(
+                    PauseAuditEntry(
+                        subsystem=subsystem,
+                        event=event,
+                        verdict=verdict,
+                        reason=reason,
+                    )
+                )
 
     def is_paused(self, subsystem: str) -> bool:
         """True iff CIO arbitration should pause on this subsystem.
@@ -203,6 +254,26 @@ class EvaluatorSubscriber:
             )
         self._overrides[subsystem] = verdict
 
+    def pause_audit_log(self, limit: int = 50) -> list[dict]:
+        """Recent pause/resume audit entries (AC3, #123).
+
+        Each entry includes an ``entry_id`` (UUID), subsystem, event
+        (paused/resumed), verdict, reason, and ISO timestamp. Callers
+        that need to correlate entries with open positions should join
+        on the timestamp range rather than a shared identifier.
+        """
+        return [
+            {
+                "entry_id": e.entry_id,
+                "subsystem": e.subsystem,
+                "event": e.event,
+                "verdict": e.verdict,
+                "reason": e.reason,
+                "timestamp": e.timestamp.isoformat(),
+            }
+            for e in self._audit_store.recent(limit)
+        ]
+
     def snapshot(self) -> dict:
         """Full state — used by the /state endpoint to expose verdict
         history for every observed subsystem (paused or not)."""
@@ -217,4 +288,8 @@ class EvaluatorSubscriber:
                     "override": self._overrides.get(subsystem),
                 }
             )
-        return {"verdicts": out, "paused": self.paused_subsystems()}
+        return {
+            "verdicts": out,
+            "paused": self.paused_subsystems(),
+            "pause_audit_log": self.pause_audit_log(),
+        }
