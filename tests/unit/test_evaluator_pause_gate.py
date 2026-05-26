@@ -224,3 +224,221 @@ def test_unknown_verdict_does_not_pause(subscriber):
         )
     )
     assert subscriber.is_paused("ingest") is False
+
+
+# ---------------------------------------------------------------------------
+# AC1 — Extended subsystems (P2.6-EXT #123)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_subscriber_tracks_execution_subsystem(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": UNHEALTHY, "reason": "timeout"})
+    )
+    assert subscriber.is_paused("execution") is True
+
+
+@pytest.mark.asyncio
+async def test_subscriber_tracks_strategy_fidelity_subsystem(subscriber):
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.strategy-fidelity.verdict",
+            {"verdict": UNHEALTHY, "reason": "drift"},
+        )
+    )
+    assert subscriber.is_paused("strategy-fidelity") is True
+
+
+@pytest.mark.asyncio
+async def test_subscriber_tracks_audit_subsystem(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.audit.verdict", {"verdict": UNHEALTHY, "reason": "gap"})
+    )
+    assert subscriber.is_paused("audit") is True
+
+
+# ---------------------------------------------------------------------------
+# AC2 — Per-subsystem pause policy (strict vs lax)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_arbiter_strict_policy_suppresses_on_execution_unhealthy(
+    subscriber, mock_redis_cache
+):
+    """execution has strict policy — arbiter must suppress the signal."""
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": UNHEALTHY, "reason": "timeout"})
+    )
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+    allowed, reason = await arbiter.check(
+        symbol="BTCUSDT",
+        action="buy",
+        confidence=0.9,
+        strategy_id="ta-momentum",
+        correlation_id="corr-exec",
+    )
+    assert allowed is False
+    assert "ARBITER_PAUSED" in reason
+    assert "execution" in reason
+    mock_redis_cache.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_arbiter_lax_policy_allows_on_strategy_fidelity_unhealthy(
+    subscriber, mock_redis_cache
+):
+    """strategy-fidelity has lax policy — arbiter must warn but allow the signal."""
+    from unittest.mock import AsyncMock
+
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.strategy-fidelity.verdict",
+            {"verdict": UNHEALTHY, "reason": "drift"},
+        )
+    )
+    mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.set = AsyncMock()
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+    allowed, _ = await arbiter.check(
+        symbol="BTCUSDT",
+        action="buy",
+        confidence=0.9,
+        strategy_id="ta-momentum",
+        correlation_id="corr-fidelity",
+    )
+    assert allowed is True
+    mock_redis_cache.set.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_arbiter_lax_policy_allows_on_audit_unhealthy(
+    subscriber, mock_redis_cache
+):
+    """audit has lax policy — arbiter must warn but allow the signal."""
+    from unittest.mock import AsyncMock
+
+    await subscriber._handle_message(
+        _msg("evaluator.audit.verdict", {"verdict": UNHEALTHY, "reason": "gap"})
+    )
+    mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.set = AsyncMock()
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+    allowed, _ = await arbiter.check(
+        symbol="ETHUSDT",
+        action="sell",
+        confidence=0.7,
+        strategy_id="ta-trend",
+        correlation_id="corr-audit",
+    )
+    assert allowed is True
+
+
+# ---------------------------------------------------------------------------
+# AC3 — Pause/resume audit trail
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_audit_trail_records_pause_event(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": UNHEALTHY, "reason": "timeout"})
+    )
+    log = subscriber.pause_audit_log()
+    assert len(log) == 1
+    assert log[0]["subsystem"] == "execution"
+    assert log[0]["event"] == "paused"
+    assert log[0]["verdict"] == UNHEALTHY
+    assert "entry_id" in log[0]
+    assert "timestamp" in log[0]
+
+
+@pytest.mark.asyncio
+async def test_audit_trail_records_resume_event(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": UNHEALTHY, "reason": "timeout"})
+    )
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": HEALTHY, "reason": "recovered"})
+    )
+    log = subscriber.pause_audit_log()
+    events = [e["event"] for e in log]
+    assert "paused" in events
+    assert "resumed" in events
+
+
+@pytest.mark.asyncio
+async def test_audit_trail_not_duplicated_on_same_verdict(subscriber):
+    """Repeating the same verdict must not add a new audit entry."""
+    await subscriber._handle_message(
+        _msg("evaluator.ingest.verdict", {"verdict": UNHEALTHY, "reason": "x"})
+    )
+    await subscriber._handle_message(
+        _msg("evaluator.ingest.verdict", {"verdict": UNHEALTHY, "reason": "still bad"})
+    )
+    log = subscriber.pause_audit_log()
+    assert len(log) == 1  # only the first transition
+
+
+@pytest.mark.asyncio
+async def test_snapshot_includes_pause_audit_log(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.ingest.verdict", {"verdict": UNHEALTHY, "reason": "stale"})
+    )
+    snap = subscriber.snapshot()
+    assert "pause_audit_log" in snap
+    assert len(snap["pause_audit_log"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# AC4 — Integration: execution unhealthy → pause → healthy → resume → audit intact
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ac4_execution_pause_resume_full_cycle(subscriber, mock_redis_cache):
+    """AC4: execution evaluator transitions to unhealthy → CIO pauses
+    arbitration → evaluator recovers → CIO resumes → audit trail intact."""
+    from unittest.mock import AsyncMock
+
+    mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.set = AsyncMock()
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+
+    # 1. Healthy baseline — signal passes.
+    await subscriber._handle_message(
+        _msg("evaluator.execution.verdict", {"verdict": HEALTHY, "reason": "ok"})
+    )
+    allowed, _ = await arbiter.check("BTCUSDT", "buy", 0.9, "s1", "c1")
+    assert allowed is True
+
+    # 2. Execution evaluator becomes unhealthy — arbiter pauses (strict policy).
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "executor silent 30s"},
+        )
+    )
+    assert subscriber.is_paused("execution") is True
+    allowed, reason = await arbiter.check("BTCUSDT", "buy", 0.9, "s1", "c2")
+    assert allowed is False
+    assert "ARBITER_PAUSED" in reason
+
+    # 3. Execution evaluator recovers — arbiter resumes.
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": HEALTHY, "reason": "executor responsive"},
+        )
+    )
+    assert subscriber.is_paused("execution") is False
+    mock_redis_cache.get = AsyncMock(return_value=None)
+    allowed, _ = await arbiter.check("BTCUSDT", "buy", 0.9, "s1", "c3")
+    assert allowed is True
+
+    # 4. Audit trail has both the pause and the resume event.
+    log = subscriber.pause_audit_log()
+    events = {e["event"] for e in log if e["subsystem"] == "execution"}
+    assert "paused" in events
+    assert "resumed" in events
