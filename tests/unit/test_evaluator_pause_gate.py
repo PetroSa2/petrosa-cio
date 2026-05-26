@@ -211,17 +211,12 @@ def test_state_endpoint_503_when_subscriber_missing():
     assert r.status_code == 503
 
 
-def test_unknown_verdict_does_not_pause(subscriber):
+@pytest.mark.asyncio
+async def test_unknown_verdict_does_not_pause(subscriber):
     # The spec is explicit: only `unhealthy` pauses. `unknown` (e.g.
     # ingest evaluator before its first message) must allow arbitration.
-    import asyncio
-
-    asyncio.get_event_loop().run_until_complete(
-        subscriber._handle_message(
-            _msg(
-                "evaluator.ingest.verdict", {"verdict": UNKNOWN, "reason": "no msg yet"}
-            )
-        )
+    await subscriber._handle_message(
+        _msg("evaluator.ingest.verdict", {"verdict": UNKNOWN, "reason": "no msg yet"})
     )
     assert subscriber.is_paused("ingest") is False
 
