@@ -38,7 +38,6 @@ async def test_nats_subscription_with_wildcard():
         patch("cio.main.OutputRouter") as MockOutputRouter,
         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
-        patch("prometheus_client.start_http_server"),
     ):
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()

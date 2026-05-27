@@ -113,7 +113,9 @@ class OutputRouter:
         # 0. Record Metrics
         from cio.core.metrics import DECISION_ACTIONS
 
-        DECISION_ACTIONS.labels(action_type=action.value, strategy_id=strategy_id).inc()
+        DECISION_ACTIONS.add(
+            1, {"action_type": action.value, "strategy_id": strategy_id}
+        )
 
         # Set OTel decision context attributes on the current span
         try:
