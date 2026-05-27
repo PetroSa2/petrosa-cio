@@ -120,10 +120,10 @@ async def test_safe_default_emits_parse_failure_skip_metric_and_log(caplog):
         )
 
     assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
-    mock_counter.labels.assert_called_with(
-        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER", reason="validation_error"
+    mock_counter.add.assert_called_once_with(
+        1,
+        {"prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER", "reason": "validation_error"},
     )
-    mock_counter.labels.return_value.inc.assert_called_once()
     assert "LLM_PARSE_FAILURE_SKIP" in caplog.text
 
 
@@ -418,10 +418,10 @@ async def test_complete_with_schema_transport_error_emits_fallback_skip(caplog):
         )
 
     assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
-    mock_counter.labels.assert_called_with(
-        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER", reason="transport_error"
+    mock_counter.add.assert_called_once_with(
+        1,
+        {"prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER", "reason": "transport_error"},
     )
-    mock_counter.labels.return_value.inc.assert_called_once()
     assert "LLM_PARSE_FAILURE_SKIP" in caplog.text
 
 
@@ -595,8 +595,8 @@ def test_process_response_records_cached_prompt_tokens():
         out = client._process_response("pid", response, 100)
 
     assert out.cached_tokens == 7
-    lat.labels.return_value.observe.assert_called_once()
-    assert tok.labels.return_value.inc.call_count >= 3
+    lat.record.assert_called_once()
+    assert tok.add.call_count >= 3
 
 
 @pytest.mark.asyncio

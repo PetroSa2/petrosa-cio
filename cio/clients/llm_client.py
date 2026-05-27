@@ -159,9 +159,9 @@ class CIO_LLM_Client(ABC):
             try:
                 from cio.core.metrics import LLM_FALLBACK_SKIPS
 
-                LLM_FALLBACK_SKIPS.labels(
-                    prompt_id=prompt_id, reason="transport_error"
-                ).inc()
+                LLM_FALLBACK_SKIPS.add(
+                    1, {"prompt_id": prompt_id, "reason": "transport_error"}
+                )
             except ImportError:
                 pass
             logger.error(
@@ -195,9 +195,9 @@ class CIO_LLM_Client(ABC):
             try:
                 from cio.core.metrics import LLM_VALIDATION_FAILURES
 
-                LLM_VALIDATION_FAILURES.labels(
-                    prompt_id=prompt_id, model=raw.model
-                ).inc()
+                LLM_VALIDATION_FAILURES.add(
+                    1, {"prompt_id": prompt_id, "model": raw.model}
+                )
             except ImportError:
                 pass
 
@@ -232,9 +232,9 @@ class CIO_LLM_Client(ABC):
                     try:
                         from cio.core.metrics import LLM_VALIDATION_FAILURES
 
-                        LLM_VALIDATION_FAILURES.labels(
-                            prompt_id=prompt_id, model=fallback_raw.model
-                        ).inc()
+                        LLM_VALIDATION_FAILURES.add(
+                            1, {"prompt_id": prompt_id, "model": fallback_raw.model}
+                        )
                     except ImportError:
                         pass
                     logger.warning(
@@ -249,9 +249,9 @@ class CIO_LLM_Client(ABC):
             try:
                 from cio.core.metrics import LLM_FALLBACK_SKIPS
 
-                LLM_FALLBACK_SKIPS.labels(
-                    prompt_id=prompt_id, reason="validation_error"
-                ).inc()
+                LLM_FALLBACK_SKIPS.add(
+                    1, {"prompt_id": prompt_id, "reason": "validation_error"}
+                )
             except ImportError:
                 pass
             logger.error(
@@ -527,19 +527,35 @@ class LiteLLMClient(CIO_LLM_Client):
         try:
             from cio.core.metrics import LLM_LATENCY, LLM_TOKENS
 
-            LLM_LATENCY.labels(prompt_id=prompt_id, model=response.model).observe(
-                latency_ms / 1000.0
+            LLM_LATENCY.record(
+                latency_ms / 1000.0,
+                {"prompt_id": prompt_id, "model": response.model},
             )
-            LLM_TOKENS.labels(
-                prompt_id=prompt_id, model=response.model, token_type="input"
-            ).inc(usage.prompt_tokens)
-            LLM_TOKENS.labels(
-                prompt_id=prompt_id, model=response.model, token_type="output"
-            ).inc(usage.completion_tokens)
+            LLM_TOKENS.add(
+                usage.prompt_tokens,
+                {
+                    "prompt_id": prompt_id,
+                    "model": response.model,
+                    "token_type": "input",
+                },
+            )
+            LLM_TOKENS.add(
+                usage.completion_tokens,
+                {
+                    "prompt_id": prompt_id,
+                    "model": response.model,
+                    "token_type": "output",
+                },
+            )
             if cached_tokens > 0:
-                LLM_TOKENS.labels(
-                    prompt_id=prompt_id, model=response.model, token_type="cached"
-                ).inc(cached_tokens)
+                LLM_TOKENS.add(
+                    cached_tokens,
+                    {
+                        "prompt_id": prompt_id,
+                        "model": response.model,
+                        "token_type": "cached",
+                    },
+                )
         except ImportError:
             pass
 
@@ -673,18 +689,22 @@ class MockLLMClient(CIO_LLM_Client):
             from cio.core.metrics import LLM_LATENCY, LLM_TOKENS
 
             model = "mock-claude-3-haiku"
-            LLM_LATENCY.labels(prompt_id=prompt_id, model=model).observe(
-                latency_ms / 1000.0
+            LLM_LATENCY.record(
+                latency_ms / 1000.0,
+                {"prompt_id": prompt_id, "model": model},
             )
-            LLM_TOKENS.labels(prompt_id=prompt_id, model=model, token_type="input").inc(
-                150
+            LLM_TOKENS.add(
+                150,
+                {"prompt_id": prompt_id, "model": model, "token_type": "input"},
             )
-            LLM_TOKENS.labels(
-                prompt_id=prompt_id, model=model, token_type="output"
-            ).inc(50)
-            LLM_TOKENS.labels(
-                prompt_id=prompt_id, model=model, token_type="cached"
-            ).inc(240)
+            LLM_TOKENS.add(
+                50,
+                {"prompt_id": prompt_id, "model": model, "token_type": "output"},
+            )
+            LLM_TOKENS.add(
+                240,
+                {"prompt_id": prompt_id, "model": model, "token_type": "cached"},
+            )
         except ImportError:
             pass
 

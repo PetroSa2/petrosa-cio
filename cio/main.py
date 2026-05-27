@@ -101,13 +101,6 @@ async def readiness():
 
 
 async def main():
-    # 0. Start Metrics Server (Epic 5)
-    import prometheus_client
-
-    prometheus_port = int(os.getenv("METRICS_PORT", "9090"))
-    prometheus_client.start_http_server(prometheus_port)
-    logger.info(f"Prometheus metrics server started on port {prometheus_port}")
-
     # 1. Setup OpenTelemetry
     if (
         os.getenv("ENABLE_OTEL", "true").lower() in ("true", "1", "yes")

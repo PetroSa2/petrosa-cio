@@ -1,32 +1,32 @@
-from prometheus_client import Counter, Histogram
+from opentelemetry import metrics
+
+meter = metrics.get_meter("cio")
 
 # LLM Performance Metrics
-LLM_LATENCY = Histogram(
-    "cio_llm_latency_seconds", "Latency of LLM calls in seconds", ["prompt_id", "model"]
+LLM_LATENCY = meter.create_histogram(
+    "cio_llm_latency_seconds",
+    description="Latency of LLM calls in seconds",
+    unit="s",
 )
 
-LLM_TOKENS = Counter(
+LLM_TOKENS = meter.create_counter(
     "cio_llm_tokens_total",
-    "Total number of tokens used",
-    ["prompt_id", "model", "token_type"],
+    description="Total number of tokens used",
 )
 
 # CIO Decision Metrics
-DECISION_ACTIONS = Counter(
+DECISION_ACTIONS = meter.create_counter(
     "cio_decision_actions_total",
-    "Total number of final decisions by action type",
-    ["action_type", "strategy_id"],
+    description="Total number of final decisions by action type",
 )
 
 # LLM Validation Failures
-LLM_VALIDATION_FAILURES = Counter(
+LLM_VALIDATION_FAILURES = meter.create_counter(
     "cio_llm_validation_failures_total",
-    "Total number of LLM response schema validation failures",
-    ["prompt_id", "model"],
+    description="Total number of LLM response schema validation failures",
 )
 
-LLM_FALLBACK_SKIPS = Counter(
+LLM_FALLBACK_SKIPS = meter.create_counter(
     "cio_llm_fallback_skips_total",
-    "Total SAFE_DEFAULT fallbacks that force SKIP-like behavior",
-    ["prompt_id", "reason"],
+    description="Total SAFE_DEFAULT fallbacks that force SKIP-like behavior",
 )

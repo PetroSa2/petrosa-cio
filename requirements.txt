@@ -21,10 +21,6 @@ opentelemetry-sdk>=1.22.0
 
 # Unified OpenTelemetry package for Petrosa services
 petrosa-otel[all]>=1.0.6
-prometheus-client>=0.19.0
-
-# Logging and observability
-prometheus-client>=0.19.0
 
 # Validation and configuration
 pydantic>=2.5.0
