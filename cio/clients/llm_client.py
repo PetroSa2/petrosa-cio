@@ -559,6 +559,16 @@ class LiteLLMClient(CIO_LLM_Client):
         except ImportError:
             pass
 
+        # FR63: record spend for ceiling tracking.
+        try:
+            from cio.core.spend_tracker import LlmSpendTracker
+
+            LlmSpendTracker.instance().record(
+                prompt_id, usage.prompt_tokens, usage.completion_tokens
+            )
+        except Exception:
+            pass
+
         return RawLLMResponse(
             prompt_id=prompt_id,
             content=content,
