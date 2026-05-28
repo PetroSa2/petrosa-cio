@@ -553,6 +553,10 @@ class OutputRouter:
                 if decision.rejection_source is not None
                 else None
             )
+            # P1.4-AC4 (#132): carry the PreDecisionContext snapshot into the
+            # ring buffer so /api/dashboard/decisions/recent can return it
+            # verbatim. Pre-EPIC-#122 historical records have no bundle —
+            # the dashboard renders them with null context.
             self.decision_store.record(
                 DecisionRecord(
                     strategy_id=strategy_id,
@@ -563,10 +567,45 @@ class OutputRouter:
                     confidence=_confidence_map.get(
                         getattr(decision.regime_confidence, "value", "").upper(), 0.5
                     ),
+                    decision_id=decision_id,
                     rejection_source=rejection_source_value,
                     strategy_revision_id=getattr(context, "strategy_revision_id", None),
+                    pre_decision_context=getattr(context, "pre_decision_context", None),
                 )
             )
+
+        # P1.4-AC2.b (#132): publish per-surface context-gap audit events on
+        # `cio.context.gap.<surface>`. data-manager's FR12 audit-trail
+        # consumer subscribes to `cio.context.gap.>` and persists each event
+        # keyed by decision_id. Producer-side only — the decision itself has
+        # already proceeded so the publish is best-effort: a NATS hiccup
+        # must not block the dispatch.
+        pdc = getattr(context, "pre_decision_context", None)
+        if pdc is not None and pdc.gaps and not is_dry_run:
+            for gap in pdc.gaps:
+                gap_payload = {
+                    "decision_id": decision_id,
+                    "correlation_id": correlation_id,
+                    "strategy_id": strategy_id,
+                    "surface": gap.surface,
+                    "reason": gap.reason,
+                    "observed_at": gap.observed_at.isoformat(),
+                }
+                try:
+                    await self.nats_client.publish(
+                        f"cio.context.gap.{gap.surface}",
+                        json.dumps(gap_payload).encode(),
+                    )
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "Failed to publish context.gap event",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "decision_id": decision_id,
+                            "surface": gap.surface,
+                            "error": str(exc),
+                        },
+                    )
 
     async def _apply_rate_limit_freeze(
         self, strategy_id: str, correlation_id: str, response: httpx.Response

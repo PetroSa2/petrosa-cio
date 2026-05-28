@@ -432,3 +432,279 @@ def test_action_classifier_omits_bundle_when_absent():
         ctx, code_result, ctx.regime, strategy_result
     )
     assert "pre_decision_context" not in user_context
+
+
+# ----------------------------------------------------------------------
+# AC2 — missing-context handling (per-surface availability + gap log)
+# ----------------------------------------------------------------------
+
+
+def test_pre_decision_context_defaults_all_surfaces_available():
+    """AC2.a — happy-path bundle has every flag at True and no gaps."""
+    bundle = _build_bundle()
+    assert bundle.market_state_available is True
+    assert bundle.portfolio_state_available is True
+    assert bundle.evaluator_verdicts_available is True
+    assert bundle.characterization_available is True
+    assert bundle.gaps == []
+
+
+@pytest.mark.asyncio
+async def test_assemble_flags_evaluators_unavailable_when_subscriber_missing(
+    fake_evaluator_subscriber,  # noqa: ARG001 — fixture present for parity
+):
+    """AC2.a + AC2.b — no evaluator subscriber wired flips the flag AND
+    records a structured gap ready for FR12 audit-trail persistence."""
+    builder = _make_builder_with_mocked_http(
+        characterization_status=200,
+        evaluator_subscriber=None,  # explicit missing wiring
+    )
+
+    bundle = await builder.assemble_pre_decision_context(
+        correlation_id="cid-ev-miss",
+        regime=RegimeResult(
+            regime=RegimeEnum.RANGING,
+            regime_confidence=ConfidenceLevel.MEDIUM,
+            volatility_level=VolatilityLevel.MEDIUM,
+            primary_signal="ok",
+            thought_trace="ok",
+        ),
+        market_signals=MarketSignals(
+            signal_summary="m",
+            current_price=1.0,
+            volatility_percentile=0.5,
+            trend_strength=0.0,
+            price_action_character="n",
+        ),
+        portfolio=PortfolioSummary(
+            gross_exposure=0.0,
+            same_asset_pct=0.0,
+            open_positions_count=0,
+        ),
+        env_stats={
+            "global_drawdown_pct": 0.0,
+            "available_capital_usd": 0.0,
+            "open_orders_global": 0,
+            "open_orders_symbol": 0,
+        },
+        strategy_id="strat-ev",
+        strategy_revision_id=None,
+    )
+
+    assert bundle.evaluator_verdicts == {}
+    assert bundle.evaluator_verdicts_available is False
+    # AC2.a — other surfaces stay True; gap is per-surface, not blanket.
+    assert bundle.market_state_available is True
+    assert bundle.portfolio_state_available is True
+    assert bundle.characterization_available is True
+    assert any(
+        g.surface == "evaluators" and "subscriber_not_wired" in g.reason
+        for g in bundle.gaps
+    )
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_assemble_flags_characterization_unavailable_on_endpoint_500(
+    fake_evaluator_subscriber,
+):
+    """AC2.a + AC2.b — data-manager 500 with a revision id flips the
+    flag and records a gap with the HTTP status in the reason."""
+    builder = _make_builder_with_mocked_http(
+        characterization_status=500,
+        evaluator_subscriber=fake_evaluator_subscriber,
+    )
+
+    bundle = await builder.assemble_pre_decision_context(
+        correlation_id="cid-char-500",
+        regime=RegimeResult(
+            regime=RegimeEnum.RANGING,
+            regime_confidence=ConfidenceLevel.MEDIUM,
+            volatility_level=VolatilityLevel.MEDIUM,
+            primary_signal="ok",
+            thought_trace="ok",
+        ),
+        market_signals=MarketSignals(
+            signal_summary="m",
+            current_price=1.0,
+            volatility_percentile=0.5,
+            trend_strength=0.0,
+            price_action_character="n",
+        ),
+        portfolio=PortfolioSummary(
+            gross_exposure=0.0,
+            same_asset_pct=0.0,
+            open_positions_count=0,
+        ),
+        env_stats={
+            "global_drawdown_pct": 0.0,
+            "available_capital_usd": 0.0,
+            "open_orders_global": 0,
+            "open_orders_symbol": 0,
+        },
+        strategy_id="strat-char",
+        strategy_revision_id="srev_aaaaaaaaaaaa_bbbbbbbbbbbb",
+    )
+
+    assert bundle.characterization is None
+    assert bundle.characterization_available is False
+    # legacy "no revision id" path is NOT a gap — make sure the gap
+    # reason actually mentions the endpoint status.
+    char_gaps = [g for g in bundle.gaps if g.surface == "characterization"]
+    assert len(char_gaps) == 1
+    assert "500" in char_gaps[0].reason
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_assemble_no_gap_when_no_revision_id(
+    fake_evaluator_subscriber,
+):
+    """AC2.a edge — legacy (no revision id) is the steady-state path:
+    characterization=None must stay flagged 'available' so consumers do
+    not mistake "intent is unrevisioned" for a missing surface."""
+    builder = _make_builder_with_mocked_http(
+        characterization_status=200,
+        evaluator_subscriber=fake_evaluator_subscriber,
+    )
+
+    bundle = await builder.assemble_pre_decision_context(
+        correlation_id="cid-legacy",
+        regime=RegimeResult(
+            regime=RegimeEnum.RANGING,
+            regime_confidence=ConfidenceLevel.MEDIUM,
+            volatility_level=VolatilityLevel.MEDIUM,
+            primary_signal="ok",
+            thought_trace="ok",
+        ),
+        market_signals=MarketSignals(
+            signal_summary="m",
+            current_price=1.0,
+            volatility_percentile=0.5,
+            trend_strength=0.0,
+            price_action_character="n",
+        ),
+        portfolio=PortfolioSummary(
+            gross_exposure=0.0,
+            same_asset_pct=0.0,
+            open_positions_count=0,
+        ),
+        env_stats={
+            "global_drawdown_pct": 0.0,
+            "available_capital_usd": 0.0,
+            "open_orders_global": 0,
+            "open_orders_symbol": 0,
+        },
+        strategy_id="strat-legacy",
+        strategy_revision_id=None,
+    )
+
+    assert bundle.characterization is None
+    assert bundle.characterization_available is True
+    assert not any(g.surface == "characterization" for g in bundle.gaps)
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_assemble_propagates_caller_availability_map(
+    fake_evaluator_subscriber,
+):
+    """AC2.a — when build() detected market/portfolio fetch failures it
+    passes an availability map; assemble() must surface those flags + the
+    gaps it received without dropping them."""
+    from cio.models import ContextGap
+
+    caller_gaps = [
+        ContextGap(surface="market", reason="fetch_error: simulated 500"),
+        ContextGap(surface="portfolio", reason="fetch_error: timeout"),
+    ]
+    caller_avail = {
+        "market": False,
+        "portfolio": False,
+        "evaluators": True,
+        "characterization": True,
+    }
+
+    builder = _make_builder_with_mocked_http(
+        characterization_status=200,
+        evaluator_subscriber=fake_evaluator_subscriber,
+    )
+
+    bundle = await builder.assemble_pre_decision_context(
+        correlation_id="cid-upstream-fail",
+        regime=RegimeResult(
+            regime=RegimeEnum.RANGING,
+            regime_confidence=ConfidenceLevel.MEDIUM,
+            volatility_level=VolatilityLevel.MEDIUM,
+            primary_signal="error",
+            thought_trace="upstream",
+        ),
+        market_signals=MarketSignals(
+            signal_summary="m",
+            current_price=1.0,
+            volatility_percentile=0.5,
+            trend_strength=0.0,
+            price_action_character="n",
+        ),
+        portfolio=PortfolioSummary(
+            gross_exposure=1.0,
+            same_asset_pct=1.0,
+            open_positions_count=999,
+        ),
+        env_stats={
+            "global_drawdown_pct": 1.0,
+            "available_capital_usd": 0.0,
+            "open_orders_global": 999,
+            "open_orders_symbol": 0,
+        },
+        strategy_id="strat-up",
+        strategy_revision_id=None,
+        gaps=caller_gaps,
+        availability=caller_avail,
+    )
+
+    assert bundle.market_state_available is False
+    assert bundle.portfolio_state_available is False
+    assert bundle.evaluator_verdicts_available is True
+    surfaces = {g.surface for g in bundle.gaps}
+    assert "market" in surfaces
+    assert "portfolio" in surfaces
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_regime_records_gap_on_data_manager_empty():
+    """AC2.b — the existing "200 OK with empty metadata" branch on the
+    Data Manager regime endpoint is a measurable outage from the bundle's
+    perspective; it should produce a `market` gap when collectors are
+    passed in."""
+    from cio.models import ContextGap
+
+    builder = _make_builder_with_mocked_http(
+        characterization_status=200,
+        evaluator_subscriber=None,
+    )
+    # Replace the AsyncMock get with one that returns the
+    # "No regime data" metadata signature.
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "pair": "BTCUSDT",
+        "metric": "regime",
+        "data": None,
+        "metadata": {"message": "No regime data available"},
+    }
+    builder.client.get = AsyncMock(return_value=mock_response)
+
+    gaps: list[ContextGap] = []
+    availability = {"market": True}
+    result = await builder._fetch_regime(
+        "BTCUSDT",
+        "cid-empty",
+        gaps=gaps,
+        availability=availability,
+    )
+    assert result.primary_signal == "data_manager_empty"
+    assert availability["market"] is False
+    assert any(g.surface == "market" for g in gaps)
+    await builder.close()

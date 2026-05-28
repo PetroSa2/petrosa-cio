@@ -199,5 +199,112 @@ class TestEvaluatorVerdicts:
         assert "application/json" in resp.headers["content-type"]
 
 
+# ---------------------------------------------------------------------------
+# P1.4-AC4 (#132) — dashboard surfaces pre_decision_context
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionsRecentPreDecisionContext:
+    def _make_bundle(self):
+        from cio.models import (
+            CharacterizationRef,
+            ContextGap,
+            EvaluatorVerdict,
+            MarketState,
+            PortfolioState,
+            PreDecisionContext,
+        )
+        from cio.models.enums import (
+            ConfidenceLevel,
+            RegimeEnum,
+            VolatilityLevel,
+        )
+
+        return PreDecisionContext(
+            market_state=MarketState(
+                regime=RegimeEnum.RANGING,
+                regime_confidence=ConfidenceLevel.MEDIUM,
+                volatility_level=VolatilityLevel.MEDIUM,
+                current_price=50000.0,
+                primary_signal="dashboard-test",
+            ),
+            portfolio_state=PortfolioState(
+                gross_exposure=0.3,
+                same_asset_pct=0.1,
+                open_positions_count=2,
+                global_drawdown_pct=0.05,
+                available_capital_usd=10000.0,
+                open_orders_global=3,
+                open_orders_symbol=1,
+            ),
+            evaluator_verdicts={
+                "ingest": EvaluatorVerdict(
+                    subsystem="ingest", verdict="healthy", reason="ok"
+                ),
+            },
+            characterization=CharacterizationRef(
+                strategy_id="strat-x",
+                strategy_revision_id="srev_abc123abc123_def456def456",
+            ),
+            evaluator_verdicts_available=False,
+            gaps=[
+                ContextGap(
+                    surface="evaluators",
+                    reason="subscriber_not_wired",
+                ),
+            ],
+        )
+
+    def test_recent_includes_pre_decision_context_when_attached(self):
+        bundle = self._make_bundle()
+        store = DecisionStore()
+        store.record(
+            DecisionRecord(
+                strategy_id="strat-x",
+                action="EXECUTE",
+                reasoning_trace="trace with context",
+                confidence=0.8,
+                timestamp=datetime.now(_UTC) - timedelta(minutes=5),
+                pre_decision_context=bundle,
+            )
+        )
+        client = TestClient(_make_app(decision_store=store))
+        resp = client.get("/api/dashboard/decisions/recent")
+        assert resp.status_code == 200
+        d = resp.json()["decisions"][0]
+        assert "pre_decision_context" in d
+        pdc = d["pre_decision_context"]
+        assert pdc is not None
+        assert pdc["market_state"]["regime"] == "ranging"
+        assert pdc["portfolio_state"]["gross_exposure"] == 0.3
+        # AC2.a — per-surface availability flags survive the dashboard hop.
+        assert pdc["evaluator_verdicts_available"] is False
+        assert pdc["market_state_available"] is True
+        # AC4.a — the gaps list lets the dashboard back-link to FR12 audit events.
+        assert len(pdc["gaps"]) == 1
+        assert pdc["gaps"][0]["surface"] == "evaluators"
+        assert pdc["gaps"][0]["reason"] == "subscriber_not_wired"
+
+    def test_recent_returns_null_pre_decision_context_for_legacy_records(self):
+        store = DecisionStore()
+        store.record(
+            DecisionRecord(
+                strategy_id="legacy-strat",
+                action="EXECUTE",
+                reasoning_trace="historical",
+                confidence=0.7,
+                timestamp=datetime.now(_UTC) - timedelta(minutes=2),
+                # pre_decision_context intentionally omitted to mimic
+                # pre-EPIC-#122 historical entries.
+            )
+        )
+        client = TestClient(_make_app(decision_store=store))
+        resp = client.get("/api/dashboard/decisions/recent")
+        assert resp.status_code == 200
+        d = resp.json()["decisions"][0]
+        assert "pre_decision_context" in d
+        assert d["pre_decision_context"] is None
+
+
 # Suppress pytest collection warning for unused import
 _ = pytest

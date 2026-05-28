@@ -10,6 +10,10 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from cio.models.context import PreDecisionContext
 
 _UTC = timezone.utc  # noqa: UP017
 DEFAULT_MAX_SIZE = 500
@@ -32,6 +36,11 @@ class DecisionRecord:
     # Surfaced so the operator can compare against what the most-recent
     # characterization is bound to (i.e. spot drift at a glance).
     strategy_revision_id: str | None = None
+    # P1.4-AC4 (#132) — structured PreDecisionContext snapshot at the
+    # moment of dispatch. ``None`` on pre-EPIC-#122 historical records
+    # (legacy ring-buffer entries written before this field existed) so
+    # the dashboard surface can render "context not recorded" deterministically.
+    pre_decision_context: PreDecisionContext | None = None
 
 
 class DecisionStore:

@@ -16,6 +16,7 @@ import httpx
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
     CharacterizationRef,
+    ContextGap,
     EvaluatorVerdict,
     MarketSignals,
     MarketState,
@@ -109,9 +110,25 @@ class ContextBuilder:
         strategy_id = payload.get("strategy_id", "unknown")
 
         # 1. Parallelize independent fetches to reduce total latency (max vs sum)
+        # P1.4-AC2 (#132): per-build gap collector — passed to fetches so they
+        # can record "this surface fell back to safe defaults" events without
+        # changing their existing return types (tests still mock _fetch_*
+        # directly). Same per-build availability map keys are read by
+        # assemble_pre_decision_context to set the *_available flags.
+        gaps: list[ContextGap] = []
+        availability: dict[str, bool] = {
+            "market": True,
+            "portfolio": True,
+            "evaluators": True,
+            "characterization": True,
+        }
         fetch_tasks = [
-            self._fetch_regime(symbol, correlation_id),
-            self._fetch_portfolio_and_risk(symbol, correlation_id),
+            self._fetch_regime(
+                symbol, correlation_id, gaps=gaps, availability=availability
+            ),
+            self._fetch_portfolio_and_risk(
+                symbol, correlation_id, gaps=gaps, availability=availability
+            ),
             self._fetch_strategy_data(strategy_id, correlation_id),
         ]
 
@@ -148,6 +165,9 @@ class ContextBuilder:
         # P1.4-AC1 (#131) — assemble the structured PreDecisionContext
         # bundle from the components already fetched above plus the
         # evaluator-subscriber snapshot + a characterization-ref fetch.
+        # P1.4-AC2 (#132) — pass the accumulated gap collector + availability
+        # map so the bundle carries per-surface flags and an audit-trail-ready
+        # gaps list.
         strategy_revision_id = payload.get("strategy_revision_id")
         pre_decision_context = await self.assemble_pre_decision_context(
             correlation_id=correlation_id,
@@ -157,6 +177,8 @@ class ContextBuilder:
             env_stats=env_stats,
             strategy_id=strategy_id,
             strategy_revision_id=strategy_revision_id,
+            gaps=gaps,
+            availability=availability,
         )
 
         return TriggerContext(
@@ -192,6 +214,8 @@ class ContextBuilder:
         env_stats: dict[str, Any],
         strategy_id: str,
         strategy_revision_id: str | None,
+        gaps: list[ContextGap] | None = None,
+        availability: dict[str, bool] | None = None,
     ) -> PreDecisionContext:
         """P1.4-AC1 / FR55-FR58 (#131) — assemble the typed PreDecisionContext.
 
@@ -202,9 +226,13 @@ class ContextBuilder:
         stale-gate at orchestrator.py still owns refusal semantics; this
         method only *observes* what is on record).
 
-        AC2 (missing-context handling), AC3 (prompt-contract enforcement),
-        and AC4 (dashboard exposure) are explicitly deferred to sibling
-        children of EPIC petrosa-cio#122.
+        P1.4-AC2 (#132) — when ``gaps``/``availability`` are provided by
+        ``build()`` they carry the per-surface state captured during the
+        upstream fetches; this method only ADDS to them (it does not reset
+        them). When called directly by tests/orchestration on the
+        already-fetched path, the caller may supply ``availability=None``
+        to keep all surfaces flagged ``True`` and only record evaluator/
+        characterization gaps detected here.
         """
         market_state = MarketState(
             regime=regime.regime,
@@ -223,33 +251,92 @@ class ContextBuilder:
             open_orders_symbol=env_stats.get("open_orders_symbol", 0),
         )
 
-        evaluator_verdicts = self._collect_evaluator_verdicts()
+        local_gaps: list[ContextGap] = gaps if gaps is not None else []
+        evaluator_verdicts = self._collect_evaluator_verdicts(gaps=local_gaps)
         characterization = await self._fetch_characterization_ref(
             strategy_id=strategy_id,
             strategy_revision_id=strategy_revision_id,
             correlation_id=correlation_id,
+            gaps=local_gaps,
         )
+
+        # AC2.a — flag synthesis: when the caller did not pass an availability
+        # map, default each surface to True and only flip on evidence of a gap
+        # surfaced from this method's local fetches (subscriber missing,
+        # characterization 404).
+        avail = (
+            dict(availability)
+            if availability is not None
+            else {
+                "market": True,
+                "portfolio": True,
+                "evaluators": True,
+                "characterization": True,
+            }
+        )
+
+        # Evaluators are unavailable when no subscriber is wired OR snapshot
+        # raised (the gap collector captured the reason). Empty verdicts with
+        # a wired subscriber is *not* a gap — that's the steady-state "no
+        # subsystem reported yet".
+        if self.evaluator_subscriber is None or any(
+            g.surface == "evaluators" for g in local_gaps
+        ):
+            avail["evaluators"] = False
+
+        # Characterization is unavailable only when the caller supplied a
+        # revision id AND the fetch did not surface a ref. The legacy
+        # "no revision id" path keeps available=True with characterization=None,
+        # which mirrors AC1's contract.
+        if strategy_revision_id and characterization is None:
+            avail["characterization"] = False
 
         return PreDecisionContext(
             market_state=market_state,
             portfolio_state=portfolio_state,
             evaluator_verdicts=evaluator_verdicts,
             characterization=characterization,
+            market_state_available=avail.get("market", True),
+            portfolio_state_available=avail.get("portfolio", True),
+            evaluator_verdicts_available=avail.get("evaluators", True),
+            characterization_available=avail.get("characterization", True),
+            gaps=list(local_gaps),
         )
 
-    def _collect_evaluator_verdicts(self) -> dict[str, EvaluatorVerdict]:
+    def _collect_evaluator_verdicts(
+        self, gaps: list[ContextGap] | None = None
+    ) -> dict[str, EvaluatorVerdict]:
         """FR57 — project the evaluator subscriber's snapshot into a typed dict.
 
         Tolerates the legacy "no subscriber wired" case by returning an
         empty dict. The subscriber's snapshot shape is documented at
         ``EvaluatorSubscriber.snapshot``.
+
+        P1.4-AC2 (#132): when the subscriber is missing or ``snapshot()``
+        raises, append a ``ContextGap(surface='evaluators')`` to ``gaps`` so
+        the bundle's availability flag is flipped and the FR12 audit-trail
+        consumer can persist the event.
         """
         sub = self.evaluator_subscriber
         if sub is None:
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="evaluators",
+                        reason="subscriber_not_wired",
+                    )
+                )
             return {}
         try:
             snap = sub.snapshot()
-        except Exception:  # noqa: BLE001 — degrade rather than crash assembly
+        except Exception as exc:  # noqa: BLE001 — degrade rather than crash assembly
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="evaluators",
+                        reason=f"snapshot_error: {exc}",
+                    )
+                )
             return {}
         out: dict[str, EvaluatorVerdict] = {}
         for entry in snap.get("verdicts", []) or []:
@@ -280,6 +367,7 @@ class ContextBuilder:
         strategy_id: str,
         strategy_revision_id: str | None,
         correlation_id: str,
+        gaps: list[ContextGap] | None = None,
     ) -> CharacterizationRef | None:
         """FR58 — return a typed reference to the admitted characterization
         for (strategy_id, strategy_revision_id), or ``None`` when the
@@ -287,6 +375,12 @@ class ContextBuilder:
 
         This is observation-only — refusal on stale revisions is owned by
         the FR53 / P3.4 stale-gate at ``cio/core/characterization_stale_gate.py``.
+
+        P1.4-AC2 (#132): when a revision id WAS supplied but data-manager
+        returns non-200 or the call raises, append a
+        ``ContextGap(surface='characterization')`` so the bundle flag is
+        flipped. Missing revision id is *not* a gap — the legacy intent
+        path is the expected steady-state for unrevisioned strategies.
         """
         if not strategy_revision_id:
             return None
@@ -307,16 +401,45 @@ class ContextBuilder:
                     "error": str(exc),
                 },
             )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="characterization",
+                        reason=f"fetch_error: {exc}",
+                    )
+                )
             return None
         if response.status_code != 200:
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="characterization",
+                        reason=f"endpoint_{response.status_code}",
+                    )
+                )
             return None
         return CharacterizationRef(
             strategy_id=strategy_id,
             strategy_revision_id=strategy_revision_id,
         )
 
-    async def _fetch_regime(self, symbol: str, correlation_id: str) -> RegimeResult:
-        """Fetches and maps regime data from petrosa-data-manager."""
+    async def _fetch_regime(
+        self,
+        symbol: str,
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
+        availability: dict[str, bool] | None = None,
+    ) -> RegimeResult:
+        """Fetches and maps regime data from petrosa-data-manager.
+
+        P1.4-AC2 (#132): when the fetch falls back to the safe default
+        (HTTP error, exception, or Data-Manager-reported empty regime),
+        record a ``ContextGap(surface='market')`` and flip
+        ``availability['market']=False`` if the optional collectors were
+        supplied by ``build()``. Existing test paths that call this method
+        directly (e.g. tests/unit/test_cold_path.py:115) pass no
+        collectors, so the existing return contract is preserved.
+        """
         try:
             url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
             response = await self.client.get(url)
@@ -330,6 +453,15 @@ class ContextBuilder:
                 and "message" in metadata
                 and "No regime data" in metadata["message"]
             ):
+                if gaps is not None:
+                    gaps.append(
+                        ContextGap(
+                            surface="market",
+                            reason=f"data_manager_empty: {metadata['message']}",
+                        )
+                    )
+                if availability is not None:
+                    availability["market"] = False
                 return RegimeResult(
                     regime="choppy",
                     regime_confidence="low",
@@ -344,6 +476,15 @@ class ContextBuilder:
             logger.error(
                 f"Failed to fetch regime: {e}", extra={"correlation_id": correlation_id}
             )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="market",
+                        reason=f"fetch_error: {e}",
+                    )
+                )
+            if availability is not None:
+                availability["market"] = False
             # Return safe default
             return RegimeResult(
                 regime="choppy",
@@ -354,9 +495,21 @@ class ContextBuilder:
             )
 
     async def _fetch_portfolio_and_risk(
-        self, symbol: str, correlation_id: str
+        self,
+        symbol: str,
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
+        availability: dict[str, bool] | None = None,
     ) -> tuple[PortfolioSummary, RiskLimits, dict[str, Any]]:
-        """Fetches portfolio and risk data from tradeengine."""
+        """Fetches portfolio and risk data from tradeengine.
+
+        P1.4-AC2 (#132): when the call falls back to conservative defaults
+        (exception path), record a ``ContextGap(surface='portfolio')`` and
+        flip ``availability['portfolio']=False`` if the optional collectors
+        were supplied. The conservative defaults are still returned so the
+        Code Engine's gross_exposure=1.0 / orders=999 trigger-block path
+        continues to fire — AC2 is record-not-block.
+        """
         try:
             url = f"{self.tradeengine_url}/state?symbol={symbol}"
             response = await self.client.get(url)
@@ -373,6 +526,15 @@ class ContextBuilder:
                 f"Failed to fetch portfolio/risk: {e}",
                 extra={"correlation_id": correlation_id},
             )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="portfolio",
+                        reason=f"fetch_error: {e}",
+                    )
+                )
+            if availability is not None:
+                availability["portfolio"] = False
             # Safe conservative defaults (trigger blocks)
             return (
                 PortfolioSummary(

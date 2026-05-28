@@ -231,6 +231,30 @@ class CharacterizationRef(BaseModel):
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class ContextGap(BaseModel):
+    """P1.4-AC2.b (#132) — one missing-context event recorded at assembly time.
+
+    Carries the operator-visible reason a surface (market / portfolio /
+    evaluators / characterization) was unavailable when the bundle was
+    assembled, so the FR12 audit-trail consumer in `data-manager` can
+    persist it next to the decision_id. ``observed_at`` is the wall-clock
+    moment the gap was detected — not when the underlying outage began.
+    """
+
+    surface: str = Field(
+        ...,
+        description="One of: market | portfolio | evaluators | characterization",
+    )
+    reason: str = Field(
+        ...,
+        description=(
+            "Free-form operator-readable reason "
+            "(e.g. 'subscription dropped', 'endpoint 500', 'timeout')."
+        ),
+    )
+    observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 class PreDecisionContext(BaseModel):
     """FR55-FR58 — the structured bundle every arbitration decision consumes.
 
@@ -247,12 +271,25 @@ class PreDecisionContext(BaseModel):
     in admission flow). Refusal semantics for stale characterizations
     are owned by the FR53 / P3.4 stale-gate (petrosa-cio#130); this
     field only records *what was observed* at decision time.
+
+    P1.4-AC2 (#132): The ``*_available`` flags carry per-surface
+    availability. When a fetch fails the corresponding typed field is
+    populated with the safe-default snapshot the builder already returned
+    on the legacy path, and the flag is flipped to ``False`` so downstream
+    consumers (personas, dashboard, audit-trail) can tell live observation
+    from fallback. ``gaps`` is the structured list of those events for
+    FR12 audit-trail persistence — empty in the all-surfaces-healthy case.
     """
 
     market_state: MarketState
     portfolio_state: PortfolioState
     evaluator_verdicts: dict[str, EvaluatorVerdict] = Field(default_factory=dict)
     characterization: CharacterizationRef | None = None
+    market_state_available: bool = True
+    portfolio_state_available: bool = True
+    evaluator_verdicts_available: bool = True
+    characterization_available: bool = True
+    gaps: list[ContextGap] = Field(default_factory=list)
     assembled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

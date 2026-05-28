@@ -82,6 +82,17 @@ async def get_decisions_recent(
                 # FR53 / P3.4 (#130): refusal taxonomy + revision drift visibility.
                 "rejection_source": r.rejection_source,
                 "strategy_revision_id": r.strategy_revision_id,
+                # P1.4-AC4 (#132): structured PreDecisionContext snapshot.
+                # `None` for pre-EPIC-#122 historical records that predate
+                # the bundle — the dashboard renders "context not recorded"
+                # rather than hiding the row. FR12 gap-event back-link is
+                # carried inside the bundle (`gaps` list) so the operator
+                # can pivot to the audit-trail consumer.
+                "pre_decision_context": (
+                    r.pre_decision_context.model_dump(mode="json")
+                    if r.pre_decision_context is not None
+                    else None
+                ),
             }
             for r in records
         ],

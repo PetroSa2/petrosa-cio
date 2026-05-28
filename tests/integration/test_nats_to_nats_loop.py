@@ -144,37 +144,68 @@ async def test_full_nats_to_nats_loop():
             await listener._handle_message(mock_msg)
 
             # 5. Assertions
-            # Verify NATS publish was called THREE times:
-            #   1) Legacy signal      (signals.trading.<strategy_id>)
-            #   2) Modern decision    (trade.execute.<strategy_id>)
-            #   3) Decision audit copy for the CIO health evaluator
-            #      (cio.decision.audit.<action>, added in P7.1 / #610)
-            assert mock_nc.publish.call_count == 3
+            # Verify NATS publish call set. P1.4-AC2.b (#132) added an extra
+            # `cio.context.gap.evaluators` audit event when ContextBuilder has
+            # no evaluator subscriber wired (the integration harness does not
+            # wire one — mirrors today's main.py path until that wiring lands).
+            #   1) Legacy signal       (signals.trading.<strategy_id>)
+            #   2) Modern decision     (trade.execute.<strategy_id>)
+            #   3) Decision audit copy (cio.decision.audit.<action>, P7.1 / #610)
+            #   4) Context-gap audit   (cio.context.gap.evaluators, #132)
+            published_subjects = [c.args[0] for c in mock_nc.publish.call_args_list]
+            assert "signals.trading.momentum_v1" in published_subjects
+            assert "trade.execute.momentum_v1" in published_subjects
+            assert "cio.decision.audit.execute" in published_subjects
+            assert "cio.context.gap.evaluators" in published_subjects
+            assert mock_nc.publish.call_count == 4
             assert orchestrator.run.await_count == 1
 
             # Check Legacy Call (signals.trading.<strategy_id> — matches tradeengine signals.trading.>)
-            legacy_call = mock_nc.publish.call_args_list[0]
-            assert legacy_call[0][0] == "signals.trading.momentum_v1"
-            legacy_payload = json.loads(legacy_call[0][1].decode())
+            legacy_call = next(
+                c
+                for c in mock_nc.publish.call_args_list
+                if c.args[0] == "signals.trading.momentum_v1"
+            )
+            legacy_payload = json.loads(legacy_call.args[1].decode())
             assert legacy_payload["action"] == "buy"
             # Verify quantity fix: size / price.
             # CodeEngine size ~ $5000 (capped), price 50000 -> qty 0.1
             assert legacy_payload["quantity"] == pytest.approx(0.1)
 
             # Check Modern Call (trade.execute.momentum_v1)
-            modern_call = mock_nc.publish.call_args_list[1]
-            assert modern_call[0][0] == "trade.execute.momentum_v1"
-            modern_payload = json.loads(modern_call[0][1].decode())
+            modern_call = next(
+                c
+                for c in mock_nc.publish.call_args_list
+                if c.args[0] == "trade.execute.momentum_v1"
+            )
+            modern_payload = json.loads(modern_call.args[1].decode())
             assert modern_payload["action"] == "execute"
             assert modern_payload["computed_position_size_usd"] == pytest.approx(5000.0)
 
             # Check Audit-Copy Call (cio.decision.audit.execute)
-            audit_call = mock_nc.publish.call_args_list[2]
-            assert audit_call[0][0] == "cio.decision.audit.execute"
-            audit_payload = json.loads(audit_call[0][1].decode())
+            audit_call = next(
+                c
+                for c in mock_nc.publish.call_args_list
+                if c.args[0] == "cio.decision.audit.execute"
+            )
+            audit_payload = json.loads(audit_call.args[1].decode())
             assert audit_payload["action"] == "execute"
             assert audit_payload["strategy_id"] == "momentum_v1"
             assert audit_payload["correlation_id"] == "test-loop-id"
+
+            # P1.4-AC2.b (#132): the gap audit event MUST carry the
+            # decision_id + structured surface so data-manager can persist it.
+            gap_call = next(
+                c
+                for c in mock_nc.publish.call_args_list
+                if c.args[0].startswith("cio.context.gap.")
+            )
+            gap_payload = json.loads(gap_call.args[1].decode())
+            assert gap_payload["surface"] == "evaluators"
+            assert gap_payload["strategy_id"] == "momentum_v1"
+            assert gap_payload["correlation_id"] == "test-loop-id"
+            assert gap_payload["reason"]  # populated, free-form string
+            assert "observed_at" in gap_payload
 
             # Verify Vector Upsert (Audit Path)
             mock_vc.upsert.assert_called_once()
