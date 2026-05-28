@@ -27,6 +27,18 @@ system_prompt: |
 
   The Action Classifier receives synthesized signals from the Code Engine and both personas and outputs a single final action decision.
 
+  PRE-DECISION CONTEXT SURFACES (P1.4-AC3 / FR55-FR58):
+    The user payload's `pre_decision_context` carries four required surfaces.
+    Use them to ground your decision; a prompt revision that drops any
+    placeholder below fails the prompt-context contract.
+      - {market_state}        — regime + confidence + sub-signals (FR55)
+      - {portfolio_state}     — open positions + PnL trend + risk limits (FR56)
+      - {evaluator_verdicts}  — per-subsystem health / readiness (FR57)
+      - {characterization}    — strategy edge envelope + sensitivities (FR58)
+    Treat each surface as authoritative input, not narrative; missing
+    surfaces are flagged via the `*_available` booleans and the audit-trail
+    gap fields, never invented.
+
   ACTION ENUMS: [execute, skip, modify_params, pause_strategy, escalate, block]
 
   Output Schema:
