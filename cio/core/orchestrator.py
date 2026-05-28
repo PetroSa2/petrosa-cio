@@ -4,6 +4,7 @@ import time
 
 from cio.clients.factory import ClientFactory
 from cio.core.engine import CodeEngine
+from cio.core.spend_tracker import LlmSpendTracker
 from cio.models import (
     SAFE_DECISION_RESULT,
     ActivationRecommendation,
@@ -45,6 +46,8 @@ class Orchestrator:
             logger.warning(
                 "⚠️ NURSE_USE_LLM_REASONING is disabled. CIO will operate in deterministic bypass mode."
             )
+        # FR63: track whether ceiling triggered the bypass so period-reset can restore it.
+        self._ceiling_triggered_bypass = False
 
     async def run(self, context: TriggerContext) -> DecisionResult:
         """
@@ -200,6 +203,9 @@ class Orchestrator:
                 context, code_result, regime, strategy
             )
 
+            # FR63 / AC4 — ceiling check after each LLM decision cycle.
+            await self._check_spend_ceiling(context.correlation_id)
+
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             logger.info(
                 f"✅ REASONING LOOP COMPLETE | Action: {decision.action} | Latency: {latency_ms}ms",
@@ -219,3 +225,52 @@ class Orchestrator:
                 extra={"correlation_id": context.correlation_id},
             )
             return SAFE_DECISION_RESULT
+
+    async def _check_spend_ceiling(self, correlation_id: str) -> None:
+        """FR63 / AC4: check LLM spend ceiling; transition to deterministic bypass on breach.
+
+        On period roll (new UTC day), restore LLM reasoning if the ceiling previously
+        triggered the bypass (AC5 recovery path).
+        """
+        tracker = LlmSpendTracker.instance()
+        breached, total_cost, projected = tracker.check_ceiling()
+
+        if not breached and self._ceiling_triggered_bypass:
+            # New period: projected spend reset below ceiling — restore LLM mode.
+            self._ceiling_triggered_bypass = False
+            self.use_llm_reasoning = True
+            logger.info(
+                "FR63: New UTC period — LLM reasoning re-enabled after ceiling reset.",
+                extra={"total_cost_usd": total_cost, "correlation_id": correlation_id},
+            )
+            return
+
+        if breached and self.use_llm_reasoning:
+            # Transition to deterministic fallback for the rest of the period.
+            self.use_llm_reasoning = False
+            self._ceiling_triggered_bypass = True
+            logger.warning(
+                "FR63: LLM spend ceiling breached — switching to deterministic bypass (FR13).",
+                extra={
+                    "projected_daily_usd": projected,
+                    "ceiling_usd": tracker._current.ceiling_usd_per_day,
+                    "correlation_id": correlation_id,
+                },
+            )
+            try:
+                from cio.core.alerting.manager import AlertManager
+
+                await AlertManager.dispatch_critical_alert(
+                    "LLM daily spend ceiling breached — CIO switched to deterministic-fallback mode.",
+                    context={
+                        "alert_type": "RED",
+                        "correlation_id": correlation_id,
+                        "projected_daily_usd": projected,
+                        "ceiling_usd": tracker._current.ceiling_usd_per_day,
+                        "fr": "FR63+FR66",
+                    },
+                )
+            except Exception as alert_err:
+                logger.error(
+                    "FR63: Failed to dispatch ceiling-breach alert: %s", alert_err
+                )

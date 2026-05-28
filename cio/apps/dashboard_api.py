@@ -85,6 +85,19 @@ async def get_decisions_recent(
     }
 
 
+@router.get("/llm-spend")
+async def get_llm_spend() -> dict:
+    """Current-period LLM spend bucketed by CIO decision type (FR63).
+
+    Returns the spend accumulated since midnight UTC, projected daily total,
+    per-day ceiling, and distance-to-ceiling so the operator dashboard SPA
+    can render the LlmSpendPane (AC1/AC2 of petrosa-data-manager#170).
+    """
+    from cio.core.spend_tracker import LlmSpendTracker
+
+    return LlmSpendTracker.instance().period_snapshot()
+
+
 @router.get("/evaluator/verdicts")
 async def get_evaluator_verdicts(
     request: Request,
