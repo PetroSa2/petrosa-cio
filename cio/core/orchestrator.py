@@ -3,10 +3,12 @@ import os
 import time
 
 from cio.clients.factory import ClientFactory
+from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.engine import CodeEngine
 from cio.core.spend_tracker import LlmSpendTracker
 from cio.models import (
     SAFE_DECISION_RESULT,
+    ActionType,
     ActivationRecommendation,
     ConfidenceLevel,
     DecisionResult,
@@ -16,8 +18,10 @@ from cio.models import (
     RegimeResult,
     StrategyResult,
     TriggerContext,
+    TriggerType,
     VolatilityLevel,
 )
+from cio.models.enums import RejectionSource
 from cio.personas.action_classifier import ActionClassifier
 from cio.personas.regime_analyst import RegimeAnalyst
 from cio.personas.strategy_assessor import StrategyAssessor
@@ -67,6 +71,56 @@ class Orchestrator:
                 "use_llm_reasoning": self.use_llm_reasoning,
             },
         )
+
+        # FR53 / P3.4 (#130) — stale-characterization refusal gate. Only runs
+        # on trade-intent triggers that actually carry a revision id; legacy
+        # intents (no revision id) and non-intent triggers pass through.
+        if (
+            context.trigger_type == TriggerType.TRADE_INTENT
+            and context.strategy_revision_id
+        ):
+            try:
+                stale = await is_characterization_stale(
+                    strategy_id=context.strategy_id,
+                    strategy_revision_id=context.strategy_revision_id,
+                )
+            except Exception as gate_exc:  # noqa: BLE001 — fail-open, never crash
+                logger.warning(
+                    "stale-characterization gate raised — failing open",
+                    extra={
+                        "correlation_id": context.correlation_id,
+                        "error": str(gate_exc),
+                    },
+                )
+                stale = False
+            if stale:
+                reason = (
+                    f"stale_characterization: no Characterization for "
+                    f"strategy_id={context.strategy_id} "
+                    f"strategy_revision_id={context.strategy_revision_id}"
+                )
+                logger.warning(
+                    "🛑 REJECTING INTENT: stale characterization",
+                    extra={
+                        "correlation_id": context.correlation_id,
+                        "strategy_id": context.strategy_id,
+                        "strategy_revision_id": context.strategy_revision_id,
+                    },
+                )
+                return DecisionResult(
+                    hard_blocked=True,
+                    hard_block_reason=reason,
+                    ev_passes=False,
+                    cost_viable=False,
+                    regime_confidence=ConfidenceLevel.LOW,
+                    regime_fit=RegimeFit.NEUTRAL,
+                    strategy_health=HealthStatus.HEALTHY,
+                    activation_recommendation=ActivationRecommendation.PAUSE,
+                    action=ActionType.REJECT,
+                    justification=reason,
+                    thought_trace="STALE_CHARACTERIZATION",
+                    rejection_source=RejectionSource.STALE_CHARACTERIZATION,
+                )
 
         try:
             # Placeholder results for deterministic bypass (Ticket #334/337)

@@ -108,6 +108,18 @@ class ActionType(StrEnum):
     RETIRE = "retire"
 
 
+class RejectionSource(StrEnum):
+    """FR53 / P3.4 (#130) — structured *why* for a CIO refusal.
+
+    `ActionType` carries *what* the CIO decided (REJECT / FAIL_SAFE / …);
+    `RejectionSource` carries *why*. Persisted on the audit trail (FR12) so
+    operator dashboards and post-mortems can group refusals by reason without
+    parsing free-text `hard_block_reason` strings.
+    """
+
+    STALE_CHARACTERIZATION = "stale_characterization"
+
+
 class TriggerType(StrEnum):
     """Types of events that trigger the CIO reasoning loop."""
 

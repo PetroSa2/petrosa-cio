@@ -13,6 +13,14 @@ from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
 from cio.output.translator import TradeEngineTranslator
 
+try:
+    from petrosa_otel import inject_trace_context as _inject_trace_context
+
+    _CIO_NATS_INJECT = True
+except ImportError:
+    _CIO_NATS_INJECT = False
+    _inject_trace_context = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -224,6 +232,8 @@ class OutputRouter:
             legacy_subject = f"{base_signals}.{strategy_id}"
             legacy_data = TradeEngineTranslator.to_legacy_signal(context, decision)
             if legacy_data:
+                if _CIO_NATS_INJECT and _inject_trace_context is not None:
+                    legacy_data = _inject_trace_context(legacy_data)
                 dispatch_tasks_data.append(
                     (legacy_subject, json.dumps(legacy_data).encode())
                 )
@@ -534,6 +544,15 @@ class OutputRouter:
         # Record in the dashboard decision store (#654).
         if self.decision_store is not None:
             _confidence_map = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}
+            # FR53 / P3.4 (#130): surface structured rejection_source +
+            # strategy_revision_id so the operator dashboard can show "why" +
+            # which revision the intent claimed vs the one characterizations
+            # are bound to.
+            rejection_source_value = (
+                decision.rejection_source.value
+                if decision.rejection_source is not None
+                else None
+            )
             self.decision_store.record(
                 DecisionRecord(
                     strategy_id=strategy_id,
@@ -544,6 +563,8 @@ class OutputRouter:
                     confidence=_confidence_map.get(
                         getattr(decision.regime_confidence, "value", "").upper(), 0.5
                     ),
+                    rejection_source=rejection_source_value,
+                    strategy_revision_id=getattr(context, "strategy_revision_id", None),
                 )
             )
 

@@ -79,6 +79,9 @@ async def get_decisions_recent(
                 "reasoning_trace": r.reasoning_trace,
                 "confidence": r.confidence,
                 "timestamp": r.timestamp.isoformat(),
+                # FR53 / P3.4 (#130): refusal taxonomy + revision drift visibility.
+                "rejection_source": r.rejection_source,
+                "strategy_revision_id": r.strategy_revision_id,
             }
             for r in records
         ],

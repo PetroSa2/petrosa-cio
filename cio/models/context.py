@@ -79,6 +79,10 @@ class TriggerContext(BaseModel):
 
     # Strategy Context
     strategy_id: str
+    # FR53 / P3.4 (#130): content-addressable strategy revision the intent
+    # claims to apply to. None ⇒ legacy intent (pre-P3.4) — refusal gate
+    # skips silently rather than rejecting every legacy producer.
+    strategy_revision_id: str | None = None
     strategy_stats: StrategyStats
     strategy_defaults: StrategyDefaults
 
