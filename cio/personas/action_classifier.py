@@ -107,7 +107,7 @@ class ActionClassifier:
         """
         Compresses input into the minimal schema required by the prompt.
         """
-        return {
+        payload: dict[str, Any] = {
             "strategy_id": context.strategy_id,
             "regime": regime_result.regime.value if regime_result.regime else None,
             "regime_confidence": (
@@ -131,6 +131,15 @@ class ActionClassifier:
             "risk_warnings": code_result.risk_warnings,
             "historical_context": context.historical_context,
         }
+        # P1.4-AC1.c (#131) — surface the typed PreDecisionContext bundle
+        # to the arbitration prompt. AC3 (separate story) tightens the
+        # prompt contract against this shape; here we only ensure the
+        # bundle is present and serializable.
+        if context.pre_decision_context is not None:
+            payload["pre_decision_context"] = context.pre_decision_context.model_dump(
+                mode="json"
+            )
+        return payload
 
     def _load_system_prompt(self) -> str:
         """

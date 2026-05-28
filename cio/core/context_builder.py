@@ -1,15 +1,28 @@
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import Any
+
+try:
+    from datetime import UTC
+except ImportError:  # pragma: no cover — py310 compatibility
+    from datetime import timezone
+
+    UTC = timezone.utc  # noqa: UP017
 
 import httpx
 
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
+    CharacterizationRef,
+    EvaluatorVerdict,
     MarketSignals,
+    MarketState,
     PnlTrend,
+    PortfolioState,
     PortfolioSummary,
+    PreDecisionContext,
     RegimeAPIResponse,
     RegimeResult,
     RiskLimits,
@@ -41,10 +54,17 @@ class ContextBuilder:
         data_manager_url: str,
         tradeengine_url: str,
         vector_client: VectorClientProtocol | None = None,
+        evaluator_subscriber: Any | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
         self.vector_client = vector_client
+        # P1.4-AC1 (#131): wired in by main.py at startup so the
+        # PreDecisionContext bundle can read live evaluator verdicts
+        # without coupling to NATS in this layer. ``None`` is the legacy
+        # path — the bundle is then assembled with an empty verdicts
+        # dict and downstream stories (122.2) handle the fallback.
+        self.evaluator_subscriber = evaluator_subscriber
         token = os.getenv("PETROSA_INTERNAL_TOKEN", "")
         if not token:
             logger.warning(
@@ -116,6 +136,29 @@ class ContextBuilder:
         # Assemble TriggerContext
         # Pass decision_id only when provided; TriggerContext.default_factory generates one otherwise
         extra = {"decision_id": decision_id} if decision_id is not None else {}
+
+        market_signals = MarketSignals(
+            signal_summary=payload.get("signal_summary", "Manual trigger"),
+            current_price=payload.get("current_price") or payload.get("price") or 0.0,
+            volatility_percentile=payload.get("volatility_percentile", 0.5),
+            trend_strength=payload.get("trend_strength", 0.0),
+            price_action_character=payload.get("price_action_character", "Neutral"),
+        )
+
+        # P1.4-AC1 (#131) — assemble the structured PreDecisionContext
+        # bundle from the components already fetched above plus the
+        # evaluator-subscriber snapshot + a characterization-ref fetch.
+        strategy_revision_id = payload.get("strategy_revision_id")
+        pre_decision_context = await self.assemble_pre_decision_context(
+            correlation_id=correlation_id,
+            regime=regime,
+            market_signals=market_signals,
+            portfolio=portfolio,
+            env_stats=env_stats,
+            strategy_id=strategy_id,
+            strategy_revision_id=strategy_revision_id,
+        )
+
         return TriggerContext(
             correlation_id=correlation_id,
             source_subject=source_subject,
@@ -124,16 +167,9 @@ class ContextBuilder:
             trigger_payload=payload,
             regime=regime,
             volatility_level=regime.volatility_level,
-            market_signals=MarketSignals(
-                signal_summary=payload.get("signal_summary", "Manual trigger"),
-                current_price=payload.get("current_price")
-                or payload.get("price")
-                or 0.0,
-                volatility_percentile=payload.get("volatility_percentile", 0.5),
-                trend_strength=payload.get("trend_strength", 0.0),
-                price_action_character=payload.get("price_action_character", "Neutral"),
-            ),
+            market_signals=market_signals,
             strategy_id=strategy_id,
+            strategy_revision_id=strategy_revision_id,
             strategy_stats=stats,
             strategy_defaults=defaults,
             global_drawdown_pct=env_stats.get("global_drawdown_pct", 0.0),
@@ -143,6 +179,140 @@ class ContextBuilder:
             portfolio=portfolio,
             risk_limits=risk,
             historical_context=historical_context,
+            pre_decision_context=pre_decision_context,
+        )
+
+    async def assemble_pre_decision_context(
+        self,
+        *,
+        correlation_id: str,
+        regime: RegimeResult,
+        market_signals: MarketSignals,
+        portfolio: PortfolioSummary,
+        env_stats: dict[str, Any],
+        strategy_id: str,
+        strategy_revision_id: str | None,
+    ) -> PreDecisionContext:
+        """P1.4-AC1 / FR55-FR58 (#131) — assemble the typed PreDecisionContext.
+
+        Reuses subsystem fetches already issued during ``build()`` so the
+        bundle does not lengthen the cold path; the only extra call is the
+        characterization-ref probe, which is bounded by a short timeout
+        and degrades to ``characterization=None`` on any failure (the
+        stale-gate at orchestrator.py still owns refusal semantics; this
+        method only *observes* what is on record).
+
+        AC2 (missing-context handling), AC3 (prompt-contract enforcement),
+        and AC4 (dashboard exposure) are explicitly deferred to sibling
+        children of EPIC petrosa-cio#122.
+        """
+        market_state = MarketState(
+            regime=regime.regime,
+            regime_confidence=regime.regime_confidence,
+            volatility_level=regime.volatility_level,
+            current_price=market_signals.current_price,
+            primary_signal=regime.primary_signal,
+        )
+        portfolio_state = PortfolioState(
+            gross_exposure=portfolio.gross_exposure,
+            same_asset_pct=portfolio.same_asset_pct,
+            open_positions_count=portfolio.open_positions_count,
+            global_drawdown_pct=env_stats.get("global_drawdown_pct", 0.0),
+            available_capital_usd=env_stats.get("available_capital_usd", 0.0),
+            open_orders_global=env_stats.get("open_orders_global", 0),
+            open_orders_symbol=env_stats.get("open_orders_symbol", 0),
+        )
+
+        evaluator_verdicts = self._collect_evaluator_verdicts()
+        characterization = await self._fetch_characterization_ref(
+            strategy_id=strategy_id,
+            strategy_revision_id=strategy_revision_id,
+            correlation_id=correlation_id,
+        )
+
+        return PreDecisionContext(
+            market_state=market_state,
+            portfolio_state=portfolio_state,
+            evaluator_verdicts=evaluator_verdicts,
+            characterization=characterization,
+        )
+
+    def _collect_evaluator_verdicts(self) -> dict[str, EvaluatorVerdict]:
+        """FR57 — project the evaluator subscriber's snapshot into a typed dict.
+
+        Tolerates the legacy "no subscriber wired" case by returning an
+        empty dict. The subscriber's snapshot shape is documented at
+        ``EvaluatorSubscriber.snapshot``.
+        """
+        sub = self.evaluator_subscriber
+        if sub is None:
+            return {}
+        try:
+            snap = sub.snapshot()
+        except Exception:  # noqa: BLE001 — degrade rather than crash assembly
+            return {}
+        out: dict[str, EvaluatorVerdict] = {}
+        for entry in snap.get("verdicts", []) or []:
+            subsystem = entry.get("subsystem")
+            verdict = entry.get("verdict")
+            if not subsystem or not verdict:
+                continue
+            observed_raw = entry.get("observed_at")
+            try:
+                observed_at = (
+                    datetime.fromisoformat(observed_raw)
+                    if isinstance(observed_raw, str)
+                    else datetime.now(UTC)
+                )
+            except ValueError:
+                observed_at = datetime.now(UTC)
+            out[subsystem] = EvaluatorVerdict(
+                subsystem=subsystem,
+                verdict=verdict,
+                reason=entry.get("reason") or "",
+                observed_at=observed_at,
+            )
+        return out
+
+    async def _fetch_characterization_ref(
+        self,
+        *,
+        strategy_id: str,
+        strategy_revision_id: str | None,
+        correlation_id: str,
+    ) -> CharacterizationRef | None:
+        """FR58 — return a typed reference to the admitted characterization
+        for (strategy_id, strategy_revision_id), or ``None`` when the
+        intent does not carry a revision id or data-manager has no record.
+
+        This is observation-only — refusal on stale revisions is owned by
+        the FR53 / P3.4 stale-gate at ``cio/core/characterization_stale_gate.py``.
+        """
+        if not strategy_revision_id:
+            return None
+        url = f"{self.data_manager_url}/api/v1/characterizations"
+        params = {
+            "strategy_id": strategy_id,
+            "strategy_revision_id": strategy_revision_id,
+        }
+        try:
+            response = await self.client.get(url, params=params)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "PreDecisionContext: characterization fetch failed — recording None",
+                extra={
+                    "correlation_id": correlation_id,
+                    "strategy_id": strategy_id,
+                    "strategy_revision_id": strategy_revision_id,
+                    "error": str(exc),
+                },
+            )
+            return None
+        if response.status_code != 200:
+            return None
+        return CharacterizationRef(
+            strategy_id=strategy_id,
+            strategy_revision_id=strategy_revision_id,
         )
 
     async def _fetch_regime(self, symbol: str, correlation_id: str) -> RegimeResult:
