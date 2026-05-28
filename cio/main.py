@@ -100,7 +100,36 @@ async def readiness():
     return {"status": "degraded", "nats": "disconnected"}
 
 
+def _enforce_prompt_context_contract() -> None:
+    """Runtime gate (P1.4-AC3 / FR55-FR58).
+
+    Loads the active reasoning prompt template and validates it against
+    :data:`cio.prompts.context_contract.REQUIRED_CONTEXT_SURFACES`. A
+    failure raises and prevents the service from coming up, mirroring the
+    CI gate in ``tests/unit/test_prompt_contract.py``.
+    """
+    import os as _os
+
+    import yaml as _yaml
+
+    from cio.prompts.context_contract import validate_prompt
+
+    yaml_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        "prompts",
+        "action_classifier_v1.yaml",
+    )
+    with open(yaml_path) as fh:
+        data = _yaml.safe_load(fh) or {}
+    active_prompt_template = data.get("system_prompt") or ""
+    validate_prompt(active_prompt_template)
+    logger.info("Prompt-context contract validated for action_classifier_v1.yaml")
+
+
 async def main():
+    # 0. Enforce prompt-context contract before any service wiring (P1.4-AC3).
+    _enforce_prompt_context_contract()
+
     # 1. Setup OpenTelemetry
     if (
         os.getenv("ENABLE_OTEL", "true").lower() in ("true", "1", "yes")
