@@ -82,13 +82,28 @@ async def test_governance_action_publishes_on_dedicated_subject(
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
-    # Governance dispatch + decision audit copy (#610 P7.1).
-    assert mock_nc.publish.call_count == 2
+    # Governance dispatch + decision audit copy (#610 P7.1). VETO also
+    # emits the FR66 alert (#139, P8-AC2b) so its call count is 3; the
+    # non-alert governance actions stay at 2.
+    is_fr66_alert_action = action.value.lower() in {
+        "veto",
+        "demote",
+        "retire",
+        "exit_now",
+    }
+    expected_count = 3 if is_fr66_alert_action else 2
+    assert mock_nc.publish.call_count == expected_count
     calls = {c.args[0]: c.args[1] for c in mock_nc.publish.call_args_list}
     governance_subject = f"{expected_subject_prefix}.{strategy_id}"
     audit_subject = f"cio.decision.audit.{action.value}"
     assert governance_subject in calls
     assert audit_subject in calls
+    if is_fr66_alert_action:
+        fr66_subject = f"alerts.cio.{action.value.lower()}.{strategy_id}"
+        assert fr66_subject in calls
+        fr66_payload = json.loads(calls[fr66_subject].decode())
+        assert fr66_payload["category"] == "cio_governance_action"
+        assert fr66_payload["severity"] == "critical"
 
     payload = json.loads(calls[governance_subject].decode())
     assert payload["action"] == action.value

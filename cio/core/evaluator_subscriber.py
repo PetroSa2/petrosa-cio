@@ -34,6 +34,12 @@ except ImportError:  # pragma: no cover — py310 compatibility
 if TYPE_CHECKING:
     from nats.aio.client import Client as NATS
 
+from cio.core.alerting.fr66_alerts import (
+    build_evaluator_unhealthy_alert,
+    evaluator_unhealthy_subject,
+    publish_fr66_alert,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -194,6 +200,23 @@ class EvaluatorSubscriber:
                         verdict=verdict,
                         reason=reason,
                     )
+                )
+
+            # P8-AC2a (#139): emit `alerts.evaluator.unhealthy.<subsystem>` on
+            # any transition INTO unhealthy. Resume (unhealthy → healthy) is
+            # surfaced via the existing audit-trail row above; the alert
+            # family is specifically for "an evaluator went bad just now".
+            if verdict == UNHEALTHY and prev_verdict != UNHEALTHY:
+                payload = build_evaluator_unhealthy_alert(
+                    subsystem=subsystem,
+                    reason=reason,
+                    previous_verdict=prev_verdict,
+                    observed_at=now,
+                )
+                await publish_fr66_alert(
+                    self._nc,
+                    subject=evaluator_unhealthy_subject(subsystem),
+                    payload=payload,
                 )
 
     def is_paused(self, subsystem: str) -> bool:
