@@ -118,6 +118,11 @@ class RejectionSource(StrEnum):
     """
 
     STALE_CHARACTERIZATION = "stale_characterization"
+    # P1.5-AC5 (#138) — admission would push Σ(position_size × leverage) /
+    # equity above `CIO_PORTFOLIO_LEVERAGE_CEILING`. Distinct from
+    # `STALE_CHARACTERIZATION` because the breach is global (cross-strategy)
+    # rather than per-strategy data freshness.
+    AGGREGATE_LEVERAGE_CEILING = "aggregate_leverage_ceiling"
 
 
 class TriggerType(StrEnum):

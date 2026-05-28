@@ -5,6 +5,9 @@ import time
 from cio.clients.factory import ClientFactory
 from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.engine import CodeEngine
+from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.portfolio_tracker import PortfolioTracker
+from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
 from cio.core.spend_tracker import LlmSpendTracker
 from cio.models import (
     SAFE_DECISION_RESULT,
@@ -35,12 +38,26 @@ class Orchestrator:
     Coordinates the Reasoning Loop, Code Engine, and Persona calls.
     """
 
-    def __init__(self, llm_client=None, cache=None):
+    def __init__(
+        self,
+        llm_client=None,
+        cache=None,
+        portfolio_tracker: PortfolioTracker | None = None,
+    ):
         self.client = llm_client or ClientFactory.create()
         self.cache = cache
         self.regime_analyst = RegimeAnalyst(self.client)
         self.strategy_assessor = StrategyAssessor(self.client)
         self.action_classifier = ActionClassifier(self.client)
+        # P1.5-AC5 (#138) — module singleton by default so a default-
+        # constructed Orchestrator participates in the same aggregate
+        # ledger as the rest of the process. Tests inject a fresh
+        # tracker to isolate state.
+        self.portfolio_tracker = (
+            portfolio_tracker
+            if portfolio_tracker is not None
+            else _default_portfolio_tracker
+        )
 
         # Read governance flags from environment (Ticket #334/337)
         self.use_llm_reasoning = (
@@ -159,6 +176,83 @@ class Orchestrator:
                 engine_context = context
 
             code_result = CodeEngine.run(engine_context)
+
+            # P1.5-AC5 (#138) — portfolio aggregate leverage ceiling. Runs
+            # AFTER the code engine (so we know kelly_position_usd) but
+            # BEFORE the persona LLM work (so a guaranteed-REJECT doesn't
+            # burn LLM spend). Hard-blocks fall through this gate — the
+            # block flow below already short-circuits to the action
+            # classifier with the existing reason.
+            if not code_result.hard_blocked:
+                new_position_size_usd = float(code_result.kelly_position_usd or 0.0)
+                if new_position_size_usd > 0:
+                    leverage_decision = arbitrate_leverage(
+                        recommended_leverage=getattr(
+                            context, "recommended_leverage", None
+                        ),
+                        strategy_envelope=getattr(
+                            context, "strategy_leverage_envelope", None
+                        ),
+                    )
+                    equity = float(context.available_capital_usd or 0.0)
+                    ceiling_check = await self.portfolio_tracker.would_breach_ceiling(
+                        new_position_size_usd=new_position_size_usd,
+                        new_leverage=leverage_decision.decided_leverage,
+                        equity=equity,
+                    )
+                    logger.info(
+                        "portfolio_ceiling check: %s",
+                        ceiling_check.reason,
+                        extra={"correlation_id": context.correlation_id},
+                    )
+                    if ceiling_check.would_breach:
+                        reason = (
+                            "AGGREGATE_LEVERAGE_CEILING: admission rejected. "
+                            f"current={ceiling_check.current_aggregate:.4f}, "
+                            f"projected={ceiling_check.projected_aggregate:.4f}, "
+                            f"ceiling={ceiling_check.ceiling:.4f}, "
+                            f"new_size_usd={new_position_size_usd}, "
+                            f"new_leverage={leverage_decision.decided_leverage}"
+                        )
+                        logger.warning(
+                            "🛑 REJECTING INTENT: aggregate leverage ceiling",
+                            extra={
+                                "correlation_id": context.correlation_id,
+                                "strategy_id": context.strategy_id,
+                                "current_aggregate": (ceiling_check.current_aggregate),
+                                "projected_aggregate": (
+                                    ceiling_check.projected_aggregate
+                                ),
+                                "ceiling": ceiling_check.ceiling,
+                            },
+                        )
+                        return DecisionResult(
+                            hard_blocked=True,
+                            hard_block_reason=reason,
+                            ev_passes=False,
+                            cost_viable=False,
+                            regime_confidence=ConfidenceLevel.LOW,
+                            regime_fit=RegimeFit.NEUTRAL,
+                            strategy_health=HealthStatus.HEALTHY,
+                            activation_recommendation=(ActivationRecommendation.PAUSE),
+                            action=ActionType.REJECT,
+                            justification=reason,
+                            thought_trace="AGGREGATE_LEVERAGE_CEILING",
+                            rejection_source=(
+                                RejectionSource.AGGREGATE_LEVERAGE_CEILING
+                            ),
+                        )
+                    # Within ceiling — record the admission so subsequent
+                    # checks include this position. Recorded here (not in
+                    # router) so the ledger stays consistent even if a
+                    # later step in the persona pipeline aborts: the
+                    # admission decision *has* been committed by the
+                    # time we move on.
+                    await self.portfolio_tracker.record_admit(
+                        strategy_id=context.strategy_id,
+                        position_size_usd=new_position_size_usd,
+                        leverage=leverage_decision.decided_leverage,
+                    )
 
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks
