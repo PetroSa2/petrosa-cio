@@ -41,6 +41,11 @@ class DecisionRecord:
     # (legacy ring-buffer entries written before this field existed) so
     # the dashboard surface can render "context not recorded" deterministically.
     pre_decision_context: PreDecisionContext | None = None
+    # P1.5-AC3 (#137) — leverage that came out of the admission-time
+    # arbiter. ``None`` on pre-EPIC-#691 historical records and on
+    # legacy code paths that bypass the arbiter (defensive default so
+    # adding the field does not break callers).
+    decided_leverage: int | None = None
 
 
 class DecisionStore:
