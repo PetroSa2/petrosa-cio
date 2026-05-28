@@ -3,6 +3,7 @@
 # Enums
 # Context models
 from cio.models.context import CharacterizationRef as CharacterizationRef
+from cio.models.context import ContextGap as ContextGap
 from cio.models.context import EvaluatorVerdict as EvaluatorVerdict
 from cio.models.context import MarketSignals as MarketSignals
 from cio.models.context import MarketState as MarketState
