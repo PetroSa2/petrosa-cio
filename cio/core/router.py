@@ -8,6 +8,7 @@ import httpx
 
 from cio.core.cache import AsyncRedisCache
 from cio.core.decision_store import DecisionRecord, DecisionStore
+from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
@@ -557,6 +558,26 @@ class OutputRouter:
             # ring buffer so /api/dashboard/decisions/recent can return it
             # verbatim. Pre-EPIC-#122 historical records have no bundle —
             # the dashboard renders them with null context.
+            # P1.5-AC3 (#137) — admission-time leverage arbitration. Both
+            # enrichment fields (`recommended_leverage` from 691.1, the
+            # `strategy_envelope` from data-manager#179) are absent today,
+            # so the arbiter falls through to the env-var-only path
+            # (`CIO_DEFAULT_MAX_LEVERAGE`). When the enrichment lands, the
+            # `getattr(...)` calls below start returning real values and
+            # the arbiter branches accordingly without code change here.
+            leverage_decision = arbitrate_leverage(
+                recommended_leverage=getattr(context, "recommended_leverage", None),
+                strategy_envelope=getattr(context, "strategy_leverage_envelope", None),
+            )
+            logger.info(
+                "leverage_arbiter decision_id=%s branch=%s decided=%s bound=%s",
+                decision_id,
+                leverage_decision.branch,
+                leverage_decision.decided_leverage,
+                leverage_decision.per_strategy_bound,
+                extra={"correlation_id": correlation_id},
+            )
+
             self.decision_store.record(
                 DecisionRecord(
                     strategy_id=strategy_id,
@@ -571,6 +592,7 @@ class OutputRouter:
                     rejection_source=rejection_source_value,
                     strategy_revision_id=getattr(context, "strategy_revision_id", None),
                     pre_decision_context=getattr(context, "pre_decision_context", None),
+                    decided_leverage=leverage_decision.decided_leverage,
                 )
             )
 
