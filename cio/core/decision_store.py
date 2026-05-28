@@ -23,6 +23,15 @@ class DecisionRecord:
     confidence: float
     decision_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=lambda: datetime.now(_UTC))
+    # FR53 / P3.4 (#130) — structured refusal source. None on accepts and on
+    # refusals that are not categorized (legacy / "OTHER"); set to e.g.
+    # "stale_characterization" by the CIO refusal gate so the operator
+    # dashboard can group + filter without grepping `reasoning_trace`.
+    rejection_source: str | None = None
+    # FR53 / P3.4 (#130) — content-addressable revision the intent claimed.
+    # Surfaced so the operator can compare against what the most-recent
+    # characterization is bound to (i.e. spot drift at a glance).
+    strategy_revision_id: str | None = None
 
 
 class DecisionStore:

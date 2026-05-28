@@ -8,6 +8,7 @@ from cio.models.enums import (
     OrderType,
     RegimeEnum,
     RegimeFit,
+    RejectionSource,
     VolatilityLevel,
 )
 from cio.models.regime import RegimeResult
@@ -67,6 +68,12 @@ class DecisionResult(BaseModel):
     action: ActionType | None = None
     justification: str | None = None
     thought_trace: str | None = None
+
+    # 8. Structured rejection metadata (FR53 / P3.4, #130).
+    # When `action` is a refusal (REJECT / BLOCK / FAIL_SAFE), `rejection_source`
+    # records the structured reason so audit-trail consumers and the operator
+    # dashboard can group refusals without parsing `hard_block_reason`.
+    rejection_source: RejectionSource | None = None
 
 
 # SAFE_DEFAULTS: Authoritative source for parse failure fallbacks
