@@ -2,8 +2,13 @@
 
 # Enums
 # Context models
+from cio.models.context import CharacterizationRef as CharacterizationRef
+from cio.models.context import EvaluatorVerdict as EvaluatorVerdict
 from cio.models.context import MarketSignals as MarketSignals
+from cio.models.context import MarketState as MarketState
+from cio.models.context import PortfolioState as PortfolioState
 from cio.models.context import PortfolioSummary as PortfolioSummary
+from cio.models.context import PreDecisionContext as PreDecisionContext
 from cio.models.context import RiskLimits as RiskLimits
 from cio.models.context import StrategyDefaults as StrategyDefaults
 from cio.models.context import StrategyStats as StrategyStats
