@@ -46,6 +46,8 @@ CATEGORY_EVALUATOR_UNHEALTHY = "evaluator_unhealthy"
 CATEGORY_CIO_GOVERNANCE_ACTION = "cio_governance_action"
 # P8-AC2c (#140) — drawdown vs. envelope breach (FR66 c / FR30 / FR62).
 CATEGORY_DRAWDOWN_ENVELOPE_BREACH = "drawdown_envelope_breach"
+# P4.6-AC5 (#152) — characterization-vs-approved envelope drift (FR62 / FR66).
+CATEGORY_ENVELOPE_DRIFT_DETECTED = "envelope_drift_detected"
 
 # AC2.b — the four ActionType values that get an alert event.
 CIO_ALERT_ACTIONS: frozenset[str] = frozenset({"veto", "demote", "retire", "exit_now"})
@@ -176,6 +178,66 @@ def build_drawdown_breach_alert(
     }
 
 
+def build_envelope_drift_alert(
+    *,
+    strategy_key: str,
+    current_version: int | None,
+    current_value: dict[str, Any] | None,
+    proposed_value: dict[str, Any],
+    divergence_pct: float,
+    originating_characterization_revision: str,
+    severity: str = SEVERITY_WARNING,
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """AC5.b payload for ``alerts.envelope.drift_detected.<strategy_key>`` (P4.6-AC5).
+
+    Fires when a characterization-emitted envelope diverges from the active
+    operator-approved envelope by more than the configured threshold (default
+    10%). ``current_value=None`` / ``current_version=None`` means no prior
+    approved envelope exists — that branch alerts with the "first approval
+    required" semantic so the operator knows a producer is trying to seed
+    a fresh envelope without explicit consent.
+
+    AC5.d is enforced **by construction at the call site**: this payload
+    carries the proposed values for operator inspection, but the producer
+    never mutates the active Envelope. The operator workflow on
+    petrosa-data-manager (#187) is the only legitimate write path.
+    """
+    detected_at = _iso_utc(observed_at)
+    if current_value is None:
+        message = (
+            f"Envelope drift detected on strategy_key={strategy_key}: "
+            f"no operator-approved envelope yet exists; characterization "
+            f"revision {originating_characterization_revision} proposed a fresh value"
+        )
+    else:
+        message = (
+            f"Envelope drift detected on strategy_key={strategy_key}: "
+            f"proposed envelope diverges from approved v{current_version} "
+            f"by {divergence_pct:.1%} (characterization "
+            f"revision {originating_characterization_revision})"
+        )
+    return {
+        "category": CATEGORY_ENVELOPE_DRIFT_DETECTED,
+        "severity": severity,
+        "strategy_key": strategy_key,
+        "current_version": current_version,
+        "current_value": current_value,
+        "proposed_value": proposed_value,
+        "divergence_pct": divergence_pct,
+        "originating_characterization_revision": originating_characterization_revision,
+        "message": message,
+        "decision_id": None,
+        "timestamp": detected_at,
+        "dedupe_key": _dedupe_key(
+            "envelope_drift",
+            strategy_key,
+            originating_characterization_revision,
+            detected_at[:13],
+        ),
+    }
+
+
 def evaluator_unhealthy_subject(subsystem: str) -> str:
     safe = (subsystem or "unknown").strip() or "unknown"
     return f"alerts.evaluator.unhealthy.{safe}"
@@ -191,6 +253,18 @@ def drawdown_breach_subject(strategy_id: str) -> str:
     """AC2.c.2: ``alerts.drawdown.breach.<strategy_id>``."""
     safe_strategy = (strategy_id or "unknown").strip() or "unknown"
     return f"alerts.drawdown.breach.{safe_strategy}"
+
+
+def envelope_drift_subject(strategy_key: str) -> str:
+    """AC5.b: ``alerts.envelope.drift_detected.<strategy_key>`` (P4.6-AC5).
+
+    ``strategy_key`` is the flat-string partition key from
+    :mod:`data_manager.models.envelope` (``strategy:<id>`` or
+    ``portfolio:<id>``); the helper passes it through verbatim after the
+    same defensive ``strip()/unknown`` shaping the other subjects use.
+    """
+    safe = (strategy_key or "unknown").strip() or "unknown"
+    return f"alerts.envelope.drift_detected.{safe}"
 
 
 async def publish_fr66_alert(
