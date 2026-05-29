@@ -6,6 +6,12 @@ from typing import Any, Protocol
 
 import httpx
 
+from cio.core.alerting.fr66_alerts import (
+    CIO_ALERT_ACTIONS,
+    build_cio_action_alert,
+    cio_action_subject,
+    publish_fr66_alert,
+)
 from cio.core.cache import AsyncRedisCache
 from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.leverage_arbiter import arbitrate_leverage
@@ -594,6 +600,26 @@ class OutputRouter:
                     pre_decision_context=getattr(context, "pre_decision_context", None),
                     decided_leverage=leverage_decision.decided_leverage,
                 )
+            )
+
+        # P8-AC2b (#139): emit `alerts.cio.<action>.<strategy_id>` for every
+        # governance ActionType (VETO / DEMOTE / RETIRE / EXIT_NOW). Best-effort
+        # — fires AFTER the decision_store record so the alert is the last side
+        # effect of dispatch; an unhealthy NATS does not block the decision
+        # path. Lower-cased action_value matches the subject family in
+        # `cio/core/alerting/fr66_alerts.py::CIO_ALERT_ACTIONS`.
+        action_value = action.value.lower()
+        if action_value in CIO_ALERT_ACTIONS and not is_dry_run:
+            alert_payload = build_cio_action_alert(
+                action=action_value,
+                strategy_id=strategy_id,
+                decision_id=decision_id,
+                justification=(decision.thought_trace or decision.justification or ""),
+            )
+            await publish_fr66_alert(
+                self.nats_client,
+                subject=cio_action_subject(action_value, strategy_id),
+                payload=alert_payload,
             )
 
         # P1.4-AC2.b (#132): publish per-surface context-gap audit events on

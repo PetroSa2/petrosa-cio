@@ -99,13 +99,24 @@ async def test_lifecycle_action_publishes_on_dedicated_subject(action: ActionTyp
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
-    # Lifecycle dispatch + decision audit copy (#610 P7.1).
-    assert mock_nc.publish.call_count == 2
+    # Lifecycle dispatch + decision audit copy (#610 P7.1). DEMOTE and
+    # RETIRE additionally emit the FR66 alert (#139, P8-AC2b) so their
+    # call count is 3; admits/promotes/rejects stay at 2.
+    is_fr66_alert_action = action.value.lower() in {
+        "demote",
+        "retire",
+        "veto",
+        "exit_now",
+    }
+    expected_count = 3 if is_fr66_alert_action else 2
+    assert mock_nc.publish.call_count == expected_count
     calls = {c.args[0]: c.args[1] for c in mock_nc.publish.call_args_list}
     lifecycle_subject = f"cio.lifecycle.{action.value}.{strategy_id}"
     audit_subject = f"cio.decision.audit.{action.value}"
     assert lifecycle_subject in calls
     assert audit_subject in calls
+    if is_fr66_alert_action:
+        assert f"alerts.cio.{action.value.lower()}.{strategy_id}" in calls
 
     payload = json.loads(calls[lifecycle_subject].decode())
     assert payload["action"] == action.value
