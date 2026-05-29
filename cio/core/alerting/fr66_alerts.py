@@ -1,6 +1,6 @@
-"""FR66 alert producers (P8-AC2a + AC2b, #139).
+"""FR66 alert producers (P8-AC2a + AC2b, #139; P8-AC2c, #140).
 
-Two emit paths land in this module:
+Three emit paths land in this module:
 
 - ``alerts.evaluator.unhealthy.<subsystem>`` — fired by
   :class:`cio.core.evaluator_subscriber.EvaluatorSubscriber` when any
@@ -9,8 +9,14 @@ Two emit paths land in this module:
   :class:`cio.core.router.OutputRouter` after dispatching any of the
   governance ActionTypes ``VETO`` / ``DEMOTE`` / ``RETIRE`` /
   ``EXIT_NOW``.
+- ``alerts.drawdown.breach.<strategy_id>`` — fired wherever realized
+  drawdown is compared against the strategy's envelope (FR30 / FR62)
+  and the p99 ceiling is exceeded. Dedup is keyed on
+  ``(strategy_id, position_id)`` and resets when the position exits
+  and a new one opens; see
+  :class:`cio.core.alerting.drawdown_breach_emitter.DrawdownBreachEmitter`.
 
-Both paths share the AC2.c payload schema and the same
+All paths share the AC2.c payload schema and the same
 ``publish_fr66_alert`` helper, so a downstream NATS-to-Grafana bridge
 (AC2.d, infra-side) can match on a single subject family
 (``alerts.>``) and a single payload shape.
@@ -38,6 +44,8 @@ logger = logging.getLogger(__name__)
 # payload JSON renders the value verbatim.
 CATEGORY_EVALUATOR_UNHEALTHY = "evaluator_unhealthy"
 CATEGORY_CIO_GOVERNANCE_ACTION = "cio_governance_action"
+# P8-AC2c (#140) — drawdown vs. envelope breach (FR66 c / FR30 / FR62).
+CATEGORY_DRAWDOWN_ENVELOPE_BREACH = "drawdown_envelope_breach"
 
 # AC2.b — the four ActionType values that get an alert event.
 CIO_ALERT_ACTIONS: frozenset[str] = frozenset({"veto", "demote", "retire", "exit_now"})
@@ -63,7 +71,9 @@ class _NATSPublisher(Protocol):
 
 def _iso_utc(ts: datetime | None = None) -> str:
     ts = ts or datetime.utcnow()
-    return ts.replace(microsecond=0).isoformat() + "Z"
+    # Strip tzinfo so a tz-aware input doesn't render as "+00:00Z".
+    ts = ts.replace(microsecond=0, tzinfo=None)
+    return ts.isoformat() + "Z"
 
 
 def _dedupe_key(*parts: str) -> str:
@@ -123,6 +133,49 @@ def build_cio_action_alert(
     }
 
 
+def build_drawdown_breach_alert(
+    *,
+    strategy_id: str,
+    position_id: str,
+    observed_drawdown: float,
+    envelope_p99: float,
+    envelope_p100: float | None,
+    severity: str = SEVERITY_CRITICAL,
+    observed_at: datetime | None = None,
+) -> dict[str, Any]:
+    """AC2.c payload for ``alerts.drawdown.breach.<strategy_id>``.
+
+    Carries the AC2.c.2 envelope contract verbatim: ``observed_drawdown``
+    is the realized drawdown that exceeded ``envelope_p99``; the optional
+    ``envelope_p100`` is the historical worst-case the strategy's
+    drawdown envelope ever ran (FR62) so the receiver can rank severity.
+
+    The producer is expected to use
+    :class:`cio.core.alerting.drawdown_breach_emitter.DrawdownBreachEmitter`
+    to enforce AC2.c.3's dedup window (``(strategy_id, position_id)``
+    resets on position exit + new position open).
+    """
+    detected_at = _iso_utc(observed_at)
+    return {
+        "category": CATEGORY_DRAWDOWN_ENVELOPE_BREACH,
+        "severity": severity,
+        "strategy_id": strategy_id,
+        "position_id": position_id,
+        "observed_drawdown": observed_drawdown,
+        "envelope_p99": envelope_p99,
+        "envelope_p100": envelope_p100,
+        "message": (
+            f"Drawdown breach on strategy_id={strategy_id} position_id={position_id}: "
+            f"realized={observed_drawdown:.4f} > envelope.p99={envelope_p99:.4f}"
+        ),
+        "decision_id": None,
+        "timestamp": detected_at,
+        "dedupe_key": _dedupe_key(
+            "drawdown_breach", strategy_id, position_id, detected_at[:13]
+        ),
+    }
+
+
 def evaluator_unhealthy_subject(subsystem: str) -> str:
     safe = (subsystem or "unknown").strip() or "unknown"
     return f"alerts.evaluator.unhealthy.{safe}"
@@ -132,6 +185,12 @@ def cio_action_subject(action: str, strategy_id: str) -> str:
     safe_action = (action or "unknown").lower()
     safe_strategy = (strategy_id or "unknown").strip() or "unknown"
     return f"alerts.cio.{safe_action}.{safe_strategy}"
+
+
+def drawdown_breach_subject(strategy_id: str) -> str:
+    """AC2.c.2: ``alerts.drawdown.breach.<strategy_id>``."""
+    safe_strategy = (strategy_id or "unknown").strip() or "unknown"
+    return f"alerts.drawdown.breach.{safe_strategy}"
 
 
 async def publish_fr66_alert(
