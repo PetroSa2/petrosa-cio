@@ -106,6 +106,18 @@ class ActionType(StrEnum):
     PROMOTE = "promote"
     DEMOTE = "demote"
     RETIRE = "retire"
+    # In-position governance actions (#134 P1.4-AC5 / FR59). Emitted by the
+    # CIO when an *open* position needs the engine to act — stop-loss /
+    # take-profit modification, immediate exit, or partial scale-out.
+    # Producer side here only; tradeengine subscriber is a follow-up.
+    # Subject family: `cio.position.<action>.<strategy_id>` (see router.py).
+    # In-position actions (per #134 P1.4-AC5, FR59). Emitted by the in-position
+    # governance loop (#135 / P1.4-AC7) once it lands; this layer only defines
+    # the vocabulary + emission paths. Each maps to a
+    # `cio.position.<kind>.<strategy_id>` subject — see cio/core/router.py.
+    MODIFY_STOPS = "modify_stops"
+    EXIT_NOW = "exit_now"
+    SCALE_OUT = "scale_out"
 
 
 class RejectionSource(StrEnum):

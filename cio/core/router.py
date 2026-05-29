@@ -44,6 +44,20 @@ _LIFECYCLE_ACTIONS = frozenset(
     }
 )
 
+# P1.4-AC5 (#134, FR59): in-position governance actions. Each emits on
+# `cio.position.<action_value>.<strategy_id>` with the full DecisionResult
+# payload — downstream `petrosa-tradeengine` (consumer-side ticket, filed
+# as the AC5.c follow-up) translates each subject into a Binance order
+# modification / exit / partial-close. Audit copy is the generic
+# `cio.decision.audit.<action>` already emitted further down (AC6.a).
+_POSITION_ACTIONS = frozenset(
+    {
+        ActionType.MODIFY_STOPS,
+        ActionType.EXIT_NOW,
+        ActionType.SCALE_OUT,
+    }
+)
+
 
 class NATSClientProtocol(Protocol):
     """Structural protocol for NATS client to ensure testability."""
@@ -443,6 +457,18 @@ class OutputRouter:
             dispatch_tasks_data.append(
                 (
                     f"cio.lifecycle.{action.value}.{strategy_id}",
+                    decision.model_dump_json().encode(),
+                )
+            )
+        elif action in _POSITION_ACTIONS:
+            # P1.4-AC5 (#134, FR59): in-position governance actions emit on
+            # `cio.position.<kind>.<sid>`. tradeengine subscribers translate
+            # each subject into a Binance order modification / market exit /
+            # partial-close. The producer side is owned here; the consumer
+            # handlers in tradeengine are the AC5.c follow-up child ticket.
+            dispatch_tasks_data.append(
+                (
+                    f"cio.position.{action.value}.{strategy_id}",
                     decision.model_dump_json().encode(),
                 )
             )
