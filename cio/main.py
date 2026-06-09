@@ -14,6 +14,7 @@ from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.apps.state_api import router as state_router
 from cio.clients.factory import ClientFactory
+from cio.core.alerts_consumer import AlertsConsumer
 from cio.core.arbiter import SignalArbiter
 from cio.core.authority import AuthorityStore
 from cio.core.cache import AsyncRedisCache
@@ -262,6 +263,12 @@ async def main():
     await evaluator_subscriber.start()
     logger.info("Evaluator subscriber listening on evaluator.>")
 
+    # petrosa_k8s#810 (AC4.1b): subscribe to alerts.> and forward to Telegram.
+    alerts_consumer = AlertsConsumer(nats_client=nc)
+    app.state.alerts_consumer = alerts_consumer
+    await alerts_consumer.start()
+    logger.info("Alerts consumer listening on alerts.>")
+
     # P7.1 (#610): CIO health evaluator. Subscribes to its own decision
     # audit copies + intent/signal cadence and publishes
     # evaluator.cio.verdict, closing Outcome 5's 8/8 evaluator coverage
@@ -315,6 +322,7 @@ async def main():
     await publisher.stop()
     await responder.stop()
     await health_evaluator.stop()
+    await alerts_consumer.stop()
     await evaluator_subscriber.stop()
     await listener.stop()
     await router.close()
