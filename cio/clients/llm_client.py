@@ -363,9 +363,13 @@ class LiteLLMClient(CIO_LLM_Client):
         primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
         fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         api_base = os.getenv("LLM_API_BASE")
+        # LLM_FALLBACK_API_BASE allows the fallback to bypass a broken proxy
+        # (e.g. Requesty down) by routing directly to a different provider endpoint.
+        # Defaults to the same api_base so existing deployments are unaffected.
+        fallback_api_base = os.getenv("LLM_FALLBACK_API_BASE", api_base)
 
         routing_primary = _build_routing_model(primary_model, api_base)
-        routing_fallback = _build_routing_model(fallback_model, api_base)
+        routing_fallback = _build_routing_model(fallback_model, fallback_api_base)
 
         start_time = time.perf_counter()
 
@@ -415,7 +419,7 @@ class LiteLLMClient(CIO_LLM_Client):
             try:
                 fallback_response = await litellm.acompletion(
                     model=routing_fallback,
-                    api_base=api_base,
+                    api_base=fallback_api_base,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
@@ -463,7 +467,8 @@ class LiteLLMClient(CIO_LLM_Client):
 
         fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
         api_base = os.getenv("LLM_API_BASE")
-        routing_fallback = _build_routing_model(fallback_model, api_base)
+        fallback_api_base = os.getenv("LLM_FALLBACK_API_BASE", api_base)
+        routing_fallback = _build_routing_model(fallback_model, fallback_api_base)
 
         logger.info(
             "Schema fallback: retrying with fallback model",
@@ -474,7 +479,7 @@ class LiteLLMClient(CIO_LLM_Client):
             start_time = time.perf_counter()
             response = await litellm.acompletion(
                 model=routing_fallback,
-                api_base=api_base,
+                api_base=fallback_api_base,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_context)},

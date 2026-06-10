@@ -637,3 +637,127 @@ async def test_record_failure_trips_breaker_after_five_total_failures():
 
     assert client._failure_count >= 5
     assert client._breaker_open_until > 0
+
+
+# ---------------------------------------------------------------------------
+# LLM_FALLBACK_API_BASE — independent fallback routing (fixes #824)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fallback_uses_separate_api_base_when_env_set():
+    """
+    When LLM_FALLBACK_API_BASE is set, the fallback acompletion call must use
+    fallback_api_base, not the primary api_base, so a broken proxy does not
+    take down both models simultaneously.
+    """
+    client = LiteLLMClient()
+    primary_base = "https://broken-proxy.example.com/v1"
+    fallback_base = "https://direct.openai.com/v1"
+
+    call_log: list[dict] = []
+
+    async def _fake_acompletion(**kwargs):
+        call_log.append({"api_base": kwargs.get("api_base"), "model": kwargs["model"]})
+        if kwargs.get("api_base") == primary_base:
+            raise RuntimeError("proxy down")
+        ns = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"action":"execute","justification":"ok","thought_trace":"t"}'
+                    )
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=10, completion_tokens=5, prompt_tokens_details=None
+            ),
+            model="openai/gpt-4o-mini",
+        )
+        return ns
+
+    fake_litellm = SimpleNamespace(
+        acompletion=AsyncMock(side_effect=_fake_acompletion),
+        get_supported_openai_params=MagicMock(return_value=[]),
+    )
+    fake_exceptions = SimpleNamespace(
+        RateLimitError=RuntimeError,
+        ServiceUnavailableError=RuntimeError,
+    )
+    env = {
+        "LLM_API_BASE": primary_base,
+        "LLM_FALLBACK_API_BASE": fallback_base,
+        "LLM_MODEL": "openai/gpt-4o",
+        "LLM_FALLBACK_MODEL": "openai/gpt-4o-mini",
+    }
+    with (
+        patch.dict(os.environ, env),
+        patch.dict(
+            sys.modules,
+            {"litellm": fake_litellm, "litellm.exceptions": fake_exceptions},
+        ),
+    ):
+        result = await client.complete("PETROSA_PROMPT_ACTION_CLASSIFIER", "sys", {})
+
+    assert result.error is None, (
+        f"Expected success on fallback, got error: {result.error}"
+    )
+    fallback_calls = [c for c in call_log if c["api_base"] == fallback_base]
+    assert len(fallback_calls) >= 1, "Fallback call must use LLM_FALLBACK_API_BASE"
+
+
+@pytest.mark.asyncio
+async def test_fallback_defaults_to_primary_api_base_when_env_unset():
+    """
+    When LLM_FALLBACK_API_BASE is not set, fallback inherits LLM_API_BASE
+    (legacy behaviour unchanged).
+    """
+    client = LiteLLMClient()
+    shared_base = "https://router.requesty.ai/v1"
+    call_log: list[dict] = []
+    call_count = 0
+
+    async def _fake_acompletion(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        call_log.append({"api_base": kwargs.get("api_base")})
+        if call_count == 1:
+            raise RuntimeError("primary fail")
+        ns = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"action":"skip","justification":"ok","thought_trace":"t"}'
+                    )
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=5, completion_tokens=3, prompt_tokens_details=None
+            ),
+            model="openai/gpt-4o-mini",
+        )
+        return ns
+
+    fake_litellm = SimpleNamespace(
+        acompletion=AsyncMock(side_effect=_fake_acompletion),
+        get_supported_openai_params=MagicMock(return_value=[]),
+    )
+    fake_exceptions = SimpleNamespace(
+        RateLimitError=RuntimeError,
+        ServiceUnavailableError=RuntimeError,
+    )
+    env = {"LLM_API_BASE": shared_base, "LLM_FALLBACK_MODEL": "openai/gpt-4o-mini"}
+    # LLM_FALLBACK_API_BASE deliberately absent
+    with (
+        patch.dict(os.environ, env),
+        patch.dict(
+            sys.modules,
+            {"litellm": fake_litellm, "litellm.exceptions": fake_exceptions},
+        ),
+    ):
+        result = await client.complete("PETROSA_PROMPT_ACTION_CLASSIFIER", "sys", {})
+
+    assert all(c["api_base"] == shared_base for c in call_log), (
+        "Without LLM_FALLBACK_API_BASE, all calls must use the primary api_base"
+    )
+    assert result.error is None
