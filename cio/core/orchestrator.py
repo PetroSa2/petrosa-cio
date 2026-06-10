@@ -268,13 +268,15 @@ class Orchestrator:
                     "Executing final Action Classifier for hard-blocked trade",
                     extra={"correlation_id": context.correlation_id},
                 )
-                return await self.action_classifier.classify(
+                _blocked_decision = await self.action_classifier.classify(
                     context,
                     code_result,
                     bypass_regime,
                     bypass_strategy,
                     bypass_mode=not self.use_llm_reasoning,
                 )
+                self._emit_decision_action(_blocked_decision.action)
+                return _blocked_decision
 
             # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
             if not self.use_llm_reasoning:
@@ -283,13 +285,15 @@ class Orchestrator:
                     extra={"correlation_id": context.correlation_id},
                 )
                 # In bypass mode we "blindly" trust the intent when risk gates pass.
-                return await self.action_classifier.classify(
+                _bypass_decision = await self.action_classifier.classify(
                     context,
                     code_result,
                     bypass_regime,
                     bypass_strategy,
                     bypass_mode=True,
                 )
+                self._emit_decision_action(_bypass_decision.action)
+                return _bypass_decision
 
             # 2. REGIME ANALYSIS (S3-S5)
             # Check cache first for HOT path
@@ -364,7 +368,7 @@ class Orchestrator:
                     "llm_provider": provider_name,
                 },
             )
-
+            self._emit_decision_action(decision.action)
             return decision
 
         except Exception as e:
@@ -372,7 +376,16 @@ class Orchestrator:
                 f"Critical failure in reasoning loop: {str(e)}",
                 extra={"correlation_id": context.correlation_id},
             )
+            self._emit_decision_action(SAFE_DECISION_RESULT.action)
             return SAFE_DECISION_RESULT
+
+    def _emit_decision_action(self, action: ActionType) -> None:
+        try:
+            from cio.core.metrics import DECISION_ACTIONS
+
+            DECISION_ACTIONS.add(1, {"action": str(action)})
+        except ImportError:
+            pass
 
     async def _check_spend_ceiling(self, correlation_id: str) -> None:
         """FR63 / AC4: check LLM spend ceiling; transition to deterministic bypass on breach.
