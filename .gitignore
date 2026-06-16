@@ -323,3 +323,6 @@ backtest_results/
 k8s/kubeconfig.yaml
 
 .serena/cache/
+
+# bandit security scanner output
+bandit-report.json
