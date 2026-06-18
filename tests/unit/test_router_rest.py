@@ -74,6 +74,7 @@ async def test_output_router_rest_429_handling():
     mock_nc = AsyncMock()
     mock_vc = AsyncMock()
     mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)  # not frozen → POST proceeds
     router = OutputRouter(
         nats_client=mock_nc,
         vector_client=mock_vc,
@@ -123,6 +124,7 @@ async def test_output_router_rest_pause_strategy_freeze():
     mock_nc = AsyncMock()
     mock_vc = AsyncMock()
     mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)  # not frozen → POST proceeds
     router = OutputRouter(
         nats_client=mock_nc,
         vector_client=mock_vc,
@@ -172,6 +174,7 @@ async def test_output_router_rest_429_fallback_ttl():
     mock_nc = AsyncMock()
     mock_vc = AsyncMock()
     mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)  # not frozen → POST proceeds
     router = OutputRouter(
         nats_client=mock_nc,
         vector_client=mock_vc,
@@ -387,6 +390,52 @@ async def test_output_router_rest_dry_run():
     )
 
     with patch.dict(os.environ, {"DRY_RUN": "true"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            await router.route(context, decision)
+            mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_pause_strategy_skips_post_when_frozen():
+    """AC4 (cio#169): When strategy is already frozen, no HTTP POST is sent.
+
+    Prevents 429 storms caused by the LLM repeatedly deciding pause_strategy
+    for the same strategy within the freeze window.
+    """
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    # freeze is set — cache.get returns the LOCKED sentinel
+    mock_cache.get = AsyncMock(return_value="LOCKED")
+
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "already_paused_strat"
+    context.decision_id = "dedup-test-id"
+    context.correlation_id = "dedup-cid"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
         with patch.object(
             router.http_client, "post", new_callable=AsyncMock
         ) as mock_post:
