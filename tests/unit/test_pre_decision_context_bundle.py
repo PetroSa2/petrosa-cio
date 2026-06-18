@@ -708,3 +708,54 @@ async def test_fetch_regime_records_gap_on_data_manager_empty():
     assert availability["market"] is False
     assert any(g.surface == "market" for g in gaps)
     await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_collect_evaluator_verdicts_filters_cio_self_health(
+    fake_evaluator_subscriber,
+):
+    """AC3 (cio#169): CIO's own health verdict must be excluded from LLM context.
+
+    CIOHealthEvaluator publishes evaluator.cio.verdict which EvaluatorSubscriber
+    picks up. Feeding CIO's own unhealthy verdict back to the LLM causes a
+    circular self-assessment bias: every signal gets pause_strategy because CIO
+    sees itself as unhealthy.
+
+    This test verifies that 'cio' is stripped from _collect_evaluator_verdicts().
+    """
+    # Extend the standard fake_evaluator_subscriber to also include a cio verdict
+    fake_evaluator_subscriber.snapshot.return_value = {
+        "verdicts": [
+            {
+                "subsystem": "ingest",
+                "verdict": "healthy",
+                "reason": "ok",
+                "observed_at": "2026-06-18T13:22:00",
+                "override": None,
+            },
+            {
+                "subsystem": "cio",
+                "verdict": "unhealthy",
+                "reason": "missing_context_ratio_exceeded",
+                "observed_at": "2026-06-18T13:22:56",
+                "override": None,
+            },
+        ],
+        "paused": [],
+        "pause_audit_log": [],
+    }
+
+    builder = _make_builder_with_mocked_http(
+        evaluator_subscriber=fake_evaluator_subscriber,
+    )
+
+    result = builder._collect_evaluator_verdicts()
+
+    # cio must not appear — self-health is not a per-signal trading decision factor
+    assert "cio" not in result, (
+        "cio subsystem must be excluded from evaluator_verdicts to prevent "
+        "circular self-assessment bias (cio#169)"
+    )
+    # other subsystems still present
+    assert "ingest" in result
+    assert result["ingest"].verdict == "healthy"

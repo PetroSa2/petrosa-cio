@@ -353,6 +353,16 @@ class ContextBuilder:
                 )
             except ValueError:
                 observed_at = datetime.now(UTC)
+            # AC3 (cio#169): Exclude CIO's own health from the LLM decision surface.
+            # CIOHealthEvaluator emits evaluator.cio.verdict which the EvaluatorSubscriber
+            # picks up and feeds back into context. A self-unhealthy verdict causes the LLM
+            # to pause strategies on every signal — a circular self-assessment bias.
+            # Pod liveness/readiness owns CIO health recovery, not per-signal decisions.
+            if subsystem == "cio":
+                logger.debug(
+                    "EVALUATOR_VERDICT_FILTERED: cio self-health excluded from LLM context"
+                )
+                continue
             out[subsystem] = EvaluatorVerdict(
                 subsystem=subsystem,
                 verdict=verdict,

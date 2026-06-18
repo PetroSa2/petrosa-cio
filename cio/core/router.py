@@ -371,7 +371,19 @@ class OutputRouter:
 
             # d. Await the POST call to /api/v1/strategies/{strategy_id}/config
             url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            if is_dry_run:
+            # AC4 (cio#169): Skip POST if already frozen — prevents 429 storms when LLM
+            # repeatedly decides pause_strategy for the same strategy within the freeze window.
+            _pause_freeze_key = f"cio:freeze:{strategy_id}"
+            _pause_already_frozen = bool(
+                self.cache and await self.cache.get(_pause_freeze_key)
+            )
+            if _pause_already_frozen:
+                logger.info(
+                    "PAUSE_SKIPPED: strategy %s already frozen — dedup active",
+                    strategy_id,
+                    extra={"correlation_id": correlation_id},
+                )
+            elif is_dry_run:
                 logger.info(
                     f"[SHADOW MODE] Would have paused strategy via REST to {url}",
                     extra={
