@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 
 from cio.core.alerting.manager import AlertManager
@@ -26,8 +27,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Global configuration for Nurse Enforcer
-# Increased from 200ms to 10s to support LLM latency requirements
-AUDIT_TIMEOUT_SECONDS = 10.0
+# Configurable via LLM_AUDIT_TIMEOUT_MS env var (default: 20000ms = 20s).
+# Raised from 10s to 20s default to accommodate novita/3B latency (cio#167).
+AUDIT_TIMEOUT_SECONDS: float = (
+    int(os.environ.get("LLM_AUDIT_TIMEOUT_MS", "20000")) / 1000.0
+)
 
 
 class NurseEnforcer:
