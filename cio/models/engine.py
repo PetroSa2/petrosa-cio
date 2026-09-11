@@ -12,6 +12,18 @@ class CodeEngineResult(BaseModel):
         False, description="If True, all further reasoning is bypassed"
     )
     block_reason: str | None = None
+    block_context_fallback: bool = Field(
+        False,
+        description=(
+            "True when hard_blocked was caused by the portfolio/risk "
+            "surface's context-fetch fallback (safe conservative defaults "
+            "returned by ContextBuilder._fetch_portfolio_and_risk on "
+            "failure), NOT a real drawdown/open-orders breach observed "
+            "from live tradeengine data. See #172 — this flag exists so a "
+            "context-fetch outage is never misdiagnosed as a real risk "
+            "breach (or vice versa)."
+        ),
+    )
 
     # 2. EV Analysis
     gross_ev: float | None = None
