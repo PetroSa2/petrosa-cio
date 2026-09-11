@@ -4,8 +4,11 @@ from cio.core.engine import CodeEngine
 from cio.models import (
     ConfidenceLevel,
     MarketSignals,
+    MarketState,
     PnlTrend,
+    PortfolioState,
     PortfolioSummary,
+    PreDecisionContext,
     RegimeEnum,
     RegimeResult,
     RiskLimits,
@@ -17,8 +20,39 @@ from cio.models import (
 )
 
 
-def build_test_context(drawdown=0.0, win_rate=0.6, capital=10000.0):
-    """Helper to build a context for testing."""
+def build_test_context(
+    drawdown=0.0, win_rate=0.6, capital=10000.0, portfolio_state_available=None
+):
+    """Helper to build a context for testing.
+
+    ``portfolio_state_available``: when not None, attaches a
+    PreDecisionContext with ``portfolio_state_available`` set accordingly,
+    exercising the #172 context-fetch-fallback provenance flag on
+    CodeEngineResult.block_context_fallback.
+    """
+    pre_decision_context = None
+    if portfolio_state_available is not None:
+        market_state = MarketState(
+            regime=RegimeEnum.RANGING,
+            regime_confidence=ConfidenceLevel.MEDIUM,
+            volatility_level=VolatilityLevel.MEDIUM,
+            current_price=50000.0,
+            primary_signal="test",
+        )
+        portfolio_state = PortfolioState(
+            gross_exposure=0.0,
+            same_asset_pct=0.0,
+            open_positions_count=0,
+            global_drawdown_pct=drawdown,
+            available_capital_usd=capital,
+            open_orders_global=0,
+            open_orders_symbol=0,
+        )
+        pre_decision_context = PreDecisionContext(
+            market_state=market_state,
+            portfolio_state=portfolio_state,
+            portfolio_state_available=portfolio_state_available,
+        )
     return TriggerContext(
         correlation_id="test",
         source_subject="test",
@@ -59,6 +93,7 @@ def build_test_context(drawdown=0.0, win_rate=0.6, capital=10000.0):
             max_orders_per_symbol=5,
             max_position_size_usd=1000.0,
         ),
+        pre_decision_context=pre_decision_context,
     )
 
 
@@ -68,6 +103,38 @@ def test_code_engine_risk_gate_drawdown():
     result = CodeEngine.run(ctx)
     assert result.hard_blocked is True
     assert "drawdown" in result.block_reason
+    # No pre_decision_context attached (legacy/test-only path) -> defaults
+    # to "assume real" rather than silently flagging every un-instrumented
+    # caller as a fallback.
+    assert result.block_context_fallback is False
+
+
+def test_code_engine_risk_gate_context_fallback_flagged(caplog):
+    """#172 — a hard block caused by ContextBuilder's safe-default fallback
+    (portfolio_state_available=False) must be flagged as
+    block_context_fallback=True and logged distinctly from a real breach,
+    so operators never misdiagnose a context-fetch outage as a real
+    drawdown breach again."""
+    ctx = build_test_context(drawdown=0.15, portfolio_state_available=False)
+    with caplog.at_level("WARNING"):
+        result = CodeEngine.run(ctx)
+    assert result.hard_blocked is True
+    assert result.block_context_fallback is True
+    assert any("FALLBACK" in record.message for record in caplog.records)
+
+
+def test_code_engine_risk_gate_real_breach_not_flagged_as_fallback(caplog):
+    """#172 — a hard block backed by live portfolio/risk data
+    (portfolio_state_available=True) must NOT be flagged as a
+    context-fetch fallback."""
+    ctx = build_test_context(drawdown=0.15, portfolio_state_available=True)
+    with caplog.at_level("WARNING"):
+        result = CodeEngine.run(ctx)
+    assert result.hard_blocked is True
+    assert result.block_context_fallback is False
+    assert any(
+        "live portfolio/risk data" in record.message for record in caplog.records
+    )
 
 
 def test_code_engine_ev_calculation():

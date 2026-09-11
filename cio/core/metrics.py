@@ -30,3 +30,21 @@ LLM_FALLBACK_SKIPS = meter.create_counter(
     "cio_llm_fallback_skips_total",
     description="Total SAFE_DEFAULT fallbacks that force SKIP-like behavior",
 )
+
+# Risk-Gate Provenance Metrics (#172) — distinguishes a hard block caused by
+# a context-fetch failure (ContextBuilder fell back to conservative safe
+# defaults) from a hard block backed by real, live portfolio/risk data.
+# Without this split, a `/state` fetch outage is indistinguishable in
+# monitoring from a genuine drawdown/order-limit breach.
+RISK_GATE_CONTEXT_FALLBACK = meter.create_counter(
+    "cio_risk_gate_context_fallback_total",
+    description=(
+        "Risk-gate hard blocks caused by portfolio/risk context-fetch "
+        "fallback defaults, not a real risk breach"
+    ),
+)
+
+RISK_GATE_REAL_BREACH = meter.create_counter(
+    "cio_risk_gate_real_breach_total",
+    description="Risk-gate hard blocks backed by live portfolio/risk data",
+)
