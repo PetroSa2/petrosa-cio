@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from typing import TYPE_CHECKING
 
 from cio.clients.factory import ClientFactory
 from cio.core.characterization_stale_gate import is_characterization_stale
@@ -29,6 +30,9 @@ from cio.personas.action_classifier import ActionClassifier
 from cio.personas.regime_analyst import RegimeAnalyst
 from cio.personas.strategy_assessor import StrategyAssessor
 
+if TYPE_CHECKING:
+    from cio.core.position_review_loop import PositionReviewLoop
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +47,7 @@ class Orchestrator:
         llm_client=None,
         cache=None,
         portfolio_tracker: PortfolioTracker | None = None,
+        position_review_loop: "PositionReviewLoop | None" = None,
     ):
         self.client = llm_client or ClientFactory.create()
         self.cache = cache
@@ -58,6 +63,11 @@ class Orchestrator:
             if portfolio_tracker is not None
             else _default_portfolio_tracker
         )
+        # #175 — optional collaborator so admission also registers the
+        # position with the in-position re-evaluation cadence loop. None
+        # in local-dev / tests that don't wire it (legacy behavior: no
+        # scheduled re-review, matching pre-#175 behavior).
+        self.position_review_loop = position_review_loop
 
         # Read governance flags from environment (Ticket #334/337)
         self.use_llm_reasoning = (
@@ -253,6 +263,19 @@ class Orchestrator:
                         position_size_usd=new_position_size_usd,
                         leverage=leverage_decision.decided_leverage,
                     )
+                    # #175 (FR60/P1.4-AC7) — register the admitted position
+                    # with the in-position re-evaluation cadence loop so it
+                    # gets re-reviewed on a schedule after admission, not
+                    # just once at intent time. Same keying convention as
+                    # `portfolio_tracker` above (per-strategy, since
+                    # tradeengine does not yet surface a distinct
+                    # position_id back to CIO — see portfolio_tracker.py's
+                    # documented record_exit limitation for the symmetric
+                    # gap on the removal side).
+                    if self.position_review_loop is not None:
+                        self.position_review_loop.add_position(
+                            context.strategy_id, context.strategy_id
+                        )
 
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks

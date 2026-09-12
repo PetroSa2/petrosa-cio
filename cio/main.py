@@ -14,6 +14,8 @@ from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
 from cio.apps.state_api import router as state_router
 from cio.clients.factory import ClientFactory
+from cio.core.alerting.drawdown_breach_emitter import DrawdownBreachEmitter
+from cio.core.alerting.envelope_drift_emitter import EnvelopeDriftEmitter
 from cio.core.alerts_consumer import AlertsConsumer
 from cio.core.arbiter import SignalArbiter
 from cio.core.authority import AuthorityStore
@@ -26,6 +28,10 @@ from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
+from cio.core.position_review_loop import (
+    DEFAULT_REEVAL_INTERVAL_SECONDS,
+    PositionReviewLoop,
+)
 from cio.core.router import OutputRouter
 
 # Optional OpenTelemetry imports
@@ -235,6 +241,13 @@ async def main():
         arbiter = SignalArbiter(
             cache=cache,
             evaluator_subscriber=evaluator_subscriber,
+            # #175 (FR60/P1.4-AC7): wires this arbiter as the runner for
+            # PositionReviewLoop below — it needs the same context
+            # assembly / enforcement / routing pipeline the listener uses
+            # for a live trade intent.
+            context_builder=builder,
+            enforcer=enforcer,
+            router=router,
         )
         logger.info("Signal arbitration enabled (with P2.6 pause gate).")
     else:
@@ -247,6 +260,44 @@ async def main():
         router=router,
         arbiter=arbiter,
     )
+
+    # #175 (FR60/P1.4-AC7): in-position re-evaluation loop. Only runs when
+    # arbitration is enabled since `arbiter.run_scheduled_review` is its
+    # runner — SIGNAL_ARBITRATION_ENABLED=false is the same "off switch"
+    # convention used for `arbiter` above.
+    position_review_loop: PositionReviewLoop | None = None
+    if arbiter is not None:
+        reeval_interval = float(
+            os.getenv(
+                "CIO_REEVAL_INTERVAL_SECONDS", str(DEFAULT_REEVAL_INTERVAL_SECONDS)
+            )
+        )
+        position_review_loop = PositionReviewLoop(
+            runner=arbiter.run_scheduled_review,
+            interval_seconds=reeval_interval,
+        )
+        # Orchestrator registers admitted positions with the loop at
+        # admission time (see Orchestrator.run, portfolio_tracker.record_admit
+        # call site).
+        orchestrator.position_review_loop = position_review_loop
+        app.state.position_review_loop = position_review_loop
+        logger.info(
+            "Position review loop constructed (interval=%.1fs).", reeval_interval
+        )
+    else:
+        logger.info("Position review loop disabled (SIGNAL_ARBITRATION_ENABLED=false).")
+
+    # #175 (FR66/FR62) — DrawdownBreachEmitter and EnvelopeDriftEmitter are
+    # instantiated so they exist as live collaborators on app.state, closing
+    # the "never instantiated" half of #175's AC3. The producers that call
+    # their `check_and_emit` (a live drawdown-vs-envelope comparator, and a
+    # characterization-drift NATS consumer) do not exist yet in this repo —
+    # same documented gap as `PortfolioTracker.record_exit` — and are
+    # tracked as follow-up wiring, not silently dropped.
+    drawdown_breach_emitter = DrawdownBreachEmitter(nats_client=nc)
+    app.state.drawdown_breach_emitter = drawdown_breach_emitter
+    envelope_drift_emitter = EnvelopeDriftEmitter(nats_client=nc)
+    app.state.envelope_drift_emitter = envelope_drift_emitter
 
     # Epic 2: Initialize and Start Heartbeat System (Responder + Publisher)
     heartbeat_subject = os.getenv("NATS_TOPIC_HEARTBEAT", "cio.heartbeat")
@@ -278,6 +329,16 @@ async def main():
     app.state.cio_health_evaluator = health_evaluator
     await health_evaluator.start()
     logger.info("CIO health evaluator publishing on evaluator.cio.verdict")
+
+    # #175 (FR60/P1.4-AC7): start the in-position cadence task after
+    # everything it depends on (arbiter → context_builder/enforcer/router)
+    # is live.
+    if position_review_loop is not None:
+        await position_review_loop.start()
+        logger.info(
+            "Position review loop started — open positions will be re-evaluated "
+            "on cadence."
+        )
 
     # 3. Graceful Shutdown Setup
     stop_event = asyncio.Event()
@@ -319,6 +380,8 @@ async def main():
 
     # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
+    if position_review_loop is not None:
+        await position_review_loop.stop()
     await publisher.stop()
     await responder.stop()
     await health_evaluator.stop()

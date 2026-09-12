@@ -38,6 +38,7 @@ async def test_nats_subscription_with_wildcard():
         patch("cio.main.OutputRouter") as MockOutputRouter,
         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
+        patch("cio.main.PositionReviewLoop") as MockPositionReviewLoop,
     ):
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
@@ -56,6 +57,13 @@ async def test_nats_subscription_with_wildcard():
 
         mock_builder = MockContextBuilder.return_value
         mock_builder.close = AsyncMock()
+
+        # #175: PositionReviewLoop.start()/stop() spawn a real asyncio task
+        # via the cadence loop; mock it like the other main.py collaborators
+        # so this test stays focused on the NATS wildcard subscription.
+        mock_position_review_loop = MockPositionReviewLoop.return_value
+        mock_position_review_loop.start = AsyncMock()
+        mock_position_review_loop.stop = AsyncMock()
 
         # Mock the entire main loop to avoid SystemExit or real connections
         with patch("asyncio.Event") as mock_event_cls:
