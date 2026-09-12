@@ -307,3 +307,84 @@ async def test_nats_listener_arbiter_malformed_confidence_uses_default():
     # Should not raise — confidence defaults to 0.5
     await listener._handle_message(msg)
     enforcer.audit.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# run_scheduled_review (#175, FR60/P1.4-AC7) — the runner callback
+# PositionReviewLoop calls on cadence/event triggers.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_review_noop_when_collaborators_missing():
+    """No context_builder/enforcer/router wired → logs and returns, never raises."""
+    from cio.core.position_review_loop import PositionKey
+
+    cache = _make_cache()
+    arbiter = SignalArbiter(cache)  # legacy construction, no new collaborators
+
+    key = PositionKey("momentum-v3", "POS-1")
+    # Must not raise even though nothing is wired.
+    await arbiter.run_scheduled_review(key, reason="scheduled_review_cadence")
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_review_builds_context_audits_and_routes():
+    from cio.core.position_review_loop import PositionKey
+    from cio.models import TriggerType
+
+    cache = _make_cache()
+    context_builder = MagicMock()
+    built_context = MagicMock()
+    context_builder.build = AsyncMock(return_value=built_context)
+
+    decision = MagicMock()
+    decision.action = MagicMock(value="modify_stops")
+    enforcer = MagicMock()
+    enforcer.audit = AsyncMock(return_value=decision)
+
+    router = MagicMock()
+    router.route = AsyncMock()
+
+    arbiter = SignalArbiter(
+        cache,
+        context_builder=context_builder,
+        enforcer=enforcer,
+        router=router,
+    )
+
+    key = PositionKey("momentum-v3", "POS-1234")
+    await arbiter.run_scheduled_review(key, reason="scheduled_review_cadence")
+
+    context_builder.build.assert_called_once()
+    _, build_kwargs = context_builder.build.call_args
+    assert build_kwargs["trigger_type"] == TriggerType.SCHEDULED_REVIEW
+    assert build_kwargs["payload"]["strategy_id"] == "momentum-v3"
+    assert build_kwargs["payload"]["position_id"] == "POS-1234"
+
+    enforcer.audit.assert_called_once_with(built_context)
+    router.route.assert_called_once_with(built_context, decision)
+
+
+@pytest.mark.asyncio
+async def test_run_scheduled_review_swallows_errors():
+    """A context_builder failure must not propagate — the cadence loop must survive."""
+    from cio.core.position_review_loop import PositionKey
+
+    cache = _make_cache()
+    context_builder = MagicMock()
+    context_builder.build = AsyncMock(side_effect=RuntimeError("data-manager down"))
+    enforcer = MagicMock()
+    router = MagicMock()
+
+    arbiter = SignalArbiter(
+        cache,
+        context_builder=context_builder,
+        enforcer=enforcer,
+        router=router,
+    )
+
+    key = PositionKey("momentum-v3", "POS-1")
+    # Must not raise.
+    await arbiter.run_scheduled_review(key, reason="scheduled_review_cadence")
+    enforcer.audit.assert_not_called()

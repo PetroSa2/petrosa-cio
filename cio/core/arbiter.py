@@ -1,14 +1,28 @@
 """Signal arbitration layer for cross-strategy deduplication and conflict resolution."""
 
 import logging
-from typing import TYPE_CHECKING
+import uuid
+from typing import TYPE_CHECKING, Protocol
 
 from cio.core.cache import AsyncRedisCache
+from cio.models import TriggerType
 
 if TYPE_CHECKING:
+    from cio.core.context_builder import ContextBuilder
     from cio.core.evaluator_subscriber import EvaluatorSubscriber
+    from cio.core.position_review_loop import PositionKey
+    from cio.core.router import OutputRouter
+    from cio.models import DecisionResult, TriggerContext
 
 logger = logging.getLogger(__name__)
+
+
+class _ScheduledReviewEnforcer(Protocol):
+    """Structural protocol matching `NurseEnforcer.audit` — avoids a hard
+    import dependency from this module onto `cio.apps.nurse.enforcer`."""
+
+    async def audit(self, context: "TriggerContext") -> "DecisionResult": ...
+
 
 _DEDUP_TTL_SECONDS = 60
 _CONFLICT_TTL_SECONDS = 300  # 5 minutes
@@ -73,6 +87,9 @@ class SignalArbiter:
         cache: AsyncRedisCache,
         evaluator_subscriber: "EvaluatorSubscriber | None" = None,
         pause_policy: "dict[str, str] | None" = None,
+        context_builder: "ContextBuilder | None" = None,
+        enforcer: "_ScheduledReviewEnforcer | None" = None,
+        router: "OutputRouter | None" = None,
     ) -> None:
         self._cache = cache
         # P2.6 (#597): optional collaborator. When wired, every arbiter
@@ -86,6 +103,81 @@ class SignalArbiter:
         self._pause_policy: dict[str, str] = (
             pause_policy if pause_policy is not None else _PAUSE_GUARD_POLICY
         )
+        # #175 (FR60/P1.4-AC7) — optional collaborators wiring this arbiter
+        # as the runner for `PositionReviewLoop` (see
+        # `run_scheduled_review` below and the intended-wiring docstring on
+        # `PositionReviewLoop`). All three are only present when the
+        # process actually starts the in-position re-evaluation loop; None
+        # = the loop is not running (or was constructed without them),
+        # which `run_scheduled_review` treats as a no-op with a warning
+        # rather than crashing the cadence task.
+        self._context_builder = context_builder
+        self._enforcer = enforcer
+        self._router = router
+
+    async def run_scheduled_review(self, key: "PositionKey", reason: str) -> None:
+        """Runner callback for `PositionReviewLoop` (P1.4-AC7, #135/#175).
+
+        Fires a full `SCHEDULED_REVIEW` reasoning pass for an in-position
+        re-evaluation: builds a fresh `TriggerContext` (COLD path — see
+        `ContextBuilder.COLD_TRIGGERS`), runs it through the same
+        enforcer/orchestrator pipeline as a live trade intent, and routes
+        the resulting `DecisionResult` exactly like `NATSListener` does.
+        This is the callback the `PositionReviewLoop` docstring names —
+        without it the loop had nothing to call (#175).
+
+        Never raises: `PositionReviewLoop._fire_once` already guards
+        runner exceptions, but this method adds its own try/except so a
+        partial failure (e.g. context_builder HTTP error) is logged with
+        the position key for operator triage instead of surfacing as a
+        generic "runner_failed" line.
+        """
+        if (
+            self._context_builder is None
+            or self._enforcer is None
+            or self._router is None
+        ):
+            logger.warning(
+                "SCHEDULED_REVIEW skipped for %s (reason=%s): run_scheduled_review "
+                "collaborators not wired (context_builder=%s enforcer=%s router=%s)",
+                key,
+                reason,
+                self._context_builder is not None,
+                self._enforcer is not None,
+                self._router is not None,
+            )
+            return
+
+        correlation_id = f"scheduled-review-{key}-{uuid.uuid4().hex[:8]}"
+        payload = {
+            "strategy_id": key.strategy_id,
+            "position_id": key.position_id,
+            "reeval_reason": reason,
+        }
+        try:
+            context = await self._context_builder.build(
+                correlation_id=correlation_id,
+                source_subject="cio.position_review_loop",
+                trigger_type=TriggerType.SCHEDULED_REVIEW,
+                payload=payload,
+            )
+            decision = await self._enforcer.audit(context)
+            await self._router.route(context, decision)
+            logger.info(
+                "scheduled_review.dispatched position=%s reason=%s action=%s",
+                key,
+                reason,
+                getattr(decision.action, "value", decision.action),
+                extra={"correlation_id": correlation_id},
+            )
+        except Exception as exc:  # noqa: BLE001 — never crash the cadence loop
+            logger.warning(
+                "scheduled_review.failed position=%s reason=%s error=%s",
+                key,
+                reason,
+                exc,
+                extra={"correlation_id": correlation_id},
+            )
 
     async def check(
         self,
