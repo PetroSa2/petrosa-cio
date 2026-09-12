@@ -100,6 +100,16 @@ class TriggerContext(BaseModel):
     strategy_stats: StrategyStats
     strategy_defaults: StrategyDefaults
 
+    # P1.5-AC3 (#137) / #174 — admission-time leverage arbitration inputs.
+    # `recommended_leverage` is the strategy's preferred leverage, sourced
+    # from `strategy_defaults.leverage` (data-manager strategy config) by
+    # the context builder. `strategy_leverage_envelope` is the per-strategy
+    # characterization-derived max leverage; still None until
+    # petrosa-data-manager#179 ships its typed field — the arbiter's
+    # `operator_max`-only fallback path remains correct until then.
+    recommended_leverage: int | None = None
+    strategy_leverage_envelope: int | None = None
+
     # Portfolio & Risk State
     global_drawdown_pct: float
     open_orders_global: int

@@ -81,6 +81,13 @@ class TradeEngineTranslator:
                 "timestamp": datetime.now(UTC).isoformat(),
                 "decision_id": context.decision_id,
                 # Map risk management parameters from decision (primary) or payload
+                # P1.5-AC3 (#137) / #174 — admission-time leverage decided by
+                # CIO's leverage arbiter. `decision.decided_leverage` is set
+                # unconditionally by `OutputRouter.route` before this
+                # translator runs; None here only for hand-built
+                # DecisionResult objects that bypass the router (e.g. direct
+                # unit-test construction).
+                "leverage": decision.decided_leverage,
                 "stop_loss": context.trigger_payload.get("stop_loss"),
                 "stop_loss_pct": decision.stop_loss_pct
                 or context.trigger_payload.get("stop_loss_pct"),

@@ -139,6 +139,34 @@ class OutputRouter:
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
+        # P1.5-AC3 (#137) / #174 — resolve the admission-time leverage
+        # decision ONCE per routed decision so the SAME `decided_leverage`
+        # value reaches the outbound legacy Signal (translator, below), the
+        # decision-store audit row, and (via the dashboard endpoint) the
+        # operator UI. Previously this was computed only inside the
+        # decision_store block — AFTER the translator had already run — so
+        # `decided_leverage` never made it onto the dispatched Signal (#174).
+        # Defensive isinstance guards keep this safe against
+        # `MagicMock(spec=TriggerContext)` test doubles, which auto-vivify
+        # `context.recommended_leverage` as a Mock object rather than
+        # raising AttributeError (so a plain `getattr(..., None)` would not
+        # fall back to None for those doubles).
+        _raw_recommended_leverage = getattr(context, "recommended_leverage", None)
+        _raw_strategy_envelope = getattr(context, "strategy_leverage_envelope", None)
+        leverage_decision = arbitrate_leverage(
+            recommended_leverage=(
+                _raw_recommended_leverage
+                if isinstance(_raw_recommended_leverage, int)
+                else None
+            ),
+            strategy_envelope=(
+                _raw_strategy_envelope
+                if isinstance(_raw_strategy_envelope, int)
+                else None
+            ),
+        )
+        decision.decided_leverage = leverage_decision.decided_leverage
+
         # 0. Record Metrics
         from cio.core.metrics import DECISION_ACTIONS
 
@@ -602,17 +630,10 @@ class OutputRouter:
             # ring buffer so /api/dashboard/decisions/recent can return it
             # verbatim. Pre-EPIC-#122 historical records have no bundle —
             # the dashboard renders them with null context.
-            # P1.5-AC3 (#137) — admission-time leverage arbitration. Both
-            # enrichment fields (`recommended_leverage` from 691.1, the
-            # `strategy_envelope` from data-manager#179) are absent today,
-            # so the arbiter falls through to the env-var-only path
-            # (`CIO_DEFAULT_MAX_LEVERAGE`). When the enrichment lands, the
-            # `getattr(...)` calls below start returning real values and
-            # the arbiter branches accordingly without code change here.
-            leverage_decision = arbitrate_leverage(
-                recommended_leverage=getattr(context, "recommended_leverage", None),
-                strategy_envelope=getattr(context, "strategy_leverage_envelope", None),
-            )
+            # P1.5-AC3 (#137) / #174 — `leverage_decision` was already
+            # resolved once at the top of `route()` (single source of truth
+            # shared with the translator dispatch below); reuse it here
+            # rather than recomputing.
             logger.info(
                 "leverage_arbiter decision_id=%s branch=%s decided=%s bound=%s",
                 decision_id,

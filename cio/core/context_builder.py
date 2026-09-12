@@ -154,6 +154,17 @@ class ContextBuilder:
         # Pass decision_id only when provided; TriggerContext.default_factory generates one otherwise
         extra = {"decision_id": decision_id} if decision_id is not None else {}
 
+        # P1.5-AC3 (#137) / #174 — surface the strategy's configured leverage
+        # (fetched from data-manager's strategy config, `defaults.leverage`)
+        # as `recommended_leverage` so `arbitrate_leverage` exercises its
+        # primary accept/override branches instead of permanently falling
+        # back to the operator-max-only path. `strategy_leverage_envelope`
+        # is left None until petrosa-data-manager#179 ships the per-strategy
+        # characterization-derived envelope field.
+        recommended_leverage: int | None = None
+        if defaults.leverage is not None and defaults.leverage >= 1:
+            recommended_leverage = int(round(defaults.leverage))
+
         market_signals = MarketSignals(
             signal_summary=payload.get("signal_summary", "Manual trigger"),
             current_price=payload.get("current_price") or payload.get("price") or 0.0,
@@ -194,6 +205,7 @@ class ContextBuilder:
             strategy_revision_id=strategy_revision_id,
             strategy_stats=stats,
             strategy_defaults=defaults,
+            recommended_leverage=recommended_leverage,
             global_drawdown_pct=env_stats.get("global_drawdown_pct", 0.0),
             open_orders_global=env_stats.get("open_orders_global", 0),
             open_orders_symbol=env_stats.get("open_orders_symbol", 0),
