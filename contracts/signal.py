@@ -127,6 +127,15 @@ class Signal(BaseModel):
     )
 
     # Risk management
+    # P1.5-AC3 / #174: admission-time leverage decided by CIO's leverage
+    # arbiter (cio/core/leverage_arbiter.py::arbitrate_leverage). Consumers
+    # (e.g. petrosa-tradeengine) should prefer this inbound value over any
+    # local per-symbol default when present.
+    leverage: int | None = Field(
+        None,
+        ge=1,
+        description="Admission-time leverage decided by CIO's leverage arbiter",
+    )
     stop_loss: float | None = Field(None, description="Stop loss price")
     stop_loss_pct: float | None = Field(
         None, ge=0, le=1, description="Stop loss as percentage"

@@ -57,6 +57,12 @@ class DecisionResult(BaseModel):
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
     leverage: float = 1.0
+    # P1.5-AC3 (#137) / #174 — the admission-time leverage decided by
+    # `arbitrate_leverage`, distinct from `leverage` above (which is the
+    # regime-capped strategy default computed by CodeEngine). Set by
+    # `OutputRouter.route` before dispatch so it reaches both the outbound
+    # `Signal.leverage` (translator) and the dashboard decision feed.
+    decided_leverage: int | None = None
     order_type: OrderType = OrderType.LIMIT
     split_order: bool = False
     entry_offset_pct: float = 0.0
