@@ -310,7 +310,9 @@ class CIO_LLM_Client(ABC):
                     from cio.core.metrics import LLM_RESPONSE_RECOVERED
 
                     LLM_RESPONSE_RECOVERED.add(1, {"prompt_id": prompt_id})
-                except ImportError:
+                except (
+                    ImportError
+                ):  # pragma: no cover — defensive, metrics always importable
                     pass
                 logger.info(
                     "LLM response recovered via brace-extraction/field-clamping "
@@ -357,7 +359,9 @@ class CIO_LLM_Client(ABC):
                             LLM_RESPONSE_RECOVERED.add(
                                 1, {"prompt_id": prompt_id, "leg": "fallback"}
                             )
-                        except ImportError:
+                        except (
+                            ImportError
+                        ):  # pragma: no cover — defensive, metrics always importable
                             pass
                         logger.info(
                             "LLM fallback response recovered via "

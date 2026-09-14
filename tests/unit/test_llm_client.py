@@ -494,6 +494,34 @@ def test_extract_balanced_json_returns_none_without_braces():
     assert _extract_balanced_json("no json here at all") is None
 
 
+def test_extract_balanced_json_handles_escaped_quotes_inside_strings():
+    """Exercises the in-string escape handling: an escaped quote must not
+    be mistaken for the string terminator (which would desync brace
+    depth counting on a `}` that appears later inside the same string)."""
+    from cio.clients.llm_client import _extract_balanced_json
+
+    text = 'prefix {"msg": "she said \\"hello\\" to me"} suffix noise'
+    extracted = _extract_balanced_json(text)
+    assert extracted == '{"msg": "she said \\"hello\\" to me"}'
+    assert json.loads(extracted) == {"msg": 'she said "hello" to me'}
+
+
+def test_extract_balanced_json_returns_none_when_never_balances():
+    """An opening brace with no matching close (e.g. a truncated stream)
+    must not be treated as extractable."""
+    from cio.clients.llm_client import _extract_balanced_json
+
+    assert _extract_balanced_json('prefix {"a": "unterminated') is None
+
+
+def test_recover_validated_response_returns_none_for_non_dict_json():
+    """Valid JSON that isn't an object (e.g. a bare array) can never
+    satisfy a BaseModel and must not be treated as recoverable."""
+    from cio.clients.llm_client import _recover_validated_response
+
+    assert _recover_validated_response("[1, 2, 3]", _FakeResponse) is None
+
+
 # ---------------------------------------------------------------------------
 # Fence stripping: with and without closing fence
 # ---------------------------------------------------------------------------
