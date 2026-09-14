@@ -84,6 +84,104 @@ def _inject_minimal_thought_trace_json(
     return json.dumps(data)
 
 
+def _extract_balanced_json(text: str) -> str | None:
+    """Extract the first balanced ``{...}`` JSON object substring from ``text``.
+
+    Defends against LLM responses that wrap the required JSON object in
+    conversational prose (e.g. ``"Sure, here's the decision: {...}"``)
+    despite the system prompt's "ONLY a JSON object" instruction — a
+    failure mode observed with less schema-disciplined / newly-swapped
+    models (see #187: CIO's LLM was pinned to an untested vision-instruct
+    model as an emergency EOL replacement in #1009, with no live
+    verification that it reliably emits bare JSON). Returns ``None`` when
+    no balanced object can be found so callers can fall through to
+    existing handling unchanged.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _clamp_string_fields_to_schema(
+    raw: dict[str, Any], response_model: type[BaseModel]
+) -> dict[str, Any]:
+    """Clamp string field values to their Pydantic ``max_length`` constraint.
+
+    LLM responses (especially from smaller / less schema-disciplined
+    models) routinely produce cosmetic text fields (``justification``,
+    ``thought_trace``) that overrun the prompt's stated character budget
+    while the DECISION-CRITICAL fields (the ``action`` enum, numeric
+    fields) remain perfectly valid. Rejecting the whole response over one
+    overlong string forces a ``SAFE_DEFAULTS`` (SKIP/FAIL_SAFE) fallback
+    despite a structurally sound decision being trivially recoverable by
+    truncation. Only ever shortens existing ``str`` values — never invents,
+    reinterprets, or touches non-string / enum / numeric fields, so no
+    safety-relevant semantics change.
+    """
+    clamped = dict(raw)
+    for name, field in response_model.model_fields.items():
+        value = clamped.get(name)
+        if not isinstance(value, str):
+            continue
+        max_len = None
+        for meta in getattr(field, "metadata", []) or []:
+            candidate = getattr(meta, "max_length", None)
+            if candidate is not None:
+                max_len = candidate
+                break
+        if max_len is not None and len(value) > max_len:
+            clamped[name] = value[:max_len]
+    return clamped
+
+
+def _recover_validated_response(
+    content: str, response_model: type[BaseModel]
+) -> BaseModel | None:
+    """Best-effort, non-raising recovery for content that failed strict
+    ``model_validate_json()``.
+
+    Tries: (1) extract an embedded JSON object in case the model wrapped
+    it in prose, (2) clamp any overlong string fields to their schema
+    ``max_length``, (3) re-validate. Returns ``None`` (never raises) if
+    recovery isn't possible, in which case callers fall through to the
+    existing schema-fallback / ``SAFE_DEFAULTS`` path unchanged.
+    """
+    candidate = _extract_balanced_json(content) or content
+    try:
+        raw = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    clamped = _clamp_string_fields_to_schema(raw, response_model)
+    try:
+        return response_model.model_validate(clamped)
+    except ValidationError:
+        return None
+
+
 def resolve_llm_capability_profile() -> str:
     """
     CIO LLM tier: ``minimal`` (small models, no JSON mode / stripped prompts) or
@@ -201,6 +299,26 @@ class CIO_LLM_Client(ABC):
             except ImportError:
                 pass
 
+            # 3b (#187): before paying for a fallback model call, try a
+            # cheap local recovery — the content may be schema-valid JSON
+            # wrapped in prose, or have a cosmetic string field that
+            # overruns its max_length. Never masks a genuine action/enum
+            # mismatch — only rescues structurally-sound decisions.
+            recovered = _recover_validated_response(content, response_model)
+            if recovered is not None:
+                try:
+                    from cio.core.metrics import LLM_RESPONSE_RECOVERED
+
+                    LLM_RESPONSE_RECOVERED.add(1, {"prompt_id": prompt_id})
+                except ImportError:
+                    pass
+                logger.info(
+                    "LLM response recovered via brace-extraction/field-clamping "
+                    "— skipping fallback/SAFE_DEFAULTS",
+                    extra={"prompt_id": prompt_id, "model": raw.model},
+                )
+                return recovered
+
             logger.warning(
                 "LLM response validation failed — attempting schema fallback",
                 extra={
@@ -229,6 +347,24 @@ class CIO_LLM_Client(ABC):
                     )
                     return response_model.model_validate_json(fb_content)
                 except (ValidationError, json.JSONDecodeError) as fb_e:
+                    fb_recovered = _recover_validated_response(
+                        fb_content, response_model
+                    )
+                    if fb_recovered is not None:
+                        try:
+                            from cio.core.metrics import LLM_RESPONSE_RECOVERED
+
+                            LLM_RESPONSE_RECOVERED.add(
+                                1, {"prompt_id": prompt_id, "leg": "fallback"}
+                            )
+                        except ImportError:
+                            pass
+                        logger.info(
+                            "LLM fallback response recovered via "
+                            "brace-extraction/field-clamping — skipping SAFE_DEFAULTS",
+                            extra={"prompt_id": prompt_id, "model": fallback_raw.model},
+                        )
+                        return fb_recovered
                     try:
                         from cio.core.metrics import LLM_VALIDATION_FAILURES
 

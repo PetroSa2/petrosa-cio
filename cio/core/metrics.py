@@ -31,6 +31,19 @@ LLM_FALLBACK_SKIPS = meter.create_counter(
     description="Total SAFE_DEFAULT fallbacks that force SKIP-like behavior",
 )
 
+# #187 — recovered responses: the raw LLM content failed strict
+# model_validate_json() (prose-wrapped JSON and/or an over-length string
+# field vs. the prompt's stated char budget) but was salvaged by
+# brace-extraction + string-field clamping, avoiding a SAFE_DEFAULTS(SKIP)
+# fallback that a structurally sound decision did not warrant.
+LLM_RESPONSE_RECOVERED = meter.create_counter(
+    "cio_llm_response_recovered_total",
+    description=(
+        "Total LLM responses salvaged via brace-extraction/field-clamping "
+        "after failing strict schema validation on first pass"
+    ),
+)
+
 # Risk-Gate Provenance Metrics (#172) — distinguishes a hard block caused by
 # a context-fetch failure (ContextBuilder fell back to conservative safe
 # defaults) from a hard block backed by real, live portfolio/risk data.

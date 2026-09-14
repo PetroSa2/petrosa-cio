@@ -4,6 +4,7 @@ Unit tests for LiteLLMClient fixes:
   - AC1: response_format=json_object only when supported/configured
 """
 
+import json
 import logging
 import os
 import sys
@@ -12,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cio.clients import llm_client as llm_client_module
 from cio.clients.llm_client import LiteLLMClient
@@ -346,6 +347,151 @@ async def test_schema_fallback_returns_none_on_litellm_exception():
         )
 
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# #187: recovery — brace-extraction + string-field clamping before falling
+# back to the schema-fallback model / SAFE_DEFAULTS. Root cause: #1009's
+# emergency LLM model swap (NVIDIA NIM meta/llama-3.1-8b-instruct EOL'd
+# 2026-08-26) pinned CIO to an untested vision-instruct model with no live
+# verification of strict bare-JSON / char-budget compliance, driving
+# sustained LLM_PARSE_FAILURE_SKIP -> SAFE_DEFAULTS(SKIP) dominance.
+# ---------------------------------------------------------------------------
+
+
+class _ActionLikeResponse(BaseModel):
+    """Mirrors ActionResult's shape (enum-free) for isolated recovery tests."""
+
+    action: str
+    justification: str = Field(max_length=200)
+    thought_trace: str = Field(max_length=120)
+
+
+@pytest.mark.asyncio
+async def test_recovery_extracts_json_wrapped_in_prose_and_skips_fallback():
+    """A model that ignores 'ONLY a JSON object' and wraps the payload in
+    conversational prose is recovered via brace-extraction — no fallback
+    model call, no SAFE_DEFAULTS."""
+    client = LiteLLMClient()
+    wrapped = (
+        "Sure, here is my decision:\n"
+        '{"value": "ok"}\n'
+        "Let me know if you need anything else!"
+    )
+    client.complete = AsyncMock(return_value=_raw(wrapped))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("should not be called")
+    )
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert isinstance(result, _FakeResponse)
+    assert result.value == "ok"
+    client._schema_fallback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_recovery_clamps_overlong_thought_trace_and_skips_fallback():
+    """A structurally valid decision whose thought_trace overruns the
+    prompt's 120-char budget is truncated and accepted, instead of being
+    thrown away wholesale as a SAFE_DEFAULTS(SKIP)."""
+    client = LiteLLMClient()
+    overlong_trace = "x" * 200
+    payload = json.dumps(
+        {
+            "action": "execute",
+            "justification": "ok",
+            "thought_trace": overlong_trace,
+        }
+    )
+    client.complete = AsyncMock(return_value=_raw(payload))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("should not be called")
+    )
+
+    with patch("cio.core.metrics.LLM_RESPONSE_RECOVERED") as mock_counter:
+        result = await client.complete_with_schema(
+            prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+            response_model=_ActionLikeResponse,
+        )
+
+    assert isinstance(result, _ActionLikeResponse)
+    assert result.action == "execute"
+    assert len(result.thought_trace) == 120
+    assert result.thought_trace == overlong_trace[:120]
+    client._schema_fallback.assert_not_called()
+    mock_counter.add.assert_called_once_with(
+        1, {"prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER"}
+    )
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_mask_genuinely_missing_required_field():
+    """Recovery must not invent data: a JSON object missing a required
+    field still falls through to the fallback model / SAFE_DEFAULTS."""
+    from cio.models import SAFE_DEFAULTS
+
+    client = LiteLLMClient()
+    # Valid JSON, but missing the required "value" field for _FakeResponse.
+    incomplete = '{"other_field": "irrelevant"}'
+    client.complete = AsyncMock(return_value=_raw(incomplete))
+    client._schema_fallback = AsyncMock(return_value=None)
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
+    client._schema_fallback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recovery_applies_to_fallback_leg_too():
+    """The fallback model's response is also eligible for brace-extraction
+    recovery before giving up to SAFE_DEFAULTS."""
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw("NOT_JSON"))
+    client._schema_fallback = AsyncMock(
+        return_value=_raw(
+            'Here you go: {"value": "fb_ok"} (hope that helps)',
+            model="fallback-model",
+        )
+    )
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert isinstance(result, _FakeResponse)
+    assert result.value == "fb_ok"
+
+
+def test_extract_balanced_json_handles_nested_braces_and_strings():
+    from cio.clients.llm_client import _extract_balanced_json
+
+    text = 'prefix noise {"a": {"b": 1}, "c": "contains } brace"} suffix noise'
+    extracted = _extract_balanced_json(text)
+    assert extracted == '{"a": {"b": 1}, "c": "contains } brace"}'
+    assert json.loads(extracted) == {"a": {"b": 1}, "c": "contains } brace"}
+
+
+def test_extract_balanced_json_returns_none_without_braces():
+    from cio.clients.llm_client import _extract_balanced_json
+
+    assert _extract_balanced_json("no json here at all") is None
 
 
 # ---------------------------------------------------------------------------
