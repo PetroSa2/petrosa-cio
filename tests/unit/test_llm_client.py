@@ -523,6 +523,160 @@ def test_recover_validated_response_returns_none_for_non_dict_json():
 
 
 # ---------------------------------------------------------------------------
+# #189: model self-reports its own documented `{"error": "MISSING_INPUT"}`
+# contract sentinel (ABSOLUTE RULE 4 in every CIO prompt). Root cause
+# live-reproduced against meta/llama-3.2-11b-vision-instruct: a sparse
+# user_context deterministically returns this sentinel, which fails generic
+# Pydantic validation on BOTH the primary and fallback legs (same context,
+# same model) since none of the response models define an "error" field —
+# producing the observed "schema fallback also failed" -> LLM_PARSE_FAILURE_SKIP
+# even though the model behaved exactly as instructed.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_input_sentinel_short_circuits_to_safe_defaults_without_fallback_call():
+    """Primary leg reporting MISSING_INPUT must skip the fallback call
+    entirely — retrying is guaranteed to repeat the same self-reported
+    error since the underlying context is unchanged."""
+    from cio.models import SAFE_DEFAULTS
+
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw('{"error": "MISSING_INPUT"}'))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("fallback should not be called")
+    )
+
+    with patch("cio.core.metrics.LLM_MISSING_INPUT_SKIPS") as mock_counter:
+        result = await client.complete_with_schema(
+            prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+            response_model=_FakeResponse,
+        )
+
+    assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
+    client._schema_fallback.assert_not_called()
+    mock_counter.add.assert_called_once_with(
+        1,
+        {
+            "prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER",
+            "reported_error": "MISSING_INPUT",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_missing_input_sentinel_emits_distinct_log_not_parse_failure_skip(caplog):
+    """The distinct LLM_MISSING_INPUT_SKIP log line must fire instead of
+    LLM_PARSE_FAILURE_SKIP for the self-reported contract sentinel."""
+    caplog.set_level(logging.WARNING, logger="cio.clients.llm_client")
+
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw('{"error": "MISSING_INPUT"}'))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("fallback should not be called")
+    )
+
+    await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert "LLM_MISSING_INPUT_SKIP" in caplog.text
+    assert "LLM_PARSE_FAILURE_SKIP" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_missing_input_sentinel_recovered_from_prose_wrapped_content():
+    """The sentinel is detected even when wrapped in prose, via the same
+    brace-extraction used for the recovery path."""
+    from cio.models import SAFE_DEFAULTS
+
+    client = LiteLLMClient()
+    wrapped = 'I cannot decide with this data. {"error": "MISSING_INPUT"} Sorry!'
+    client.complete = AsyncMock(return_value=_raw(wrapped))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("fallback should not be called")
+    )
+
+    result = await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
+    client._schema_fallback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_input_sentinel_on_fallback_leg_short_circuits():
+    """When the primary fails for an unrelated reason but the fallback leg
+    (same model, same context) reports MISSING_INPUT, it must be classified
+    the same way — not as a generic double schema-fallback failure."""
+    from cio.models import SAFE_DEFAULTS
+
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw("NOT_JSON"))
+    client._schema_fallback = AsyncMock(
+        return_value=_raw('{"error": "MISSING_INPUT"}', model="fallback-model")
+    )
+
+    with patch("cio.core.metrics.LLM_MISSING_INPUT_SKIPS") as mock_counter:
+        result = await client.complete_with_schema(
+            prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+            system_prompt="sys",
+            user_context={},
+            response_model=_FakeResponse,
+        )
+
+    assert result == SAFE_DEFAULTS["PETROSA_PROMPT_ACTION_CLASSIFIER"]
+    mock_counter.add.assert_called_once_with(
+        1,
+        {
+            "prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER",
+            "reported_error": "MISSING_INPUT",
+            "leg": "fallback",
+        },
+    )
+
+
+def test_extract_reported_error_detects_sentinel():
+    from cio.clients.llm_client import _extract_reported_error
+
+    assert _extract_reported_error('{"error": "MISSING_INPUT"}') == "MISSING_INPUT"
+
+
+def test_extract_reported_error_returns_none_for_valid_decision():
+    from cio.clients.llm_client import _extract_reported_error
+
+    assert (
+        _extract_reported_error(
+            '{"action": "execute", "justification": "ok", "thought_trace": "t"}'
+        )
+        is None
+    )
+
+
+def test_extract_reported_error_returns_none_for_non_dict_json():
+    from cio.clients.llm_client import _extract_reported_error
+
+    assert _extract_reported_error("[1, 2, 3]") is None
+
+
+def test_extract_reported_error_returns_none_for_empty_error_string():
+    """An empty/falsy `error` value must not be treated as a genuine
+    self-reported contract violation."""
+    from cio.clients.llm_client import _extract_reported_error
+
+    assert _extract_reported_error('{"error": ""}') is None
+
+
+# ---------------------------------------------------------------------------
 # Fence stripping: with and without closing fence
 # ---------------------------------------------------------------------------
 

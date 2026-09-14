@@ -61,3 +61,22 @@ RISK_GATE_REAL_BREACH = meter.create_counter(
     "cio_risk_gate_real_breach_total",
     description="Risk-gate hard blocks backed by live portfolio/risk data",
 )
+
+# #189 — the model self-reporting its own documented input-contract sentinel
+# (ABSOLUTE RULE 4 in every CIO prompt: `{"error": "MISSING_INPUT"}` when
+# required fields are absent) is NOT a schema parse failure — it is the model
+# behaving exactly as instructed. Pre-#189 this was indistinguishable from a
+# genuinely malformed/undisciplined response and inflated
+# cio_llm_fallback_skips_total / LLM_PARSE_FAILURE_SKIP with a condition that
+# a fallback-model retry can never fix (same incomplete context, same model,
+# same self-reported error). Tracked separately so on-call can tell "context
+# builder is producing incomplete input" apart from "model output is
+# malformed".
+LLM_MISSING_INPUT_SKIPS = meter.create_counter(
+    "cio_llm_missing_input_skips_total",
+    description=(
+        "Total SAFE_DEFAULT fallbacks triggered by the model's own "
+        "self-reported MISSING_INPUT contract sentinel, not a schema "
+        "parse failure"
+    ),
+)

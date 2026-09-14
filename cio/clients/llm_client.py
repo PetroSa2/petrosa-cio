@@ -156,6 +156,41 @@ def _clamp_string_fields_to_schema(
     return clamped
 
 
+def _extract_reported_error(content: str) -> str | None:
+    """Detect the model's own documented ``{"error": "..."}`` sentinel.
+
+    Every CIO prompt (regime classifier, strategy assessor, action
+    classifier) instructs the model under "ABSOLUTE RULES" #4: *"If
+    required input data is missing, output: {"error": "MISSING_INPUT"}"*.
+    None of the corresponding Pydantic response models (``RegimeResult``,
+    ``StrategyResult``, ``ActionResult``) define an ``error`` field, so a
+    model that correctly follows this documented contract still fails
+    generic Pydantic validation — indistinguishable, pre-#189, from a
+    genuinely malformed response (see #189: live-reproduced against
+    meta/llama-3.2-11b-vision-instruct — a sparse/incomplete
+    ``user_context`` deterministically returns ``{"error":
+    "MISSING_INPUT"}``). Because the schema-fallback leg re-sends the
+    SAME (incomplete) context to the SAME model, it reliably repeats the
+    identical self-reported error, producing the observed "schema
+    fallback also failed" -> ``LLM_PARSE_FAILURE_SKIP`` pattern even
+    though the model behaved exactly as instructed. Returns the reported
+    error string (e.g. ``"MISSING_INPUT"``) when this sentinel is
+    detected, else ``None`` so callers fall through to existing handling
+    unchanged.
+    """
+    candidate = _extract_balanced_json(content) or content
+    try:
+        raw = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    error = raw.get("error")
+    if isinstance(error, str) and error:
+        return error
+    return None
+
+
 def _recover_validated_response(
     content: str, response_model: type[BaseModel]
 ) -> BaseModel | None:
@@ -299,6 +334,41 @@ class CIO_LLM_Client(ABC):
             except ImportError:
                 pass
 
+            # 3a (#189): the model may be correctly following its own
+            # documented input contract ("if required input is missing,
+            # output {"error": "MISSING_INPUT"}") rather than failing to
+            # produce schema-valid JSON. This is NOT a parse failure, and
+            # retrying against the fallback model is guaranteed to repeat
+            # the identical self-reported error since the underlying
+            # context is unchanged. Short-circuit straight to
+            # SAFE_DEFAULTS with a distinct metric/log line so this
+            # expected, self-diagnosed condition never masquerades as
+            # LLM_PARSE_FAILURE_SKIP or burns a wasted fallback call.
+            reported_error = _extract_reported_error(content)
+            if reported_error is not None:
+                try:
+                    from cio.core.metrics import LLM_MISSING_INPUT_SKIPS
+
+                    LLM_MISSING_INPUT_SKIPS.add(
+                        1, {"prompt_id": prompt_id, "reported_error": reported_error}
+                    )
+                except ImportError:  # pragma: no cover — defensive
+                    pass
+                logger.warning(
+                    "LLM self-reported an input-contract violation "
+                    "(not a schema parse failure) — returning safe default",
+                    extra={
+                        "prompt_id": prompt_id,
+                        "reported_error": reported_error,
+                        "model": raw.model,
+                    },
+                )
+                logger.error(
+                    "LLM_MISSING_INPUT_SKIP",
+                    extra={"prompt_id": prompt_id, "reported_error": reported_error},
+                )
+                return SAFE_DEFAULTS[prompt_id]
+
             # 3b (#187): before paying for a fallback model call, try a
             # cheap local recovery — the content may be schema-valid JSON
             # wrapped in prose, or have a cosmetic string field that
@@ -347,6 +417,48 @@ class CIO_LLM_Client(ABC):
                     fb_content = _inject_minimal_thought_trace_json(
                         fb_content, prompt_id, self._capability_profile
                     )
+
+                    # 3a-fallback (#189): the fallback leg re-sends the SAME
+                    # (frequently incomplete) context, so it is equally
+                    # likely to repeat the model's own self-reported
+                    # MISSING_INPUT sentinel. Classify it the same way as
+                    # the primary leg instead of falling through to the
+                    # generic "schema fallback also failed" path.
+                    fb_reported_error = _extract_reported_error(fb_content)
+                    if fb_reported_error is not None:
+                        try:
+                            from cio.core.metrics import LLM_MISSING_INPUT_SKIPS
+
+                            LLM_MISSING_INPUT_SKIPS.add(
+                                1,
+                                {
+                                    "prompt_id": prompt_id,
+                                    "reported_error": fb_reported_error,
+                                    "leg": "fallback",
+                                },
+                            )
+                        except ImportError:  # pragma: no cover — defensive
+                            pass
+                        logger.warning(
+                            "LLM fallback self-reported an input-contract "
+                            "violation (not a schema parse failure) — "
+                            "returning safe default",
+                            extra={
+                                "prompt_id": prompt_id,
+                                "reported_error": fb_reported_error,
+                                "model": fallback_raw.model,
+                            },
+                        )
+                        logger.error(
+                            "LLM_MISSING_INPUT_SKIP",
+                            extra={
+                                "prompt_id": prompt_id,
+                                "reported_error": fb_reported_error,
+                                "leg": "fallback",
+                            },
+                        )
+                        return SAFE_DEFAULTS[prompt_id]
+
                     return response_model.model_validate_json(fb_content)
                 except (ValidationError, json.JSONDecodeError) as fb_e:
                     fb_recovered = _recover_validated_response(
