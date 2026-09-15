@@ -15,32 +15,47 @@ repos:
         name: ⚡ Ruff Formatter
 
   # ==================================================================
-  # TYPE CHECKING - Mypy (Latest v1.15.0)
-  # NOTE: 83+ pre-existing mypy errors across 18 files prevent commits.
-  # Commented out until pre-existing type errors are resolved (separate ticket).
+  # TYPE CHECKING - Mypy (v1.15.0 — matches CI, non-blocking for now)
   # ==================================================================
-  # - repo: https://github.com/pre-commit/mirrors-mypy
-  #   rev: v1.15.0
-  #   hooks:
-  #     - id: mypy
-  #       name: 🔍 Mypy Type Checker
-  #       additional_dependencies: [
-  #         'pyyaml',
-  #         'types-PyYAML',
-  #         'types-requests',
-  #         'types-setuptools',
-  #         'pydantic'
-  #       ]
-  #       args: [--ignore-missing-imports, --strict]
+  # Non-blocking on purpose: CI's own "Run Mypy" step is `continue-on-error:
+  # true` today (PetroSa2/petrosa_k8s#1052 epic step 1/2 baselines the error
+  # count and flips both gates to blocking together, shrink-only). A plain
+  # `mirrors-mypy` hook would exit non-zero and fail this repo's unconditionally
+  # blocking pre-commit gate ahead of that baseline (223 pre-existing errors
+  # today), so this wraps mypy in the same non-blocking pattern via
+  # scripts/run-mypy-precommit.sh.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: 🔍 Mypy Type Checker (non-blocking)
+        entry: scripts/run-mypy-precommit.sh
+        language: python
+        additional_dependencies: [
+          'mypy==1.15.0',
+          'pyyaml',
+          'types-PyYAML',
+          'types-requests',
+          'types-setuptools',
+          'pydantic'
+        ]
+        pass_filenames: false
 
   # ==================================================================
-  # SECURITY - Gitleaks (Official Hook)
+  # SECURITY - Gitleaks (de-networked: prebuilt binary, no `go install`)
   # ==================================================================
-  - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.18.4
+  # per #1043 §3 / #1052 epic step 0.2 / #180: the upstream `language: golang`
+  # hook form runs `go install ./...` on a cold cache, a transient network
+  # dependency on proxy.golang.org inside a blocking PR-path gate (root cause
+  # of the petrosa-data-manager "Install pre-commit" flakes). This local
+  # hook fetches the same prebuilt gitleaks release binary CI's
+  # security-scan step already uses.
+  - repo: local
     hooks:
       - id: gitleaks
         name: 🔐 Gitleaks (Secret Detection)
+        entry: scripts/run-gitleaks-precommit.sh
+        language: script
+        pass_filenames: false
 
   # ==================================================================
   # SECURITY - Bandit (Latest v1.7.8)
