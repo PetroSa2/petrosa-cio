@@ -37,7 +37,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -70,7 +70,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Determine Version
@@ -131,7 +131,7 @@ jobs:
           private_key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
 
       - name: Checkout petrosa_k8s
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: PetroSa2/petrosa_k8s
           ref: main
