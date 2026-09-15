@@ -125,7 +125,7 @@ async def test_approval_required_diverts_and_skips_dispatch():
     assert pending[0].strategy_id == "strat_a"
 
     # Audit trail records the diversion (event_type=decision_pending_approval).
-    audit_calls = [c for c in mock_vc.upsert.call_args_list]
+    audit_calls = list(mock_vc.upsert.call_args_list)
     assert len(audit_calls) == 1
     audit_payload = audit_calls[0].kwargs["payload"]
     assert audit_payload["event_type"] == "decision_pending_approval"
