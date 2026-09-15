@@ -30,43 +30,47 @@ def _make_context(**overrides) -> TriggerContext:
         primary_signal="test",
         thought_trace="test",
     )
-    defaults = dict(
-        correlation_id="test-corr",
-        source_subject="cio.intent.trading.s1",
-        trigger_type=TriggerType.TRADE_INTENT,
-        trigger_payload={"symbol": "BTCUSDT", "side": "long", "current_price": 50000.0},
-        regime=regime,
-        volatility_level=VolatilityLevel.MEDIUM,
-        market_signals=MarketSignals(
+    defaults = {
+        "correlation_id": "test-corr",
+        "source_subject": "cio.intent.trading.s1",
+        "trigger_type": TriggerType.TRADE_INTENT,
+        "trigger_payload": {
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "current_price": 50000.0,
+        },
+        "regime": regime,
+        "volatility_level": VolatilityLevel.MEDIUM,
+        "market_signals": MarketSignals(
             signal_summary="test",
             current_price=50000.0,
             volatility_percentile=0.5,
             trend_strength=0.5,
             price_action_character="Neutral",
         ),
-        strategy_id="s1",
-        strategy_stats=StrategyStats(),
-        strategy_defaults=StrategyDefaults(
+        "strategy_id": "s1",
+        "strategy_stats": StrategyStats(),
+        "strategy_defaults": StrategyDefaults(
             stop_loss_pct=0.02,
             take_profit_pct=0.04,
             leverage=1.0,
             max_hold_hours=24.0,
         ),
-        global_drawdown_pct=0.0,
-        open_orders_global=0,
-        open_orders_symbol=0,
-        available_capital_usd=1000.0,
-        portfolio=PortfolioSummary(
+        "global_drawdown_pct": 0.0,
+        "open_orders_global": 0,
+        "open_orders_symbol": 0,
+        "available_capital_usd": 1000.0,
+        "portfolio": PortfolioSummary(
             gross_exposure=0.0, same_asset_pct=0.0, open_positions_count=0
         ),
-        risk_limits=RiskLimits(
+        "risk_limits": RiskLimits(
             max_single_position_pct=0.1,
             max_global_drawdown_pct=0.1,
             max_portfolio_exposure=0.5,
             max_open_orders=10,
             max_same_asset_concentration=0.25,
         ),
-    )
+    }
     defaults.update(overrides)
     return TriggerContext(**defaults)
 
