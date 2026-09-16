@@ -645,6 +645,72 @@ async def test_missing_input_sentinel_on_fallback_leg_short_circuits():
     )
 
 
+# ---------------------------------------------------------------------------
+# AC5 (#197): LLM_MISSING_INPUT_SKIP log line body must include prompt_id and
+# reported_error — they previously lived only in `extra={}`, which the
+# structured JSON logging config (petrosa_otel.TraceContextJSONFormatter)
+# does not render (it looks for `record.extra`, but logging's stdlib
+# attaches extras directly on the record, not as a nested `.extra` attr —
+# so the fields were silently dropped from `kubectl logs` output).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_missing_input_skip_log_body_includes_prompt_id_and_reported_error(
+    caplog,
+):
+    """The LLM_MISSING_INPUT_SKIP message body (not just `extra={}`) must
+    contain prompt_id and reported_error so `kubectl logs | grep
+    LLM_MISSING_INPUT_SKIP` surfaces both fields even when the deployed
+    JSON formatter does not render stdlib logging `extra` kwargs."""
+    caplog.set_level(logging.ERROR, logger="cio.clients.llm_client")
+
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw('{"error": "MISSING_INPUT"}'))
+    client._schema_fallback = AsyncMock(
+        side_effect=AssertionError("fallback should not be called")
+    )
+
+    await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    skip_records = [r for r in caplog.records if "LLM_MISSING_INPUT_SKIP" in r.message]
+    assert skip_records, "expected an LLM_MISSING_INPUT_SKIP log record"
+    body = skip_records[0].message
+    assert "prompt_id=PETROSA_PROMPT_ACTION_CLASSIFIER" in body
+    assert "reported_error=MISSING_INPUT" in body
+
+
+@pytest.mark.asyncio
+async def test_missing_input_skip_log_body_includes_fields_on_fallback_leg(caplog):
+    """Same AC5 body-inclusion contract on the fallback leg's SKIP line."""
+    caplog.set_level(logging.ERROR, logger="cio.clients.llm_client")
+
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw("NOT_JSON"))
+    client._schema_fallback = AsyncMock(
+        return_value=_raw('{"error": "MISSING_INPUT"}', model="fallback-model")
+    )
+
+    await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    skip_records = [r for r in caplog.records if "LLM_MISSING_INPUT_SKIP" in r.message]
+    assert skip_records, "expected an LLM_MISSING_INPUT_SKIP log record"
+    body = skip_records[0].message
+    assert "prompt_id=PETROSA_PROMPT_ACTION_CLASSIFIER" in body
+    assert "reported_error=MISSING_INPUT" in body
+    assert "leg=fallback" in body
+
+
 def test_extract_reported_error_detects_sentinel():
     from cio.clients.llm_client import _extract_reported_error
 

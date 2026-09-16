@@ -364,7 +364,8 @@ class CIO_LLM_Client(ABC):
                     },
                 )
                 logger.error(
-                    "LLM_MISSING_INPUT_SKIP",
+                    f"LLM_MISSING_INPUT_SKIP prompt_id={prompt_id} "
+                    f"reported_error={reported_error}",
                     extra={"prompt_id": prompt_id, "reported_error": reported_error},
                 )
                 return SAFE_DEFAULTS[prompt_id]
@@ -450,7 +451,8 @@ class CIO_LLM_Client(ABC):
                             },
                         )
                         logger.error(
-                            "LLM_MISSING_INPUT_SKIP",
+                            f"LLM_MISSING_INPUT_SKIP prompt_id={prompt_id} "
+                            f"reported_error={fb_reported_error} leg=fallback",
                             extra={
                                 "prompt_id": prompt_id,
                                 "reported_error": fb_reported_error,
