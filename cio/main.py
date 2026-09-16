@@ -65,6 +65,15 @@ for h in root_logger.handlers[:]:
     root_logger.removeHandler(h)
 root_logger.addHandler(handler)
 
+# #192: litellm's internal `LiteLLM` logger propagates to the root logger at
+# INFO (e.g. "LiteLLM completion() model=..." and "LiteLLM:INFO: utils.py:...")
+# with no parseable level token, drowning real signal in Grafana/Loki as
+# "unknown"-severity noise. Applied at import time (before server start) so
+# it is in effect for every litellm.acompletion/aembedding call regardless of
+# call order. WARNING/ERROR-level LLM failure signal (cio#187/#189) is
+# untouched — only INFO/DEBUG chatter from this specific logger is raised.
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
 logger = logging.getLogger("cio-strategist")
 
 # Initialize FastAPI for health checks
@@ -160,7 +169,10 @@ async def main():
         and os.getenv("OTEL_NO_AUTO_INIT", "").lower() not in ("1", "true", "yes", "on")
     ):
         try:
-            success = attach_logging_handler()
+            # #192: emit structured JSON stdout logs so Grafana/Loki derive a
+            # real severity token instead of falling back to "unknown" for
+            # lines the text formatter can't cleanly classify.
+            success = attach_logging_handler(use_json_format=True)
             if success:
                 logger.info(
                     "✅ OpenTelemetry logging handler attached - logs will be exported to Grafana"
