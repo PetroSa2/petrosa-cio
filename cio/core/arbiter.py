@@ -198,7 +198,14 @@ class SignalArbiter:
         # to suppress. Policy is per-subsystem: strict = suppress; lax = warn only.
         if self._evaluator_subscriber is not None:
             for guarded in _PAUSE_GUARD_SUBSYSTEMS:
-                if self._evaluator_subscriber.is_paused(guarded):
+                # #193: pass the incoming signal's symbol so a fault the
+                # publisher scoped to a different symbol (e.g. one stuck
+                # position) does not halt decisioning on this one. When
+                # the publisher sent no scope (or this evaluator doesn't
+                # know), is_paused() stays conservative and returns True
+                # exactly like before — the gate is never weakened, only
+                # narrowed when the producer opts in.
+                if self._evaluator_subscriber.is_paused(guarded, symbol=symbol):
                     policy = self._pause_policy.get(guarded, "strict")
                     if policy not in ("strict", "lax"):
                         logger.warning(

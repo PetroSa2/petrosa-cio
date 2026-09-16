@@ -206,19 +206,29 @@ class EvaluatorVerdict(BaseModel):
     """FR57 — typed verdict snapshot from one subsystem evaluator.
 
     Subscribers tracking ``evaluator.{subsystem}.verdict`` already keep
-    a ``(verdict, reason, observed_at)`` triple in-memory; this model is
-    the typed projection of that triple so the bundle can carry it
-    through arbitration without dict-shape drift.
+    a ``(verdict, reason, observed_at, scope)`` tuple in-memory; this
+    model is the typed projection of that tuple so the bundle can carry
+    it through arbitration without dict-shape drift.
 
     `verdict` is intentionally a free-form `str` (rather than a strict
     enum) to mirror the upstream P2.1 publisher contract which accepts
     `healthy | unhealthy | unknown`; downstream stories may tighten this
     once the full vocabulary is locked across subsystems.
+
+    `scope` (#193) is the optional blast-radius the publisher attached
+    to the verdict, e.g. ``{"symbols": ["LTCUSDT"]}``. ``None`` means the
+    verdict is global (the legacy/default shape every producer emits
+    today) — see ``cio/docs/prompt-context-contract.md`` for the full
+    blast-radius contract.
     """
 
     subsystem: str = Field(..., min_length=1)
     verdict: str = Field(..., description="healthy | unhealthy | unknown")
     reason: str = Field("", description="Operator-readable explanation, may be empty")
+    scope: dict[str, list[str]] | None = Field(
+        default=None,
+        description="Optional blast-radius, e.g. {'symbols': [...]}; None = global",
+    )
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

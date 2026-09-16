@@ -391,6 +391,175 @@ async def test_snapshot_includes_pause_audit_log(subscriber):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# #193 — Blast-radius scoping: a fault isolated to one symbol must not
+# halt arbitration for unrelated symbols.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scoped_unhealthy_verdict_does_not_pause_unrelated_symbol(subscriber):
+    """A verdict scoped to LTCUSDT must not pause is_paused() for BTCUSDT."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {
+                "verdict": UNHEALTHY,
+                "reason": "malformed position stuck in arm_only",
+                "scope": {"symbols": ["LTCUSDT"]},
+            },
+        )
+    )
+    assert subscriber.is_paused("execution", symbol="LTCUSDT") is True
+    assert subscriber.is_paused("execution", symbol="BTCUSDT") is False
+    assert subscriber.is_paused("execution", symbol="ETHUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_scoped_unhealthy_verdict_without_symbol_kwarg_stays_conservative(
+    subscriber,
+):
+    """Callers that omit `symbol` (legacy call sites) must keep pausing —
+    narrowing the gate always requires the caller to opt in by naming a
+    symbol; silence on either side means "pause"."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "x", "scope": {"symbols": ["LTCUSDT"]}},
+        )
+    )
+    assert subscriber.is_paused("execution") is True
+
+
+@pytest.mark.asyncio
+async def test_unscoped_unhealthy_verdict_still_pauses_every_symbol(subscriber):
+    """Regression guard: a verdict with NO scope (every producer today)
+    must remain a global pause exactly like pre-#193 behavior."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "global outage"},
+        )
+    )
+    assert subscriber.is_paused("execution", symbol="BTCUSDT") is True
+    assert subscriber.is_paused("execution", symbol="LTCUSDT") is True
+    assert subscriber.is_paused("execution") is True
+
+
+@pytest.mark.asyncio
+async def test_malformed_scope_degrades_to_global_pause(subscriber):
+    """A malformed `scope` (wrong shape / empty list) must never
+    accidentally narrow protection — it degrades to global."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "x", "scope": {"symbols": []}},
+        )
+    )
+    assert subscriber.is_paused("execution", symbol="BTCUSDT") is True
+
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "x", "scope": "not-a-dict"},
+        )
+    )
+    assert subscriber.is_paused("execution", symbol="BTCUSDT") is True
+
+
+@pytest.mark.asyncio
+async def test_scoped_verdict_surfaces_in_paused_subsystems_and_snapshot(subscriber):
+    """The scope must be visible on the /state-facing projections so
+    operators can tell a narrowed pause from a global one."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {
+                "verdict": UNHEALTHY,
+                "reason": "x",
+                "scope": {"symbols": ["LTCUSDT"]},
+            },
+        )
+    )
+    paused = subscriber.paused_subsystems()
+    assert paused[0]["scope"] == {"symbols": ["LTCUSDT"]}
+    snap = subscriber.snapshot()
+    assert snap["verdicts"][0]["scope"] == {"symbols": ["LTCUSDT"]}
+    assert snap["pause_audit_log"][0]["scope"] == {"symbols": ["LTCUSDT"]}
+
+
+@pytest.mark.asyncio
+async def test_arbiter_allows_unrelated_symbol_when_execution_fault_scoped(
+    subscriber, mock_redis_cache
+):
+    """Integration regression test (AC2, #193): inject an `unhealthy`
+    execution verdict scoped to LTCUSDT and assert a BTCUSDT signal still
+    reaches normal decisioning (arbiter allows it through), while an
+    LTCUSDT signal on the same subsystem fault remains suppressed."""
+    from unittest.mock import AsyncMock
+
+    mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.set = AsyncMock()
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {
+                "verdict": UNHEALTHY,
+                "reason": "malformed LTCUSDT position stuck in arm_only",
+                "scope": {"symbols": ["LTCUSDT"]},
+            },
+        )
+    )
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+
+    # Unrelated symbol reaches normal decisioning.
+    allowed, _ = await arbiter.check(
+        symbol="BTCUSDT",
+        action="buy",
+        confidence=0.9,
+        strategy_id="ta-momentum",
+        correlation_id="corr-btc",
+    )
+    assert allowed is True
+
+    # The affected symbol itself remains suppressed (strict policy).
+    allowed, reason = await arbiter.check(
+        symbol="LTCUSDT",
+        action="buy",
+        confidence=0.9,
+        strategy_id="ta-momentum",
+        correlation_id="corr-ltc",
+    )
+    assert allowed is False
+    assert "ARBITER_PAUSED" in reason
+
+
+@pytest.mark.asyncio
+async def test_arbiter_suppresses_every_symbol_when_execution_fault_unscoped(
+    subscriber, mock_redis_cache
+):
+    """Regression guard: an unscoped execution fault must still suppress
+    every symbol exactly like pre-#193 — the gate is only ever narrowed
+    when the publisher opts in, never weakened by default."""
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.execution.verdict",
+            {"verdict": UNHEALTHY, "reason": "global executor outage"},
+        )
+    )
+    arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
+    for sym in ("BTCUSDT", "ETHUSDT", "LTCUSDT"):
+        allowed, reason = await arbiter.check(
+            symbol=sym,
+            action="buy",
+            confidence=0.9,
+            strategy_id="ta-momentum",
+            correlation_id=f"corr-{sym}",
+        )
+        assert allowed is False
+        assert "ARBITER_PAUSED" in reason
+
+
 @pytest.mark.asyncio
 async def test_ac4_execution_pause_resume_full_cycle(subscriber, mock_redis_cache):
     """AC4: execution evaluator transitions to unhealthy → CIO pauses
