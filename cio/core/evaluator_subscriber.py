@@ -11,6 +11,18 @@ it, and a restart re-syncs from the next evaluator tick on each subsystem
 (NFR-R1's detection-time window applies). Persistent state was out of
 scope for this ticket — pause events that need to survive a CIO restart
 should be filed as a follow-up.
+
+Blast-radius scoping (#193): a verdict payload MAY carry an optional
+``scope`` object, e.g. ``{"symbols": ["LTCUSDT"]}``, naming the specific
+resource(s) the fault is isolated to. When a publisher supplies a scope,
+:meth:`is_paused` only pauses arbitration for symbols named in that scope
+— a fault on one symbol no longer blocks every other symbol's decisions.
+When ``scope`` is absent (the legacy/default shape every current
+publisher emits), the verdict is treated as a **global** fault exactly as
+before: this preserves the existing conservative/safe behavior for every
+producer that has not yet adopted the optional field. Nothing about this
+contract weakens the pause gate — it only lets a producer *narrow* it
+explicitly; silence still means "pause everything".
 """
 
 from __future__ import annotations
@@ -22,7 +34,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
     from datetime import UTC
@@ -50,6 +62,25 @@ UNHEALTHY = "unhealthy"
 UNKNOWN = "unknown"
 
 
+def _normalise_scope(raw: Any) -> dict[str, list[str]] | None:
+    """Validate + normalise an incoming ``scope`` payload field (#193).
+
+    Only the documented shape ``{"symbols": [<str>, ...]}`` is honored.
+    Anything else (wrong type, empty list, missing key) is treated as "no
+    scope" so a malformed payload degrades to the safe, global-pause
+    default rather than accidentally narrowing protection.
+    """
+    if not isinstance(raw, dict):
+        return None
+    symbols = raw.get("symbols")
+    if not isinstance(symbols, list) or not symbols:
+        return None
+    cleaned = [s for s in symbols if isinstance(s, str) and s]
+    if not cleaned:
+        return None
+    return {"symbols": cleaned}
+
+
 @dataclass
 class PauseAuditEntry:
     """Single pause or resume event in the arbitration audit trail (AC3, #123)."""
@@ -60,6 +91,10 @@ class PauseAuditEntry:
     reason: str
     entry_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # #193 — optional blast-radius scope carried through to the audit
+    # trail so operators can see whether a pause was global or narrowed
+    # to specific symbols. ``None`` = global (legacy/default shape).
+    scope: dict[str, list[str]] | None = None
 
 
 class PauseAuditStore:
@@ -110,8 +145,12 @@ class EvaluatorSubscriber:
         """
         self._nc = nats_client
         self._on_change = on_change
-        # subsystem -> (verdict, reason, observed_at)
-        self._verdicts: dict[str, tuple[str, str, datetime]] = {}
+        # subsystem -> (verdict, reason, observed_at, scope)
+        # scope is None (global fault) unless the publisher supplied a
+        # valid {"symbols": [...]} object (#193).
+        self._verdicts: dict[
+            str, tuple[str, str, datetime, dict[str, list[str]] | None]
+        ] = {}
         # Operator-driven overrides — when set, force arbiter pause/resume
         # regardless of the subscriber's latest verdict. Stored as
         # subsystem -> override_verdict.
@@ -169,10 +208,14 @@ class EvaluatorSubscriber:
                 extra={"subject": msg.subject, "verdict": verdict},
             )
             return
+        # #193 — optional blast-radius scope. Absent/malformed → None,
+        # which every downstream consumer treats as "global fault"
+        # (unchanged legacy behavior).
+        scope = _normalise_scope(payload.get("scope"))
 
         previous = self._verdicts.get(subsystem)
         now = datetime.now(UTC)
-        self._verdicts[subsystem] = (verdict, reason, now)
+        self._verdicts[subsystem] = (verdict, reason, now, scope)
 
         if previous is None or previous[0] != verdict:
             logger.info(
@@ -182,6 +225,7 @@ class EvaluatorSubscriber:
                     "verdict": verdict,
                     "reason": reason,
                     "previous": previous[0] if previous else None,
+                    "scope": scope,
                 },
             )
             if self._on_change is not None:
@@ -199,6 +243,7 @@ class EvaluatorSubscriber:
                         event=event,
                         verdict=verdict,
                         reason=reason,
+                        scope=scope,
                     )
                 )
 
@@ -219,13 +264,28 @@ class EvaluatorSubscriber:
                     payload=payload,
                 )
 
-    def is_paused(self, subsystem: str) -> bool:
+    def is_paused(self, subsystem: str, *, symbol: str | None = None) -> bool:
         """True iff CIO arbitration should pause on this subsystem.
 
         Operator overrides win; otherwise pause when the latest verdict
         is unhealthy. ``unknown`` and ``healthy`` allow arbitration to
         continue — operators tune the override to handle "unknown is
         bad" semantics on a case-by-case basis.
+
+        Blast-radius scoping (#193): when the latest unhealthy verdict
+        carries a ``scope`` (``{"symbols": [...]}``), the pause only
+        applies to the symbols it names. A caller that passes ``symbol``
+        and finds it absent from that scope is NOT paused — a fault
+        isolated to one symbol no longer blocks unrelated ones. Any of
+        the following keeps the conservative, pre-#193 global behavior
+        (nothing here can ever make an unscoped fault *less* protective):
+
+          * the verdict carries no scope at all (the default — every
+            producer that has not opted in to the optional field), or
+          * the caller does not know which symbol it is checking
+            (``symbol=None``, e.g. a subsystem-wide health probe), or
+          * the scope is malformed (already normalised to ``None`` by
+            :func:`_normalise_scope` at ingest time).
         """
         override = self._overrides.get(subsystem)
         if override is not None:
@@ -233,10 +293,22 @@ class EvaluatorSubscriber:
         record = self._verdicts.get(subsystem)
         if record is None:
             return False
-        return record[0] == UNHEALTHY
+        verdict, _reason, _observed_at, scope = record
+        if verdict != UNHEALTHY:
+            return False
+        if scope is None:
+            return True
+        if symbol is None:
+            return True
+        return symbol in scope.get("symbols", [])
 
     def paused_subsystems(self) -> list[dict]:
-        """Snapshot of paused subsystems for the /state endpoint."""
+        """Snapshot of paused subsystems for the /state endpoint.
+
+        ``scope`` is surfaced (``None`` = global) so the dashboard can
+        distinguish a blast-radius-narrowed pause from a full halt
+        (#193).
+        """
         result = []
         # Union of observed-verdict subsystems and operator-override
         # subsystems — operators may pause something that hasn't emitted
@@ -247,6 +319,7 @@ class EvaluatorSubscriber:
             verdict = record[0] if record else None
             reason = record[1] if record else ""
             observed_at = record[2].isoformat() if record else None
+            scope = record[3] if record else None
             override = self._overrides.get(subsystem)
             effective = override if override is not None else verdict
             if effective != UNHEALTHY:
@@ -258,6 +331,7 @@ class EvaluatorSubscriber:
                     "reason": reason,
                     "observed_at": observed_at,
                     "override": override,
+                    "scope": scope,
                 }
             )
         return result
@@ -293,15 +367,18 @@ class EvaluatorSubscriber:
                 "verdict": e.verdict,
                 "reason": e.reason,
                 "timestamp": e.timestamp.isoformat(),
+                "scope": e.scope,
             }
             for e in self._audit_store.recent(limit)
         ]
 
     def snapshot(self) -> dict:
         """Full state — used by the /state endpoint to expose verdict
-        history for every observed subsystem (paused or not)."""
+        history for every observed subsystem (paused or not). ``scope``
+        is ``None`` for a global verdict, or ``{"symbols": [...]}`` when
+        the publisher narrowed the fault (#193)."""
         out = []
-        for subsystem, (verdict, reason, observed_at) in self._verdicts.items():
+        for subsystem, (verdict, reason, observed_at, scope) in self._verdicts.items():
             out.append(
                 {
                     "subsystem": subsystem,
@@ -309,6 +386,7 @@ class EvaluatorSubscriber:
                     "reason": reason,
                     "observed_at": observed_at.isoformat(),
                     "override": self._overrides.get(subsystem),
+                    "scope": scope,
                 }
             )
         return {

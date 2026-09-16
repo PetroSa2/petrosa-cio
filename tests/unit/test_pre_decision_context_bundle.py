@@ -759,3 +759,93 @@ async def test_collect_evaluator_verdicts_filters_cio_self_health(
     # other subsystems still present
     assert "ingest" in result
     assert result["ingest"].verdict == "healthy"
+
+
+# ---------------------------------------------------------------------------
+# #193 — Blast-radius scoping: evaluator_verdicts context filtering
+# ---------------------------------------------------------------------------
+
+
+def _scoped_snapshot(scope: dict | None) -> dict:
+    entry: dict = {
+        "subsystem": "execution",
+        "verdict": "unhealthy",
+        "reason": "malformed LTCUSDT position stuck in arm_only",
+        "observed_at": "2026-09-16T02:00:00",
+        "override": None,
+    }
+    if scope is not None:
+        entry["scope"] = scope
+    return {"verdicts": [entry], "paused": [], "pause_audit_log": []}
+
+
+def test_collect_evaluator_verdicts_excludes_scoped_fault_for_other_symbol(
+    fake_evaluator_subscriber,
+):
+    """#193 — a verdict scoped to LTCUSDT must not appear in the context
+    built for an unrelated symbol's signal (BTCUSDT)."""
+    fake_evaluator_subscriber.snapshot.return_value = _scoped_snapshot(
+        {"symbols": ["LTCUSDT"]}
+    )
+    builder = _make_builder_with_mocked_http(
+        evaluator_subscriber=fake_evaluator_subscriber
+    )
+
+    result = builder._collect_evaluator_verdicts(symbol="BTCUSDT")
+
+    assert "execution" not in result, (
+        "a fault scoped to LTCUSDT must not bias the LLM context for BTCUSDT"
+    )
+
+
+def test_collect_evaluator_verdicts_includes_scoped_fault_for_matching_symbol(
+    fake_evaluator_subscriber,
+):
+    """#193 — the same scoped verdict IS surfaced for the affected symbol."""
+    fake_evaluator_subscriber.snapshot.return_value = _scoped_snapshot(
+        {"symbols": ["LTCUSDT"]}
+    )
+    builder = _make_builder_with_mocked_http(
+        evaluator_subscriber=fake_evaluator_subscriber
+    )
+
+    result = builder._collect_evaluator_verdicts(symbol="LTCUSDT")
+
+    assert "execution" in result
+    assert result["execution"].verdict == "unhealthy"
+    assert result["execution"].scope == {"symbols": ["LTCUSDT"]}
+
+
+def test_collect_evaluator_verdicts_unscoped_fault_shown_for_every_symbol(
+    fake_evaluator_subscriber,
+):
+    """Regression guard: an unscoped (global) fault must keep showing up
+    regardless of the current signal's symbol — unchanged pre-#193
+    behavior for every producer that has not adopted `scope`."""
+    fake_evaluator_subscriber.snapshot.return_value = _scoped_snapshot(None)
+    builder = _make_builder_with_mocked_http(
+        evaluator_subscriber=fake_evaluator_subscriber
+    )
+
+    for sym in ("BTCUSDT", "LTCUSDT", None):
+        result = builder._collect_evaluator_verdicts(symbol=sym)
+        assert "execution" in result
+        assert result["execution"].scope is None
+
+
+def test_collect_evaluator_verdicts_no_symbol_kwarg_stays_conservative(
+    fake_evaluator_subscriber,
+):
+    """Legacy callers that never pass `symbol` (default None) must keep
+    seeing every unhealthy verdict, scoped or not — narrowing only
+    happens when the caller explicitly identifies the current symbol."""
+    fake_evaluator_subscriber.snapshot.return_value = _scoped_snapshot(
+        {"symbols": ["LTCUSDT"]}
+    )
+    builder = _make_builder_with_mocked_http(
+        evaluator_subscriber=fake_evaluator_subscriber
+    )
+
+    result = builder._collect_evaluator_verdicts()
+
+    assert "execution" in result

@@ -62,6 +62,54 @@ contract in lockstep:
 - A wholesale rewrite of the prompt that forgets to re-list the surfaces.
 - A typo in a placeholder name (e.g. `{market}` instead of `{market_state}`).
 
+## Blast-radius semantics of `evaluator.execution.verdict` (#193)
+
+An `evaluator.{subsystem}.verdict` payload has always carried a single
+`(verdict, reason)` pair per subsystem. Before #193, `EvaluatorSubscriber`
+and the pause gates that read it (`SignalArbiter.check`'s
+`is_paused` calls, and `ContextBuilder._collect_evaluator_verdicts`)
+treated every `unhealthy` verdict as a **global kill-switch**: one
+divergent symbol (e.g. a single malformed position) set `execution`
+unhealthy for the whole subsystem, and every unrelated symbol's signal
+was suppressed or biased toward `pause_strategy`/`skip` — the incident
+that #193 documents (824 reasoning loops, 0 executes, 16h+).
+
+`evaluator.{subsystem}.verdict` payloads MAY now carry an **optional**
+`scope` object:
+
+```json
+{"verdict": "unhealthy", "reason": "...", "scope": {"symbols": ["LTCUSDT"]}}
+```
+
+- **`scope` absent** (every producer today: `cio.core.health_evaluator`,
+  tradeengine's `TradeEngineHealthEvaluator`, data-manager's
+  `ExecutionEvaluator`) → the verdict is **global**. Behavior is
+  byte-for-byte identical to before #193: the fault pauses arbitration
+  and shows up in the LLM context for every symbol. This is the safe
+  default and is never weakened by this contract.
+- **`scope.symbols` present** → the fault is isolated to the named
+  symbol(s). `EvaluatorSubscriber.is_paused(subsystem, symbol=...)` only
+  reports "paused" for symbols named in the scope; `SignalArbiter.check`
+  passes the incoming signal's `symbol` through so unrelated symbols keep
+  arbitrating normally. `ContextBuilder._collect_evaluator_verdicts`
+  applies the same filter so the LLM prompt for an unrelated symbol never
+  sees the scoped-away fault (avoiding the FR57 bias the original
+  incident evidence flagged in `action_classifier_v1.yaml:36`).
+- A caller that does not know the symbol (`symbol=None`, e.g. a
+  subsystem-wide health probe) or a malformed `scope` (wrong shape, empty
+  list) both degrade to the global-fault interpretation — narrowing the
+  gate always requires an explicit, well-formed opt-in from the
+  publisher.
+
+**Adopting scoping in a publisher** (e.g. petrosa-data-manager's
+`ExecutionEvaluator`, whose four detectors already compute per-symbol /
+per-(strategy, symbol) signals internally before collapsing to one
+subsystem-wide verdict) is a natural follow-up: attach
+`scope={"symbols": [<affected symbol>]}` to the verdict payload when a
+detector's anomaly is attributable to a single symbol. Until a producer
+does so, this ticket's change is fully backward compatible — no consumer
+behavior changes for unscoped verdicts.
+
 ## Failure modes the contract does **not** catch
 
 - The prompt mentions a surface but the LLM ignores it — that's a behavioural
@@ -77,3 +125,7 @@ contract in lockstep:
 - Sibling stories: AC1 PreDecisionContext bundle (#131 → #142), AC2
   missing-context handling (#132 → #143).
 - PRD: FR55 / FR56 / FR57 / FR58.
+- Blast-radius scoping: [petrosa-cio#193](https://github.com/PetroSa2/petrosa-cio/issues/193)
+  (companion: petrosa-tradeengine#586 fixed the malformed-position root
+  cause; this ticket scopes the pause gate so a fault on one symbol can
+  no longer halt trading on every symbol).

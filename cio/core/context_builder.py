@@ -190,6 +190,7 @@ class ContextBuilder:
             strategy_revision_id=strategy_revision_id,
             gaps=gaps,
             availability=availability,
+            symbol=symbol,
         )
 
         return TriggerContext(
@@ -228,6 +229,7 @@ class ContextBuilder:
         strategy_revision_id: str | None,
         gaps: list[ContextGap] | None = None,
         availability: dict[str, bool] | None = None,
+        symbol: str | None = None,
     ) -> PreDecisionContext:
         """P1.4-AC1 / FR55-FR58 (#131) — assemble the typed PreDecisionContext.
 
@@ -245,6 +247,13 @@ class ContextBuilder:
         already-fetched path, the caller may supply ``availability=None``
         to keep all surfaces flagged ``True`` and only record evaluator/
         characterization gaps detected here.
+
+        ``symbol`` (#193) is the trigger's symbol, threaded through to
+        :meth:`_collect_evaluator_verdicts` so a verdict the publisher
+        scoped to a *different* symbol does not bias this signal's LLM
+        context. ``None`` (the default, matching every pre-#193 caller)
+        keeps the conservative legacy behavior — every unhealthy verdict
+        is shown regardless of scope.
         """
         market_state = MarketState(
             regime=regime.regime,
@@ -264,7 +273,9 @@ class ContextBuilder:
         )
 
         local_gaps: list[ContextGap] = gaps if gaps is not None else []
-        evaluator_verdicts = self._collect_evaluator_verdicts(gaps=local_gaps)
+        evaluator_verdicts = self._collect_evaluator_verdicts(
+            gaps=local_gaps, symbol=symbol
+        )
         characterization = await self._fetch_characterization_ref(
             strategy_id=strategy_id,
             strategy_revision_id=strategy_revision_id,
@@ -316,7 +327,9 @@ class ContextBuilder:
         )
 
     def _collect_evaluator_verdicts(
-        self, gaps: list[ContextGap] | None = None
+        self,
+        gaps: list[ContextGap] | None = None,
+        symbol: str | None = None,
     ) -> dict[str, EvaluatorVerdict]:
         """FR57 — project the evaluator subscriber's snapshot into a typed dict.
 
@@ -328,6 +341,16 @@ class ContextBuilder:
         raises, append a ``ContextGap(surface='evaluators')`` to ``gaps`` so
         the bundle's availability flag is flipped and the FR12 audit-trail
         consumer can persist the event.
+
+        Blast-radius scoping (#193): when an entry carries a ``scope``
+        (``{"symbols": [...]}``) that does NOT include ``symbol``, the
+        verdict is excluded from this signal's context — a fault the
+        publisher isolated to another symbol should not bias this
+        signal's LLM prompt toward ``pause_strategy``/``skip``, mirroring
+        the same narrowing ``SignalArbiter.check`` applies to the hard
+        gate. Unscoped verdicts (``scope is None``, the default every
+        current publisher emits) and ``symbol=None`` callers keep the
+        legacy behavior of always surfacing the verdict.
         """
         sub = self.evaluator_subscriber
         if sub is None:
@@ -375,10 +398,33 @@ class ContextBuilder:
                     "EVALUATOR_VERDICT_FILTERED: cio self-health excluded from LLM context"
                 )
                 continue
+            scope = entry.get("scope")
+            # #193: a verdict scoped to symbols that do NOT include this
+            # trigger's symbol is not relevant to this decision — exclude
+            # it so the LLM prompt isn't biased toward pause_strategy/skip
+            # for a fault isolated elsewhere. Unscoped (scope is None) or
+            # symbol=None (caller doesn't know) keeps the conservative
+            # legacy behavior of always surfacing the verdict.
+            if (
+                verdict == "unhealthy"
+                and isinstance(scope, dict)
+                and scope.get("symbols")
+                and symbol is not None
+                and symbol not in scope["symbols"]
+            ):
+                logger.debug(
+                    "EVALUATOR_VERDICT_FILTERED: subsystem=%s unhealthy scoped to "
+                    "%s, excluded from context for symbol=%s",
+                    subsystem,
+                    scope.get("symbols"),
+                    symbol,
+                )
+                continue
             out[subsystem] = EvaluatorVerdict(
                 subsystem=subsystem,
                 verdict=verdict,
                 reason=entry.get("reason") or "",
+                scope=scope if isinstance(scope, dict) else None,
                 observed_at=observed_at,
             )
         return out
