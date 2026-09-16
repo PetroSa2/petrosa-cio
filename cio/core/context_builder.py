@@ -129,7 +129,7 @@ class ContextBuilder:
             self._fetch_portfolio_and_risk(
                 symbol, correlation_id, gaps=gaps, availability=availability
             ),
-            self._fetch_strategy_data(strategy_id, correlation_id),
+            self._fetch_strategy_data(strategy_id, correlation_id, gaps=gaps),
         ]
 
         # 2. Add Vector retrieval if COLD path
@@ -149,6 +149,16 @@ class ContextBuilder:
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
+
+        # AC2 (#197): a single upstream outage (data-manager unreachable/slow)
+        # commonly times out regime + strategy_stats + strategy_defaults
+        # concurrently, since all three hit the same host under the same
+        # asyncio.gather(). Detect that pattern from the per-surface gaps
+        # recorded by the individual _fetch_* methods and emit ONE
+        # correlated summary line — instead of forcing an operator to piece
+        # together three separate per-surface log lines — while the
+        # individual WARNING lines (AC1/AC3) remain for per-surface detail.
+        self._log_timeout_storm_if_concurrent(gaps, correlation_id)
 
         # Assemble TriggerContext
         # Pass decision_id only when provided; TriggerContext.default_factory generates one otherwise
@@ -508,8 +518,8 @@ class ContextBuilder:
         directly (e.g. tests/unit/test_cold_path.py:115) pass no
         collectors, so the existing return contract is preserved.
         """
+        url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
         try:
-            url = f"{self.data_manager_url}/analysis/regime?pair={symbol}"
             response = await self.client.get(url)
             response.raise_for_status()
 
@@ -540,15 +550,62 @@ class ContextBuilder:
 
             api_resp = RegimeAPIResponse.model_validate(data)
             return RegimeResult.from_api_response(api_resp)
-        except Exception as e:
-            logger.error(
-                f"Failed to fetch regime: {e}", extra={"correlation_id": correlation_id}
+        except httpx.ReadTimeout:
+            # AC1/AC3 (#197): httpx.ReadTimeout.__str__() is '' on 0.28.1 —
+            # str(e) alone produces the misleading "Failed to fetch regime: "
+            # empty tail. Classify by exception TYPE, log at WARNING (not the
+            # generic ERROR path below) with the timeout value + endpoint so
+            # the failure is identifiable without a debugger.
+            timeout_s = self.client.timeout.read
+            logger.warning(
+                f"FETCH_TIMEOUT surface=market endpoint={url} "
+                f"timeout_s={timeout_s} exc_type=ReadTimeout — data-manager "
+                "did not respond within the configured timeout",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "market",
+                    "endpoint": url,
+                    "timeout_s": timeout_s,
+                    "exc_type": "ReadTimeout",
+                },
             )
             if gaps is not None:
                 gaps.append(
                     ContextGap(
                         surface="market",
-                        reason=f"fetch_error: {e}",
+                        reason=f"read_timeout endpoint={url} timeout_s={timeout_s}",
+                    )
+                )
+            if availability is not None:
+                availability["market"] = False
+            return RegimeResult(
+                regime="choppy",
+                regime_confidence="low",
+                volatility_level=VolatilityLevel.MEDIUM,
+                primary_signal="timeout",
+                thought_trace=f"ReadTimeout after {timeout_s}s calling {url}",
+            )
+        except Exception as e:
+            # AC1: log the exception TYPE, never just str(e) — several httpx
+            # exceptions (ReadTimeout among them) stringify to '' and would
+            # otherwise mask the failure behind an empty-tail log line.
+            exc_type = type(e).__name__
+            detail = str(e) or "<empty>"
+            logger.error(
+                f"Failed to fetch regime: exc_type={exc_type} endpoint={url} "
+                f"detail={detail}",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "market",
+                    "endpoint": url,
+                    "exc_type": exc_type,
+                },
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="market",
+                        reason=f"fetch_error exc_type={exc_type} detail={detail}",
                     )
                 )
             if availability is not None:
@@ -559,7 +616,7 @@ class ContextBuilder:
                 regime_confidence="low",
                 volatility_level=VolatilityLevel.MEDIUM,
                 primary_signal="error",
-                thought_trace=f"Error fetching regime: {str(e)}",
+                thought_trace=f"Error fetching regime: exc_type={exc_type} detail={detail}",
             )
 
     async def _fetch_portfolio_and_risk(
@@ -624,7 +681,10 @@ class ContextBuilder:
             )
 
     async def _fetch_strategy_data(
-        self, strategy_id: str, correlation_id: str
+        self,
+        strategy_id: str,
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
     ) -> tuple[StrategyStats, StrategyDefaults]:
         """
         Fetches strategy performance and DNA from the Data Manager.
@@ -632,35 +692,94 @@ class ContextBuilder:
         """
         # Parallelize strategy-specific fetches
         tasks = [
-            self._fetch_strategy_stats(strategy_id, correlation_id),
-            self._fetch_strategy_defaults(strategy_id, correlation_id),
+            self._fetch_strategy_stats(strategy_id, correlation_id, gaps=gaps),
+            self._fetch_strategy_defaults(strategy_id, correlation_id, gaps=gaps),
         ]
         results = await asyncio.gather(*tasks)
         return results[0], results[1]
 
     async def _fetch_strategy_stats(
-        self, strategy_id: str, correlation_id: str
+        self,
+        strategy_id: str,
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
     ) -> StrategyStats:
-        """Fetches historical performance metrics from Data Manager analysis API."""
+        """Fetches historical performance metrics from Data Manager analysis API.
+
+        AC4 (#197): when the fetch falls back to the degenerate
+        ``StrategyStats(recent_pnl_trend=NEUTRAL)`` default, record a
+        ``ContextGap(surface='strategy_stats')`` so downstream logic (and
+        the emitted ``TriggerContext.pre_decision_context.gaps``) can
+        distinguish "data unavailable" from "zero performance" — the gap
+        collector is threaded through from ``build()`` the same way
+        market/portfolio already are.
+        """
+        url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
         try:
-            url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
             return StrategyStats(**data["stats"])
-        except Exception as e:
+        except httpx.ReadTimeout:
+            timeout_s = self.client.timeout.read
             logger.warning(
-                f"Failed to fetch strategy stats for {strategy_id}: {e}",
-                extra={"correlation_id": correlation_id},
+                f"FETCH_TIMEOUT surface=strategy_stats endpoint={url} "
+                f"timeout_s={timeout_s} exc_type=ReadTimeout strategy_id={strategy_id} "
+                "— data-manager did not respond within the configured timeout",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "strategy_stats",
+                    "endpoint": url,
+                    "timeout_s": timeout_s,
+                    "exc_type": "ReadTimeout",
+                },
             )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="strategy_stats",
+                        reason=f"read_timeout endpoint={url} timeout_s={timeout_s}",
+                    )
+                )
+            return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
+        except Exception as e:
+            exc_type = type(e).__name__
+            detail = str(e) or "<empty>"
+            logger.warning(
+                f"Failed to fetch strategy stats for {strategy_id}: "
+                f"exc_type={exc_type} endpoint={url} detail={detail}",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "strategy_stats",
+                    "endpoint": url,
+                    "exc_type": exc_type,
+                },
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="strategy_stats",
+                        reason=f"fetch_error exc_type={exc_type} detail={detail}",
+                    )
+                )
             return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
 
     async def _fetch_strategy_defaults(
-        self, strategy_id: str, correlation_id: str
+        self,
+        strategy_id: str,
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
     ) -> StrategyDefaults:
-        """Fetches strategy DNA (defaults) from Data Manager config API."""
+        """Fetches strategy DNA (defaults) from Data Manager config API.
+
+        Records a ``ContextGap(surface='strategy_defaults')`` on fallback so
+        AC2's concurrent-timeout-storm detection in ``build()`` can see this
+        surface alongside market/strategy_stats (AC4 only mandates the
+        ``strategy_stats`` surface be tracked; this mirrors it for
+        consistency and to support the AC2 correlation check).
+        """
+        url = f"{self.data_manager_url}/api/v1/config/strategies/{strategy_id}"
         try:
-            url = f"{self.data_manager_url}/api/v1/config/strategies/{strategy_id}"
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
@@ -674,17 +793,89 @@ class ContextBuilder:
                 leverage=params.get("leverage", 1.0),
                 max_hold_hours=params.get("max_hold_hours", 24.0),
             )
-        except Exception as e:
+        except httpx.ReadTimeout:
+            timeout_s = self.client.timeout.read
             logger.warning(
-                f"Failed to fetch strategy defaults for {strategy_id}: {e}",
-                extra={"correlation_id": correlation_id},
+                f"FETCH_TIMEOUT surface=strategy_defaults endpoint={url} "
+                f"timeout_s={timeout_s} exc_type=ReadTimeout strategy_id={strategy_id} "
+                "— data-manager did not respond within the configured timeout",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "strategy_defaults",
+                    "endpoint": url,
+                    "timeout_s": timeout_s,
+                    "exc_type": "ReadTimeout",
+                },
             )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="strategy_defaults",
+                        reason=f"read_timeout endpoint={url} timeout_s={timeout_s}",
+                    )
+                )
             return StrategyDefaults(
                 stop_loss_pct=0.01,
                 take_profit_pct=0.01,
                 leverage=1.0,
                 max_hold_hours=1.0,
             )
+        except Exception as e:
+            exc_type = type(e).__name__
+            detail = str(e) or "<empty>"
+            logger.warning(
+                f"Failed to fetch strategy defaults for {strategy_id}: "
+                f"exc_type={exc_type} endpoint={url} detail={detail}",
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "strategy_defaults",
+                    "endpoint": url,
+                    "exc_type": exc_type,
+                },
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="strategy_defaults",
+                        reason=f"fetch_error exc_type={exc_type} detail={detail}",
+                    )
+                )
+            return StrategyDefaults(
+                stop_loss_pct=0.01,
+                take_profit_pct=0.01,
+                leverage=1.0,
+                max_hold_hours=1.0,
+            )
+
+    @staticmethod
+    def _log_timeout_storm_if_concurrent(
+        gaps: list[ContextGap], correlation_id: str
+    ) -> None:
+        """AC2 (#197): when regime + strategy_stats + strategy_defaults all
+        time out concurrently (single upstream data-manager outage), emit
+        ONE consolidated summary line — timeout duration + affected
+        endpoints — instead of forcing an operator to correlate three
+        separate per-surface log lines by hand. Fires only when 2+ surfaces
+        recorded a ``read_timeout`` gap in the same ``build()`` call; the
+        per-surface WARNING lines (AC1/AC3) remain untouched for
+        single-surface failures.
+        """
+        timeout_gaps = [g for g in gaps if g.reason.startswith("read_timeout")]
+        if len(timeout_gaps) < 2:
+            return
+        surfaces = ", ".join(g.surface for g in timeout_gaps)
+        endpoints = "; ".join(g.reason for g in timeout_gaps)
+        logger.error(
+            f"CONTEXT_FETCH_TIMEOUT_STORM surfaces=[{surfaces}] "
+            f"count={len(timeout_gaps)} correlation_id={correlation_id} "
+            f"details=[{endpoints}] — data-manager appears unreachable or "
+            "overloaded; multiple context surfaces degraded concurrently",
+            extra={
+                "correlation_id": correlation_id,
+                "surfaces": [g.surface for g in timeout_gaps],
+                "count": len(timeout_gaps),
+            },
+        )
 
     async def close(self):
         await self.client.aclose()
