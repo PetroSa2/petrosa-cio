@@ -1,9 +1,19 @@
+import logging
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from cio.main import main
+
+
+def test_litellm_logger_silenced_at_import_time():
+    """#192: the `LiteLLM` logger must be raised to WARNING so its internal
+    INFO chatter (e.g. "LiteLLM completion() model=...") no longer floods
+    Grafana/Loki as unparseable "unknown"-severity noise. This is applied at
+    module import time in cio/main.py, before any server/event loop starts.
+    """
+    assert logging.getLogger("LiteLLM").level == logging.WARNING
 
 
 @pytest.mark.asyncio
@@ -26,7 +36,9 @@ async def test_nats_subscription_with_wildcard():
         patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}),
         patch("uvicorn.Config"),
         patch("uvicorn.Server", return_value=mock_server),
-        patch("cio.main.attach_logging_handler", return_value=True),
+        patch(
+            "cio.main.attach_logging_handler", return_value=True
+        ) as mock_attach_handler,
         patch("cio.main.setup_telemetry", return_value=True),
         patch("cio.main.NATSListener") as MockNATSListener,
         patch("cio.main.NATS", return_value=mock_nc),
@@ -85,3 +97,7 @@ async def test_nats_subscription_with_wildcard():
         # Verify that the listener was started with the correct subject
         # cio.main.py appends .> if it's missing (following Petrosa NATS contract)
         mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.>")
+
+    # #192: stdout logs must be structured JSON (not the text formatter) so
+    # Grafana/Loki can derive a real severity token instead of "unknown".
+    mock_attach_handler.assert_called_once_with(use_json_format=True)
