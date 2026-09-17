@@ -24,6 +24,7 @@ from cio.models import (
     SAFE_DECISION_RESULT,
     ActionType,
     ConfidenceLevel,
+    PnlTrend,
     PortfolioSummary,
     RegimeEnum,
     RegimeResult,
@@ -32,6 +33,10 @@ from cio.models import (
     StrategyStats,
     TriggerType,
     VolatilityLevel,
+)
+from cio.personas.strategy_assessor import (
+    REQUIRED_CONTEXT_FIELDS,
+    StrategyAssessor,
 )
 
 
@@ -132,6 +137,36 @@ def test_build_market_signals_explicit_fields_win_over_derivation():
     assert market_signals.trend_strength == 0.1
     assert market_signals.price_action_character == "Choppy"
     assert market_signals.is_placeholder is False
+
+
+def test_build_market_signals_derives_summary_from_metadata_reasoning():
+    """Live RTS/iceberg payloads carry `metadata.reasoning` (not an explicit
+    signal_summary), so the profile must derive the summary from it instead of
+    degrading signal_summary on every real signal."""
+    builder = _make_builder()
+    gaps = []
+    payload = {
+        "symbol": "BTCUSDT",
+        "confidence": 0.75,
+        "strength": "strong",
+        "action": "sell",
+        "current_price": 76551.55,
+        "metadata": {
+            "reasoning": "Large hidden seller detected at 76546.1 (anchor)",
+        },
+    }
+
+    market_signals = builder._build_market_signals(payload, "cid-reasoning", gaps=gaps)
+
+    assert market_signals.signal_summary == (
+        "Large hidden seller detected at 76546.1 (anchor)"
+    )
+    assert market_signals.volatility_percentile == 0.75
+    assert market_signals.trend_strength == 0.75
+    assert market_signals.price_action_character == "Bearish"
+    assert market_signals.degraded_fields == []
+    assert market_signals.is_placeholder is False
+    assert gaps == []
 
 
 # ---------------------------------------------------------------------------
@@ -307,5 +342,96 @@ async def test_complete_context_decision_cycle_does_not_pause(monkeypatch):
     assert decision.action != ActionType.PAUSE_STRATEGY
     assert decision.action == ActionType.EXECUTE
     assert decision != SAFE_DECISION_RESULT
+
+    await builder.close()
+
+
+# ---------------------------------------------------------------------------
+# #202 follow-up: Strategy Assessor names the missing required inputs
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_strategy_assessor_warns_and_gaps_on_missing_stats(caplog):
+    """When strategy_stats is empty (upstream unavailable) the assessor must
+    name the absent required fields and record a strategy_stats ContextGap
+    rather than leaving only the LLM's generic MISSING_INPUT self-report."""
+    caplog.set_level(logging.WARNING, logger="cio.personas.strategy_assessor")
+    builder = _make_builder()
+    _stub_fetches(builder)  # StrategyStats() -> all performance fields None
+    context = await builder.build(
+        correlation_id="cid-assessor-missing",
+        source_subject="intent.test",
+        trigger_type=TriggerType.TRADE_INTENT,
+        payload={"symbol": "BTCUSDT", "strategy_id": "s1"},
+    )
+
+    assessor = StrategyAssessor(MockLLMClient())
+    user_context = assessor._build_user_context(context)
+    assessor._warn_on_missing_required_fields(context, user_context)
+
+    assert user_context["win_rate"] is None
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "STRATEGY_ASSESSOR_MISSING_INPUT_FIELDS" in r.message
+    ]
+    assert warnings
+    assert "win_rate" in warnings[0].message
+    assert "recent_pnl_trend" in warnings[0].message
+    assert "regime" not in warnings[0].message
+
+    assert context.pre_decision_context is not None
+    stats_gaps = [
+        g for g in context.pre_decision_context.gaps if g.surface == "strategy_stats"
+    ]
+    assert stats_gaps
+    assert "win_rate" in stats_gaps[-1].reason
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_strategy_assessor_silent_when_context_complete(caplog):
+    caplog.set_level(logging.WARNING, logger="cio.personas.strategy_assessor")
+    builder = _make_builder()
+    _stub_fetches(builder)
+    builder._fetch_strategy_data = AsyncMock(
+        return_value=(
+            StrategyStats(
+                win_rate=0.6,
+                win_rate_delta=0.05,
+                consecutive_losses=0,
+                recent_pnl_trend=PnlTrend.NEUTRAL,
+            ),
+            StrategyDefaults(
+                stop_loss_pct=0.02, take_profit_pct=0.04, max_hold_hours=24
+            ),
+        )
+    )
+    context = await builder.build(
+        correlation_id="cid-assessor-complete",
+        source_subject="intent.test",
+        trigger_type=TriggerType.TRADE_INTENT,
+        payload={"symbol": "BTCUSDT", "strategy_id": "s1"},
+    )
+
+    assessor = StrategyAssessor(MockLLMClient())
+    user_context = assessor._build_user_context(context)
+    assert set(REQUIRED_CONTEXT_FIELDS) <= set(user_context)
+    assessor._warn_on_missing_required_fields(context, user_context)
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "STRATEGY_ASSESSOR_MISSING_INPUT_FIELDS" in r.message
+    ]
+    assert not warnings
+    assert context.pre_decision_context is not None
+    assert not any(
+        g.surface == "strategy_stats" for g in context.pre_decision_context.gaps
+    )
 
     await builder.close()
