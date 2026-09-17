@@ -288,6 +288,16 @@ class ContextBuilder:
             signal_summary = metadata.get("signal_summary")
         if not signal_summary:
             signal_summary = metadata.get("summary")
+        # RTS/ta-bot producers that carry no explicit summary field describe the
+        # signal in prose under metadata.reasoning (e.g. the iceberg detector's
+        # "Large hidden seller detected at ..."). Derive the profile summary from
+        # that so a live signal is not reported as a degraded summary field.
+        if not signal_summary:
+            signal_summary = payload.get("reasoning")
+        if not signal_summary:
+            signal_summary = metadata.get("reasoning")
+        if not signal_summary:
+            signal_summary = metadata.get("reason")
         has_summary = bool(signal_summary)
         if not has_summary:
             signal_summary = _DEFAULT_SIGNAL_SUMMARY
