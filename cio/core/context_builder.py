@@ -73,9 +73,16 @@ class ContextBuilder:
                 "All internal HTTP requests from ContextBuilder will be unauthenticated."
             )
 
-        # Increased timeout to 30s to handle cluster latency under load
+        # #199: previously hardcoded to 30s. Three concurrent 30s
+        # ReadTimeouts (market/strategy_stats/strategy_defaults, the
+        # CONTEXT_FETCH_TIMEOUT_STORM pattern) burn most of the decision
+        # window before the fallback defaults even kick in. Reduced
+        # default to 10s — data-manager's steady-state p99 is well under
+        # that; env-overridable so a slow-cluster deploy can raise it
+        # back without a code change.
+        timeout_s = float(os.getenv("CIO_CONTEXT_FETCH_TIMEOUT_S", "10.0"))
         self.client = httpx.AsyncClient(
-            timeout=30.0,
+            timeout=timeout_s,
             headers={
                 "X-Petrosa-Issuer": "CIO",
                 "X-Petrosa-Internal-Token": token,
