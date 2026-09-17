@@ -43,6 +43,31 @@ COLD_TRIGGERS = {
     TriggerType.ESCALATION,
 }
 
+# #202 — placeholder defaults for the regime-classifier profile fields.
+# When the trigger payload carries none of the real producing fields, these
+# are emitted so the LLM never sees a "neutral-looking" profile presented as
+# observation; the fallback is instead flagged via degraded_fields + a gap.
+_DEFAULT_SIGNAL_SUMMARY = "Manual trigger"
+_DEFAULT_VOLATILITY_PERCENTILE = 0.5
+_DEFAULT_TREND_STRENGTH = 0.0
+_DEFAULT_PRICE_ACTION = "Neutral"
+
+_SIGNAL_STRENGTH_TO_TREND = {
+    "weak": 0.25,
+    "medium": 0.5,
+    "strong": 0.75,
+    "extreme": 0.95,
+}
+
+_SIGNAL_ACTION_TO_PRICE_ACTION = {
+    "buy": "Bullish",
+    "long": "Bullish",
+    "sell": "Bearish",
+    "short": "Bearish",
+    "hold": "Neutral",
+    "close": "Neutral",
+}
+
 
 class ContextBuilder:
     """
@@ -128,6 +153,7 @@ class ContextBuilder:
             "portfolio": True,
             "evaluators": True,
             "characterization": True,
+            "market_signals": True,
         }
         fetch_tasks = [
             self._fetch_regime(
@@ -182,13 +208,8 @@ class ContextBuilder:
         if defaults.leverage is not None and defaults.leverage >= 1:
             recommended_leverage = int(round(defaults.leverage))
 
-        market_signals = MarketSignals(
-            signal_summary=payload.get("signal_summary", "Manual trigger"),
-            current_price=payload.get("current_price") or payload.get("price") or 0.0,
-            volatility_percentile=payload.get("volatility_percentile", 0.5),
-            trend_strength=payload.get("trend_strength", 0.0),
-            price_action_character=payload.get("price_action_character", "Neutral"),
-        )
+        market_signals = self._build_market_signals(payload, correlation_id, gaps=gaps)
+        availability["market_signals"] = not market_signals.is_placeholder
 
         # P1.4-AC1 (#131) — assemble the structured PreDecisionContext
         # bundle from the components already fetched above plus the
@@ -232,6 +253,132 @@ class ContextBuilder:
             risk_limits=risk,
             historical_context=historical_context,
             pre_decision_context=pre_decision_context,
+        )
+
+    def _build_market_signals(
+        self,
+        payload: dict[str, Any],
+        correlation_id: str,
+        gaps: list[ContextGap] | None = None,
+    ) -> MarketSignals:
+        """#202 — map real signal-producer fields onto the MarketSignals profile.
+
+        The trigger payload carries the fields ta-bot / realtime-strategies
+        actually publish (``confidence``, ``strength``, ``current_price``,
+        ``action``/``side``/``signal_type``, and a ``metadata`` blob). The
+        regime-classifier prompt consumes the four profile fields
+        (signal_summary / volatility_percentile / trend_strength /
+        price_action_character); previously they were static placeholders,
+        so the prompt-contract rule #4 made the model self-report
+        MISSING_INPUT and the loop degraded to ``pause_strategy``.
+
+        This derives the profile from the real producer fields where present
+        (confidence -> volatility percentile, strength -> trend magnitude,
+        action -> price-action character, metadata -> signal summary) and
+        keeps the placeholder only for fields the payload truly does not
+        carry. Every field that still lands on a placeholder is recorded as a
+        degraded field on the model plus a ``ContextGap(surface=
+        'market_signals')`` and a WARNING line — the fallback is explicit,
+        never silent.
+        """
+        metadata = payload.get("metadata") or {}
+
+        signal_summary = payload.get("signal_summary")
+        if not signal_summary:
+            signal_summary = metadata.get("signal_summary")
+        if not signal_summary:
+            signal_summary = metadata.get("summary")
+        has_summary = bool(signal_summary)
+        if not has_summary:
+            signal_summary = _DEFAULT_SIGNAL_SUMMARY
+
+        volatility_percentile: float | None = payload.get("volatility_percentile")
+        if volatility_percentile is None:
+            volatility_percentile = metadata.get("volatility_percentile")
+        has_volatility = volatility_percentile is not None
+        if not has_volatility:
+            confidence = payload.get("confidence")
+            if isinstance(confidence, int | float) and 0 < confidence <= 1:
+                volatility_percentile = round(float(confidence), 4)
+                has_volatility = True
+        if volatility_percentile is None:
+            volatility_percentile = _DEFAULT_VOLATILITY_PERCENTILE
+
+        trend_strength: float | None = payload.get("trend_strength")
+        if trend_strength is None:
+            trend_strength = metadata.get("trend_strength")
+        has_trend = trend_strength is not None
+        if not has_trend:
+            strength_key = payload.get("strength")
+            if strength_key is None:
+                strength_key = metadata.get("strength")
+            if strength_key is not None:
+                trend_strength = _SIGNAL_STRENGTH_TO_TREND.get(
+                    str(strength_key).lower()
+                )
+                has_trend = trend_strength is not None
+        if trend_strength is None:
+            trend_strength = _DEFAULT_TREND_STRENGTH
+
+        price_action_character: str | None = payload.get("price_action_character")
+        if not price_action_character:
+            price_action_character = metadata.get("price_action_character")
+        if not price_action_character:
+            price_action_character = metadata.get("price_action")
+        has_price_action = bool(price_action_character)
+        if not has_price_action:
+            action_key = (
+                payload.get("action")
+                or payload.get("side")
+                or payload.get("signal_type")
+            )
+            if action_key is not None:
+                price_action_character = _SIGNAL_ACTION_TO_PRICE_ACTION.get(
+                    str(action_key).lower()
+                )
+                has_price_action = price_action_character is not None
+        if price_action_character is None:
+            price_action_character = _DEFAULT_PRICE_ACTION
+
+        degraded_fields = [
+            field
+            for field, present in (
+                ("signal_summary", has_summary),
+                ("volatility_percentile", has_volatility),
+                ("trend_strength", has_trend),
+                ("price_action_character", has_price_action),
+            )
+            if not present
+        ]
+
+        if degraded_fields:
+            logger.warning(
+                "MARKET_SIGNALS_PLACEHOLDER_FIELDS: %s",
+                ",".join(degraded_fields),
+                extra={
+                    "correlation_id": correlation_id,
+                    "surface": "market_signals",
+                    "degraded_fields": degraded_fields,
+                },
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="market_signals",
+                        reason="placeholder_fields: " + ",".join(degraded_fields),
+                    )
+                )
+
+        return MarketSignals(
+            signal_summary=signal_summary,
+            current_price=float(
+                payload.get("current_price") or payload.get("price") or 0.0
+            ),
+            volatility_percentile=float(volatility_percentile),
+            trend_strength=float(trend_strength),
+            price_action_character=price_action_character,
+            degraded_fields=sorted(degraded_fields),
+            is_placeholder=bool(degraded_fields),
         )
 
     async def assemble_pre_decision_context(
@@ -312,6 +459,7 @@ class ContextBuilder:
                 "portfolio": True,
                 "evaluators": True,
                 "characterization": True,
+                "market_signals": True,
             }
         )
 
@@ -340,6 +488,7 @@ class ContextBuilder:
             portfolio_state_available=avail.get("portfolio", True),
             evaluator_verdicts_available=avail.get("evaluators", True),
             characterization_available=avail.get("characterization", True),
+            market_signals_available=avail.get("market_signals", True),
             gaps=list(local_gaps),
         )
 
