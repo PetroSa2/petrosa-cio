@@ -135,6 +135,12 @@ class RejectionSource(StrEnum):
     # `STALE_CHARACTERIZATION` because the breach is global (cross-strategy)
     # rather than per-strategy data freshness.
     AGGREGATE_LEVERAGE_CEILING = "aggregate_leverage_ceiling"
+    # #199 — the context-completeness gate tripped: >= N pre-decision
+    # context surfaces (market / strategy_stats / strategy_defaults) timed
+    # out concurrently (a CONTEXT_FETCH_TIMEOUT_STORM), so the LLM was never
+    # invoked and the cycle is non-authoritative — the previous state is
+    # held rather than deciding on empty/degraded context.
+    CONTEXT_UNAVAILABLE = "context_unavailable"
 
 
 class TriggerType(StrEnum):

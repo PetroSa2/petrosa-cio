@@ -31,3 +31,12 @@ class AsyncRedisCache:
             await self.redis.set(key, value, ex=ttl)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    async def delete(self, key: str) -> None:
+        """Removes a key from the cache (#199 — context-gate auto-unfreeze
+        needs to clear a stale freeze/streak marker immediately rather
+        than waiting out its TTL)."""
+        try:
+            await self.redis.delete(key)
+        except Exception as e:
+            logger.error(f"Redis delete error for key {key}: {e}")

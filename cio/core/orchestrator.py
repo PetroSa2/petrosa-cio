@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from cio.clients.factory import ClientFactory
 from cio.core.characterization_stale_gate import is_characterization_stale
+from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.portfolio_tracker import PortfolioTracker
@@ -98,6 +99,19 @@ class Orchestrator:
                 "use_llm_reasoning": self.use_llm_reasoning,
             },
         )
+
+        # #199 — context-completeness gate. Runs BEFORE anything else
+        # (including CodeEngine and the stale-characterization gate):
+        # when >= N pre-decision context surfaces timed out concurrently
+        # this cycle (a CONTEXT_FETCH_TIMEOUT_STORM), the LLM is not
+        # trustworthy to reason with degraded/empty context, so it is
+        # never invoked. The verdict is non-authoritative — the caller
+        # (router/dispatch) must hold the previous state rather than
+        # treat CONTEXT_UNAVAILABLE as a fresh directive.
+        context_gate_result = await apply_context_gate(context, self.cache)
+        if context_gate_result is not None:
+            self._emit_decision_action(context_gate_result.action)
+            return context_gate_result
 
         # FR53 / P3.4 (#130) — stale-characterization refusal gate. Only runs
         # on trade-intent triggers that actually carry a revision id; legacy

@@ -96,6 +96,9 @@ async def test_full_nats_to_nats_loop():
     mock_cache = MagicMock()
     mock_cache.get = AsyncMock(return_value=None)
     mock_cache.set = AsyncMock()
+    # #199: the context-completeness gate calls cache.delete() on every
+    # healthy cycle to clear a stale streak counter — must be awaitable.
+    mock_cache.delete = AsyncMock()
 
     with patch.dict("os.environ", {"LLM_PROVIDER": "mock", "DRY_RUN": "false"}):
         with patch("httpx.AsyncClient.get", side_effect=mock_get):
