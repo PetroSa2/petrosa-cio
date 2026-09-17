@@ -83,7 +83,7 @@ async def test_output_router_rest_429_handling():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "test_strat"
+    context.strategy_id = "rsi_extreme_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-id"
 
@@ -114,7 +114,7 @@ async def test_output_router_rest_429_handling():
 
             # Verify freeze key set with TTL from response
             mock_cache.set.assert_called_with(
-                "cio:freeze:test_strat", "LOCKED", ttl=7200
+                "cio:freeze:rsi_extreme_reversal", "LOCKED", ttl=7200
             )
 
 
@@ -133,7 +133,7 @@ async def test_output_router_rest_pause_strategy_freeze():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "pause_strat"
+    context.strategy_id = "doji_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-pause-id"
 
@@ -159,12 +159,12 @@ async def test_output_router_rest_pause_strategy_freeze():
 
             # Verify freeze key set with 1800s TTL (AC3)
             mock_cache.set.assert_called_with(
-                "cio:freeze:pause_strat", "LOCKED", ttl=1800
+                "cio:freeze:doji_reversal", "LOCKED", ttl=1800
             )
             # Verify changed_by format (AC1)
             assert (
                 mock_post.call_args[1]["json"]["changed_by"]
-                == "petrosa-cio:pause_strat"
+                == "petrosa-cio:doji_reversal"
             )
 
 
@@ -183,7 +183,7 @@ async def test_output_router_rest_429_fallback_ttl():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "test_strat"
+    context.strategy_id = "rsi_extreme_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-fallback"
 
@@ -214,7 +214,7 @@ async def test_output_router_rest_429_fallback_ttl():
 
             # Verify freeze key set with fallback TTL (3600)
             mock_cache.set.assert_called_with(
-                "cio:freeze:test_strat", "LOCKED", ttl=3600
+                "cio:freeze:rsi_extreme_reversal", "LOCKED", ttl=3600
             )
 
 
@@ -231,7 +231,7 @@ async def test_output_router_rest_cache_unavailable_warning(caplog):
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "no_cache_strat"
+    context.strategy_id = "hammer_reversal_pattern"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "no-cache-id"
 
@@ -270,7 +270,7 @@ async def test_output_router_rest_fail_safe_identity():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "fail_safe_strat"
+    context.strategy_id = "shooting_star_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "fail-safe-id"
 
@@ -298,7 +298,7 @@ async def test_output_router_rest_fail_safe_identity():
 
             mock_post.assert_called_once()
             _, kwargs = mock_post.call_args
-            assert kwargs["json"]["changed_by"] == "petrosa-cio:fail_safe_strat"
+            assert kwargs["json"]["changed_by"] == "petrosa-cio:shooting_star_reversal"
 
 
 @pytest.mark.asyncio
@@ -315,7 +315,7 @@ async def test_output_router_rest_429_clamping():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "clamp_strat"
+    context.strategy_id = "volume_surge_breakout"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-clamp"
 
@@ -342,20 +342,22 @@ async def test_output_router_rest_429_clamping():
             mock_response.json.return_value = {"retry_after": 0}
             mock_post.return_value = mock_response
             await router.route(context, decision)
-            mock_cache.set.assert_called_with("cio:freeze:clamp_strat", "LOCKED", ttl=1)
+            mock_cache.set.assert_called_with(
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=1
+            )
 
             # 2. Test too high (100000 -> 86400)
             mock_response.json.return_value = {"retry_after": 100000}
             await router.route(context, decision)
             mock_cache.set.assert_called_with(
-                "cio:freeze:clamp_strat", "LOCKED", ttl=86400
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=86400
             )
 
             # 3. Test float/string coercion
             mock_response.json.return_value = {"retry_after": "120.5"}
             await router.route(context, decision)
             mock_cache.set.assert_called_with(
-                "cio:freeze:clamp_strat", "LOCKED", ttl=120
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=120
             )
 
 
