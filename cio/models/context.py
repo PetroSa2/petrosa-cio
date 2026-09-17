@@ -55,13 +55,24 @@ class StrategyDefaults(BaseModel):
 
 
 class MarketSignals(BaseModel):
-    """Raw qualitative and quantitative signals for LLM analysis."""
+    """Raw qualitative and quantitative signals for LLM analysis.
+
+    #202: ``degraded_fields`` lists the prompt-facing profile fields
+    (signal_summary / volatility_percentile / trend_strength /
+    price_action_character) that fell back to their placeholder defaults
+    because the trigger payload carried no real value for them, and
+    ``is_placeholder`` is True when at least one did. Fallback is thus
+    explicit (audit-trail visible) instead of silently feeding the
+    regime-classifier prompt degenerate input.
+    """
 
     signal_summary: str
     current_price: float
     volatility_percentile: float
     trend_strength: float
     price_action_character: str
+    degraded_fields: list[str] = Field(default_factory=list)
+    is_placeholder: bool = False
 
 
 class TriggerContext(BaseModel):
@@ -263,7 +274,10 @@ class ContextGap(BaseModel):
 
     surface: str = Field(
         ...,
-        description="One of: market | portfolio | evaluators | characterization",
+        description=(
+            "One of: market | portfolio | evaluators | characterization | "
+            "market_signals"
+        ),
     )
     reason: str = Field(
         ...,
@@ -309,6 +323,7 @@ class PreDecisionContext(BaseModel):
     portfolio_state_available: bool = True
     evaluator_verdicts_available: bool = True
     characterization_available: bool = True
+    market_signals_available: bool = True
     gaps: list[ContextGap] = Field(default_factory=list)
     assembled_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
