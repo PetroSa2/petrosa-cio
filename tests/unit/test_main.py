@@ -101,3 +101,88 @@ async def test_nats_subscription_with_wildcard():
     # #192: stdout logs must be structured JSON (not the text formatter) so
     # Grafana/Loki can derive a real severity token instead of "unknown".
     mock_attach_handler.assert_called_once_with(use_json_format=True)
+
+    # #209 (AC3): nc.connect() must wire structured reconnect callbacks and
+    # an infinite retry budget so a transient transport drop (e.g. the
+    # 2026-09-18 incident's ConnectionResetError during reconnection) is
+    # logged through our structured logger instead of leaking as a raw,
+    # correlation-id-less traceback, and never permanently closes the
+    # connection out from under an otherwise-healthy process.
+    connect_kwargs = mock_nc.connect.call_args.kwargs
+    assert connect_kwargs["max_reconnect_attempts"] == -1
+    assert connect_kwargs["reconnect_time_wait"] == 2
+    for cb_name in ("error_cb", "disconnected_cb", "reconnected_cb", "closed_cb"):
+        assert callable(connect_kwargs[cb_name]), f"{cb_name} must be wired"
+
+
+@pytest.mark.asyncio
+async def test_nats_error_cb_logs_structured_exc_type_not_bare_str(caplog):
+    """#209 (AC3): the wired error_cb must log exc_type + a non-empty detail
+    (never a bare str(e), which is '' for some transport exceptions — same
+    empty-tail failure class fixed in context_builder.py by #197)."""
+    caplog.set_level(logging.WARNING, logger="cio-strategist")
+
+    mock_nc = AsyncMock()
+    mock_nc.connect = AsyncMock()
+    mock_redis = AsyncMock()
+    mock_redis.close = AsyncMock()
+    mock_server = MagicMock()
+    mock_server.serve = AsyncMock()
+    mock_server.shutdown = AsyncMock()
+
+    with (
+        patch.dict(os.environ, {"NATS_TOPIC_INTENTS": "cio.intent.trading"}),
+        patch("uvicorn.Config"),
+        patch("uvicorn.Server", return_value=mock_server),
+        patch("cio.main.attach_logging_handler", return_value=True),
+        patch("cio.main.setup_telemetry", return_value=True),
+        patch("cio.main.NATSListener") as MockNATSListener,
+        patch("cio.main.NATS", return_value=mock_nc),
+        patch("redis.asyncio.from_url", return_value=mock_redis),
+        patch("cio.main.ClientFactory"),
+        patch("cio.main.ContextBuilder") as MockContextBuilder,
+        patch("cio.main.Orchestrator"),
+        patch("cio.main.NurseEnforcer"),
+        patch("cio.main.OutputRouter") as MockOutputRouter,
+        patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
+        patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
+        patch("cio.main.PositionReviewLoop") as MockPositionReviewLoop,
+    ):
+        MockNATSListener.return_value.start = AsyncMock()
+        MockNATSListener.return_value.stop = AsyncMock()
+        MockHeartbeatResponder.return_value.start = AsyncMock()
+        MockHeartbeatResponder.return_value.stop = AsyncMock()
+        MockHeartbeatPublisher.return_value.start = AsyncMock()
+        MockHeartbeatPublisher.return_value.stop = AsyncMock()
+        MockOutputRouter.return_value.close = AsyncMock()
+        MockContextBuilder.return_value.close = AsyncMock()
+        MockPositionReviewLoop.return_value.start = AsyncMock()
+        MockPositionReviewLoop.return_value.stop = AsyncMock()
+
+        with patch("asyncio.Event") as mock_event_cls:
+
+            def _capture_task(coro):
+                coro.close()
+                return MagicMock()
+
+            with patch("asyncio.create_task", side_effect=_capture_task):
+                mock_event_cls.return_value.wait = AsyncMock(return_value=None)
+                await main()
+
+    error_cb = mock_nc.connect.call_args.kwargs["error_cb"]
+
+    class _EmptyStrConnectionError(Exception):
+        def __str__(self):
+            return ""
+
+    await error_cb(_EmptyStrConnectionError())
+
+    warning_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "NATS_TRANSPORT_ERROR" in r.message
+    ]
+    assert warning_records, "expected a structured NATS_TRANSPORT_ERROR WARNING"
+    body = warning_records[0].message
+    assert "exc_type=_EmptyStrConnectionError" in body
+    assert "detail=<empty>" in body

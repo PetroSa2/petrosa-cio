@@ -76,6 +76,13 @@ logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
 logger = logging.getLogger("cio-strategist")
 
+# #209 (AC3): backoff wait (seconds) between NATS reconnect attempts. Kept as
+# a named constant (rather than nats.py's library default of 2) so the
+# disconnected_cb log line and the connect() call can never drift apart.
+NATS_RECONNECT_TIME_WAIT_SECONDS = int(
+    os.getenv("NATS_RECONNECT_TIME_WAIT_SECONDS", "2")
+)
+
 # Initialize FastAPI for health checks
 app = FastAPI(title="Petrosa CIO Health")
 
@@ -193,9 +200,63 @@ async def main():
     )
 
     # 2. Initialize Components
+    #
+    # #209 (AC3): nats.py already retries transport drops internally, but
+    # with no callbacks wired the retry/backoff cycle was entirely
+    # invisible — a raw `ConnectionResetError: [Errno 104]` from inside
+    # the client's read loop only ever reached the logs as an unstructured
+    # traceback (see incident 2026-09-18 02:15:56 UTC), with no
+    # correlation_id and no indication reconnection was in progress or
+    # succeeded. error_cb/disconnected_cb/reconnected_cb/closed_cb route
+    # every transport event through the same structured logger as the
+    # rest of the service. max_reconnect_attempts=-1 (infinite) plus the
+    # explicit reconnect_time_wait backoff means a long-lived transport
+    # blip never permanently closes the connection out from under a
+    # process that's otherwise healthy.
+    async def _nats_error_cb(e: Exception) -> None:
+        exc_type = type(e).__name__
+        detail = str(e) or "<empty>"
+        logger.warning(
+            "NATS_TRANSPORT_ERROR: exc_type=%s detail=%s",
+            exc_type,
+            detail,
+            extra={"correlation_id": "SYSTEM", "exc_type": exc_type},
+        )
+
+    async def _nats_disconnected_cb() -> None:
+        logger.warning(
+            "NATS_DISCONNECTED: connection to %s lost, reconnect loop active "
+            "(reconnect_time_wait=%ss, max_reconnect_attempts=infinite)",
+            nats_url,
+            NATS_RECONNECT_TIME_WAIT_SECONDS,
+            extra={"correlation_id": "SYSTEM"},
+        )
+
+    async def _nats_reconnected_cb() -> None:
+        logger.info(
+            "NATS_RECONNECTED: connection to %s restored",
+            nats_url,
+            extra={"correlation_id": "SYSTEM"},
+        )
+
+    async def _nats_closed_cb() -> None:
+        logger.error(
+            "NATS_CLOSED: connection to %s permanently closed",
+            nats_url,
+            extra={"correlation_id": "SYSTEM"},
+        )
+
     nc = NATS()
     try:
-        await nc.connect(nats_url)
+        await nc.connect(
+            nats_url,
+            error_cb=_nats_error_cb,
+            disconnected_cb=_nats_disconnected_cb,
+            reconnected_cb=_nats_reconnected_cb,
+            closed_cb=_nats_closed_cb,
+            max_reconnect_attempts=-1,
+            reconnect_time_wait=NATS_RECONNECT_TIME_WAIT_SECONDS,
+        )
         logger.info(f"Connected to NATS at {nats_url}")
         app.state.nats_client = nc
     except Exception as e:
