@@ -514,10 +514,24 @@ class OutputRouter:
                                     extra={"correlation_id": correlation_id},
                                 )
                     except Exception as e:
+                        # #209 (AC4): several httpx exceptions (and some
+                        # connection-reset errors) stringify to "" — logging
+                        # bare str(e) then produces the misleading empty-tail
+                        # "Error applying strategy pause via REST: " line
+                        # that gives on-call zero signal. Same pattern as
+                        # context_builder.py's _fetch_strategy_stats /
+                        # _fetch_regime exc_type+detail logging (#197).
+                        exc_type = type(e).__name__
+                        detail = str(e) or "<empty>"
                         logger.error(
-                            "Error applying strategy pause via REST: %s",
-                            str(e),
-                            extra={"correlation_id": correlation_id},
+                            "Error applying strategy pause via REST: "
+                            "exc_type=%s detail=%s",
+                            exc_type,
+                            detail,
+                            extra={
+                                "correlation_id": correlation_id,
+                                "exc_type": exc_type,
+                            },
                         )
         elif action == ActionType.ESCALATE:
             dispatch_tasks_data.append(

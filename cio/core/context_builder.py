@@ -879,13 +879,69 @@ class ContextBuilder:
         distinguish "data unavailable" from "zero performance" — the gap
         collector is threaded through from ``build()`` the same way
         market/portfolio already are.
+
+        #209 root cause: a 200 response is not the same as *complete* data.
+        ``petrosa-data-manager``'s ``/analysis/performance/{strategy_id}``
+        never populates ``win_rate_delta`` or ``consecutive_losses`` on any
+        response branch (confirmed by inspection of
+        ``data_manager/api/routes/analysis.py::get_strategy_performance`` —
+        both fields are hardcoded ``None`` even on its best-data
+        "pnl-calculator" success path). Because
+        ``strategy_assessor.REQUIRED_CONTEXT_FIELDS`` treats both as
+        mandatory, every strategy_assessor call self-reports
+        ``MISSING_INPUT`` regardless of whether the strategy has real
+        trading history — this was previously invisible because the old
+        code only recorded a gap on *exception*, never on a successful
+        response carrying structurally-absent fields.         Computing these two
+        fields is out of scope here (data-manager analytics, tracked
+        separately per the #209 ticket body as
+        PetroSa2/petrosa-data-manager#318); this records the gap so the
+        degradation is audit-trail visible instead of silently
+        indistinguishable from "field genuinely populated as None".
         """
         url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
         try:
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
-            return StrategyStats(**data["stats"])
+            stats = StrategyStats(**data["stats"])
+            structurally_absent = [
+                field
+                for field, value in (
+                    ("win_rate_delta", stats.win_rate_delta),
+                    ("consecutive_losses", stats.consecutive_losses),
+                )
+                if value is None
+            ]
+            if structurally_absent and gaps is not None:
+                logger.warning(
+                    "STRATEGY_STATS_STRUCTURAL_GAP: fields=%s strategy_id=%s "
+                    "endpoint=%s — data-manager returned 200 but these fields "
+                    "are not yet computed upstream (see petrosa-data-manager "
+                    "follow-up); strategy_assessor will self-report "
+                    "MISSING_INPUT for this trigger",
+                    ",".join(structurally_absent),
+                    strategy_id,
+                    url,
+                    extra={
+                        "correlation_id": correlation_id,
+                        "surface": "strategy_stats",
+                        "strategy_id": strategy_id,
+                        "endpoint": url,
+                        "structurally_absent_fields": structurally_absent,
+                    },
+                )
+                gaps.append(
+                    ContextGap(
+                        surface="strategy_stats",
+                        reason=(
+                            "structural_gap: "
+                            + ",".join(structurally_absent)
+                            + " never populated by data-manager"
+                        ),
+                    )
+                )
+            return stats
         except httpx.ReadTimeout:
             timeout_s = self.client.timeout.read
             logger.warning(

@@ -155,6 +155,96 @@ async def test_fetch_strategy_stats_without_gaps_collector_preserves_legacy_cont
 
 
 # ---------------------------------------------------------------------------
+# #209 root cause: a 200 response with structurally-absent required fields
+# must be gap-tracked the same as an exception, not silently accepted.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_strategy_stats_success_with_structural_none_fields_records_gap(
+    caplog,
+):
+    """#209 (AC1/AC2 root cause): data-manager's /analysis/performance
+    endpoint returns HTTP 200 but never populates win_rate_delta or
+    consecutive_losses (confirmed by inspection of
+    data_manager/api/routes/analysis.py::get_strategy_performance). Because
+    strategy_assessor.REQUIRED_CONTEXT_FIELDS mandates both, every call
+    self-reports MISSING_INPUT regardless of whether the strategy has real
+    trading history. This was previously invisible — the old code only
+    gap-tracked the *exception* path. A successful response carrying these
+    structurally-absent fields must now also produce a strategy_stats gap."""
+    caplog.set_level(logging.WARNING, logger="cio.core.context_builder")
+    builder = _make_builder()
+    builder.client.get = AsyncMock(
+        return_value=MagicMock(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "stats": {
+                    "win_rate": 0.55,
+                    "win_rate_delta": None,
+                    "consecutive_losses": None,
+                    "recent_pnl_trend": "positive",
+                }
+            },
+        )
+    )
+
+    gaps: list[ContextGap] = []
+    result = await builder._fetch_strategy_stats("strat-real-3", "cid-5", gaps=gaps)
+
+    assert result.win_rate == 0.55
+    assert result.win_rate_delta is None
+    assert result.consecutive_losses is None
+
+    stats_gaps = [g for g in gaps if g.surface == "strategy_stats"]
+    assert stats_gaps
+    assert stats_gaps[0].reason.startswith("structural_gap:")
+    assert "win_rate_delta" in stats_gaps[0].reason
+    assert "consecutive_losses" in stats_gaps[0].reason
+
+    warning_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "STRATEGY_STATS_STRUCTURAL_GAP" in r.message
+    ]
+    assert warning_records
+    assert "strat-real-3" in warning_records[0].message
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_fetch_strategy_stats_success_with_complete_fields_records_no_gap():
+    """AC2: a fully-populated response (all REQUIRED_CONTEXT_FIELDS present)
+    must not record a spurious structural gap."""
+    builder = _make_builder()
+    builder.client.get = AsyncMock(
+        return_value=MagicMock(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: {
+                "stats": {
+                    "win_rate": 0.6,
+                    "win_rate_delta": 0.05,
+                    "consecutive_losses": 1,
+                    "recent_pnl_trend": "positive",
+                }
+            },
+        )
+    )
+
+    gaps: list[ContextGap] = []
+    result = await builder._fetch_strategy_stats("strat-real-4", "cid-6", gaps=gaps)
+
+    assert result.win_rate_delta == 0.05
+    assert result.consecutive_losses == 1
+    assert not [g for g in gaps if g.surface == "strategy_stats"]
+
+    await builder.close()
+
+
+# ---------------------------------------------------------------------------
 # AC2: concurrent all-fail produces one consolidated summary line
 # ---------------------------------------------------------------------------
 

@@ -684,6 +684,63 @@ async def test_output_router_rest_pause_strategy_post_exception_logged(caplog):
 
 
 @pytest.mark.asyncio
+async def test_output_router_rest_pause_strategy_empty_str_exception_logs_exc_type(
+    caplog,
+):
+    """#209 (AC4): several exceptions (e.g. some httpx/connection-reset
+    errors) stringify to '' — logging bare str(e) previously produced the
+    misleading empty-tail "Error applying strategy pause via REST: " line
+    with zero on-call signal. exc_type + a non-empty detail must always be
+    present, mirroring the pattern already applied to context_builder.py's
+    _fetch_strategy_stats / _fetch_regime (#197)."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "doji_reversal"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "pause-empty-str-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    class _EmptyStrConnectionResetError(Exception):
+        def __str__(self):
+            return ""
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client,
+            "post",
+            new_callable=AsyncMock,
+            side_effect=_EmptyStrConnectionResetError(),
+        ):
+            await router.route(context, decision)  # must not raise
+
+    assert "Error applying strategy pause via REST" in caplog.text
+    assert "exc_type=_EmptyStrConnectionResetError" in caplog.text
+    assert "detail=<empty>" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_output_router_rest_fail_safe_create_task_exception_logged(caplog):
     """FAIL_SAFE: if scheduling the background REST pause task itself raises,
     the exception is caught and logged, not propagated."""
