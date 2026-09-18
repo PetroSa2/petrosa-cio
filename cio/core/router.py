@@ -126,6 +126,64 @@ class OutputRouter:
         """Closes internal resources."""
         await self.http_client.aclose()
 
+    @staticmethod
+    def _resolve_routing_strategy_id(
+        context: TriggerContext, fallback_strategy_id: str
+    ) -> str:
+        """
+        petrosa-cio#200: prefer the canonical strategy id carried in the
+        original trigger payload's ``metadata.strategy_id`` (set by
+        producers such as petrosa-realtime-strategies) over the top-level
+        field, which may be a human display name (e.g. "Iceberg Order
+        Detector" instead of "iceberg_detector"). Falls back to
+        ``fallback_strategy_id`` (context.strategy_id) when no valid
+        metadata override is present. Defensive against test doubles where
+        ``trigger_payload`` is not a real dict.
+        """
+        payload = getattr(context, "trigger_payload", None)
+        metadata = payload.get("metadata") if isinstance(payload, dict) else None
+        candidate = metadata.get("strategy_id") if isinstance(metadata, dict) else None
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+        return fallback_strategy_id
+
+    def _resolve_base_url_for_dispatch(
+        self,
+        *,
+        context: TriggerContext,
+        strategy_id: str,
+        correlation_id: str,
+        action_name: str,
+    ) -> str | None:
+        """
+        Resolves TargetServiceResolver -> base_url for a REST dispatch
+        branch. Returns None (and logs an error) when the strategy cannot
+        be routed to either known service — callers MUST skip the REST
+        call in that case rather than guessing a target (petrosa-cio#200):
+        defaulting an unrecognised strategy to a concrete service can route
+        freeze/pause actions at the wrong service.
+        """
+        routing_id = self._resolve_routing_strategy_id(context, strategy_id)
+        target_service = TargetServiceResolver.resolve(routing_id)
+
+        if target_service == ServiceType.UNKNOWN:
+            logger.error(
+                "UNROUTABLE_STRATEGY: cannot resolve target service for '%s' "
+                "(routing id '%s') during %s; skipping REST dispatch to "
+                "avoid misrouting to the wrong service.",
+                strategy_id,
+                routing_id,
+                action_name,
+                extra={"correlation_id": correlation_id, "strategy_id": strategy_id},
+            )
+            return None
+
+        return (
+            self.ta_bot_url
+            if target_service == ServiceType.TA_BOT
+            else self.realtime_strategies_url
+        )
+
     async def route(self, context: TriggerContext, decision: DecisionResult) -> None:
         """
         Routes the decision following the T-Junction logic:
@@ -294,172 +352,173 @@ class OutputRouter:
             )
 
         elif action == ActionType.MODIFY_PARAMS:
-            # a. Call TargetServiceResolver.resolve(strategy_id)
-            target_service = TargetServiceResolver.resolve(strategy_id)
-
-            # b. Build the base URL from the resolved service
-            base_url = (
-                self.ta_bot_url
-                if target_service == ServiceType.TA_BOT
-                else self.realtime_strategies_url
+            # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
+            # returns None and logs when the strategy can't be routed).
+            base_url = self._resolve_base_url_for_dispatch(
+                context=context,
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                action_name="MODIFY_PARAMS",
             )
 
-            # c. Build the payload with parameters, changed_by, reason, validate_only
-            params_dict = {}
-            if decision.param_change:
-                params_dict = {
-                    decision.param_change.param: decision.param_change.new_value
+            if base_url is not None:
+                # b. Build the payload with parameters, changed_by, reason, validate_only
+                params_dict = {}
+                if decision.param_change:
+                    params_dict = {
+                        decision.param_change.param: decision.param_change.new_value
+                    }
+
+                payload = {
+                    "parameters": params_dict,
+                    "changed_by": f"petrosa-cio:{strategy_id}",
+                    "reason": decision.justification
+                    or "CIO automated parameter adjustment",
+                    "validate_only": False,
                 }
 
-            payload = {
-                "parameters": params_dict,
-                "changed_by": f"petrosa-cio:{strategy_id}",
-                "reason": decision.justification
-                or "CIO automated parameter adjustment",
-                "validate_only": False,
-            }
-
-            # d. Await the POST call (unless in DRY_RUN mode)
-            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            if is_dry_run:
-                logger.info(
-                    f"[SHADOW MODE] Would have applied parameter change via REST to {url}",
-                    extra={
-                        "correlation_id": correlation_id,
-                        "strategy_id": strategy_id,
-                        "payload": payload,
-                    },
-                )
-            else:
-                try:
-                    response = await self.http_client.post(url, json=payload)
-
-                    # e. If response status >= 400: log FAILED_TO_APPLY
-                    if response.status_code >= 400:
-                        logger.error(
-                            "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
-                            strategy_id,
-                            response.status_code,
-                            response.text,
-                            extra={"correlation_id": correlation_id},
-                        )
-
-                        # Handle 429 specifically (AC2, AC4)
-                        if response.status_code == 429:
-                            await self._apply_rate_limit_freeze(
-                                strategy_id, correlation_id, response
-                            )
-                    else:
-                        # f. If response status 2xx: log SUCCESS, then set param freeze in Redis
-                        logger.info(
-                            "SUCCESS: Parameter change applied via REST to %s",
-                            strategy_id,
-                            extra={"correlation_id": correlation_id},
-                        )
-                        if self.cache:
-                            freeze_key = f"cio:freeze:{strategy_id}"
-                            await self.cache.set(freeze_key, "LOCKED", ttl=1800)
-                            logger.info(
-                                "Param freeze set for %s (1800s)",
-                                strategy_id,
-                                extra={"correlation_id": correlation_id},
-                            )
-                        else:
-                            logger.warning(
-                                "FREEZE_SKIPPED: cache unavailable for strategy %s. "
-                                "Feedback loop protection is inactive for this change.",
-                                strategy_id,
-                                extra={"correlation_id": correlation_id},
-                            )
-                except Exception as e:
-                    logger.error(
-                        "Error applying parameter change via REST: %s",
-                        str(e),
-                        extra={"correlation_id": correlation_id},
+                # c. Await the POST call (unless in DRY_RUN mode)
+                url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+                if is_dry_run:
+                    logger.info(
+                        f"[SHADOW MODE] Would have applied parameter change via REST to {url}",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "strategy_id": strategy_id,
+                            "payload": payload,
+                        },
                     )
+                else:
+                    try:
+                        response = await self.http_client.post(url, json=payload)
+
+                        # d. If response status >= 400: log FAILED_TO_APPLY
+                        if response.status_code >= 400:
+                            logger.error(
+                                "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
+                                strategy_id,
+                                response.status_code,
+                                response.text,
+                                extra={"correlation_id": correlation_id},
+                            )
+
+                            # Handle 429 specifically (AC2, AC4)
+                            if response.status_code == 429:
+                                await self._apply_rate_limit_freeze(
+                                    strategy_id, correlation_id, response
+                                )
+                        else:
+                            # e. If response status 2xx: log SUCCESS, then set param freeze in Redis
+                            logger.info(
+                                "SUCCESS: Parameter change applied via REST to %s",
+                                strategy_id,
+                                extra={"correlation_id": correlation_id},
+                            )
+                            if self.cache:
+                                freeze_key = f"cio:freeze:{strategy_id}"
+                                await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+                                logger.info(
+                                    "Param freeze set for %s (1800s)",
+                                    strategy_id,
+                                    extra={"correlation_id": correlation_id},
+                                )
+                            else:
+                                logger.warning(
+                                    "FREEZE_SKIPPED: cache unavailable for strategy %s. "
+                                    "Feedback loop protection is inactive for this change.",
+                                    strategy_id,
+                                    extra={"correlation_id": correlation_id},
+                                )
+                    except Exception as e:
+                        logger.error(
+                            "Error applying parameter change via REST: %s",
+                            str(e),
+                            extra={"correlation_id": correlation_id},
+                        )
 
         elif action == ActionType.PAUSE_STRATEGY:
-            # a. Resolve service using TargetServiceResolver
-            target_service = TargetServiceResolver.resolve(strategy_id)
-
-            # b. Build base URL from resolved service
-            base_url = (
-                self.ta_bot_url
-                if target_service == ServiceType.TA_BOT
-                else self.realtime_strategies_url
+            # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
+            # returns None and logs when the strategy can't be routed).
+            base_url = self._resolve_base_url_for_dispatch(
+                context=context,
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                action_name="PAUSE_STRATEGY",
             )
 
-            # c. Payload must be exactly:
-            payload = {
-                "parameters": {"enabled": False},
-                "changed_by": f"petrosa-cio:{strategy_id}",
-                "reason": "CIO_PAUSE: " + (decision.justification or "automated pause"),
-                "validate_only": False,
-            }
+            if base_url is not None:
+                # b. Payload must be exactly:
+                payload = {
+                    "parameters": {"enabled": False},
+                    "changed_by": f"petrosa-cio:{strategy_id}",
+                    "reason": "CIO_PAUSE: "
+                    + (decision.justification or "automated pause"),
+                    "validate_only": False,
+                }
 
-            # d. Await the POST call to /api/v1/strategies/{strategy_id}/config
-            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            # AC4 (cio#169): Skip POST if already frozen — prevents 429 storms when LLM
-            # repeatedly decides pause_strategy for the same strategy within the freeze window.
-            _pause_freeze_key = f"cio:freeze:{strategy_id}"
-            _pause_already_frozen = bool(
-                self.cache and await self.cache.get(_pause_freeze_key)
-            )
-            if _pause_already_frozen:
-                logger.info(
-                    "PAUSE_SKIPPED: strategy %s already frozen — dedup active",
-                    strategy_id,
-                    extra={"correlation_id": correlation_id},
+                # c. Await the POST call to /api/v1/strategies/{strategy_id}/config
+                url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+                # AC4 (cio#169): Skip POST if already frozen — prevents 429 storms when LLM
+                # repeatedly decides pause_strategy for the same strategy within the freeze window.
+                _pause_freeze_key = f"cio:freeze:{strategy_id}"
+                _pause_already_frozen = bool(
+                    self.cache and await self.cache.get(_pause_freeze_key)
                 )
-            elif is_dry_run:
-                logger.info(
-                    f"[SHADOW MODE] Would have paused strategy via REST to {url}",
-                    extra={
-                        "correlation_id": correlation_id,
-                        "strategy_id": strategy_id,
-                        "payload": payload,
-                    },
-                )
-            else:
-                try:
-                    response = await self.http_client.post(url, json=payload)
+                if _pause_already_frozen:
+                    logger.info(
+                        "PAUSE_SKIPPED: strategy %s already frozen — dedup active",
+                        strategy_id,
+                        extra={"correlation_id": correlation_id},
+                    )
+                elif is_dry_run:
+                    logger.info(
+                        f"[SHADOW MODE] Would have paused strategy via REST to {url}",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "strategy_id": strategy_id,
+                            "payload": payload,
+                        },
+                    )
+                else:
+                    try:
+                        response = await self.http_client.post(url, json=payload)
 
-                    # e. If response status >= 400: log FAILED_TO_APPLY
-                    if response.status_code >= 400:
-                        logger.error(
-                            "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
-                            strategy_id,
-                            response.status_code,
-                            response.text,
-                            extra={"correlation_id": correlation_id},
-                        )
-
-                        # Handle 429 specifically (AC2, AC4)
-                        if response.status_code == 429:
-                            await self._apply_rate_limit_freeze(
-                                strategy_id, correlation_id, response
+                        # d. If response status >= 400: log FAILED_TO_APPLY
+                        if response.status_code >= 400:
+                            logger.error(
+                                "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
+                                strategy_id,
+                                response.status_code,
+                                response.text,
+                                extra={"correlation_id": correlation_id},
                             )
-                    else:
-                        # f. If response 2xx: log SUCCESS, then set freeze in Redis (AC3)
-                        logger.info(
-                            "SUCCESS: Strategy %s paused via REST",
-                            strategy_id,
-                            extra={"correlation_id": correlation_id},
-                        )
-                        if self.cache:
-                            freeze_key = f"cio:freeze:{strategy_id}"
-                            await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+
+                            # Handle 429 specifically (AC2, AC4)
+                            if response.status_code == 429:
+                                await self._apply_rate_limit_freeze(
+                                    strategy_id, correlation_id, response
+                                )
+                        else:
+                            # e. If response 2xx: log SUCCESS, then set freeze in Redis (AC3)
                             logger.info(
-                                "Pause freeze set for %s (1800s)",
+                                "SUCCESS: Strategy %s paused via REST",
                                 strategy_id,
                                 extra={"correlation_id": correlation_id},
                             )
-                except Exception as e:
-                    logger.error(
-                        "Error applying strategy pause via REST: %s",
-                        str(e),
-                        extra={"correlation_id": correlation_id},
-                    )
+                            if self.cache:
+                                freeze_key = f"cio:freeze:{strategy_id}"
+                                await self.cache.set(freeze_key, "LOCKED", ttl=1800)
+                                logger.info(
+                                    "Pause freeze set for %s (1800s)",
+                                    strategy_id,
+                                    extra={"correlation_id": correlation_id},
+                                )
+                    except Exception as e:
+                        logger.error(
+                            "Error applying strategy pause via REST: %s",
+                            str(e),
+                            extra={"correlation_id": correlation_id},
+                        )
         elif action == ActionType.ESCALATE:
             dispatch_tasks_data.append(
                 (f"cio.escalation.{strategy_id}", decision.model_dump_json().encode())
@@ -517,27 +576,31 @@ class OutputRouter:
             dispatch_tasks_data.append(
                 (f"cio.failure.{strategy_id}", decision.model_dump_json().encode())
             )
-            # 2. Trigger Strategy Pause via REST (Double-lock)
-            target_service = TargetServiceResolver.resolve(strategy_id)
-            base_url = (
-                self.ta_bot_url
-                if target_service == ServiceType.TA_BOT
-                else self.realtime_strategies_url
+            # 2. Trigger Strategy Pause via REST (Double-lock). petrosa-cio#200:
+            # skip the REST call (rather than guessing a target) when the
+            # strategy can't be routed — the NATS failure signal above still
+            # fires either way.
+            base_url = self._resolve_base_url_for_dispatch(
+                context=context,
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                action_name="FAIL_SAFE",
             )
-            url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-            payload = {
-                "parameters": {"enabled": False},
-                "changed_by": f"petrosa-cio:{strategy_id}",
-                "reason": "CRITICAL_FAIL_SAFE: "
-                + (decision.justification or "system failure"),
-                "validate_only": False,
-            }
-            if not is_dry_run:
-                try:
-                    # We don't await here to not block the NATS publish
-                    asyncio.create_task(self.http_client.post(url, json=payload))
-                except Exception as e:
-                    logger.error(f"Failed to fire fail-safe REST pause: {e}")
+            if base_url is not None:
+                url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+                payload = {
+                    "parameters": {"enabled": False},
+                    "changed_by": f"petrosa-cio:{strategy_id}",
+                    "reason": "CRITICAL_FAIL_SAFE: "
+                    + (decision.justification or "system failure"),
+                    "validate_only": False,
+                }
+                if not is_dry_run:
+                    try:
+                        # We don't await here to not block the NATS publish
+                        asyncio.create_task(self.http_client.post(url, json=payload))
+                    except Exception as e:
+                        logger.error(f"Failed to fire fail-safe REST pause: {e}")
 
         # 2b. Audit copy on cio.decision.audit.<action> — feeds the CIO
         # health evaluator (P7.1, #610) and is the Phase-2 substrate for

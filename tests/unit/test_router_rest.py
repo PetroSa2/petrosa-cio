@@ -1,5 +1,6 @@
 import asyncio
 import os
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,9 +9,11 @@ from cio.core.router import OutputRouter
 from cio.models import (
     ActionType,
     ActivationRecommendation,
+    AppliedParamChange,
     ConfidenceLevel,
     DecisionResult,
     HealthStatus,
+    ParamChangeDirection,
     RegimeFit,
     TriggerContext,
 )
@@ -83,7 +86,7 @@ async def test_output_router_rest_429_handling():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "test_strat"
+    context.strategy_id = "rsi_extreme_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-id"
 
@@ -114,7 +117,7 @@ async def test_output_router_rest_429_handling():
 
             # Verify freeze key set with TTL from response
             mock_cache.set.assert_called_with(
-                "cio:freeze:test_strat", "LOCKED", ttl=7200
+                "cio:freeze:rsi_extreme_reversal", "LOCKED", ttl=7200
             )
 
 
@@ -133,7 +136,7 @@ async def test_output_router_rest_pause_strategy_freeze():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "pause_strat"
+    context.strategy_id = "doji_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-pause-id"
 
@@ -159,12 +162,12 @@ async def test_output_router_rest_pause_strategy_freeze():
 
             # Verify freeze key set with 1800s TTL (AC3)
             mock_cache.set.assert_called_with(
-                "cio:freeze:pause_strat", "LOCKED", ttl=1800
+                "cio:freeze:doji_reversal", "LOCKED", ttl=1800
             )
             # Verify changed_by format (AC1)
             assert (
                 mock_post.call_args[1]["json"]["changed_by"]
-                == "petrosa-cio:pause_strat"
+                == "petrosa-cio:doji_reversal"
             )
 
 
@@ -183,7 +186,7 @@ async def test_output_router_rest_429_fallback_ttl():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "test_strat"
+    context.strategy_id = "rsi_extreme_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-fallback"
 
@@ -214,7 +217,7 @@ async def test_output_router_rest_429_fallback_ttl():
 
             # Verify freeze key set with fallback TTL (3600)
             mock_cache.set.assert_called_with(
-                "cio:freeze:test_strat", "LOCKED", ttl=3600
+                "cio:freeze:rsi_extreme_reversal", "LOCKED", ttl=3600
             )
 
 
@@ -231,7 +234,7 @@ async def test_output_router_rest_cache_unavailable_warning(caplog):
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "no_cache_strat"
+    context.strategy_id = "hammer_reversal_pattern"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "no-cache-id"
 
@@ -270,7 +273,7 @@ async def test_output_router_rest_fail_safe_identity():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "fail_safe_strat"
+    context.strategy_id = "shooting_star_reversal"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "fail-safe-id"
 
@@ -298,7 +301,7 @@ async def test_output_router_rest_fail_safe_identity():
 
             mock_post.assert_called_once()
             _, kwargs = mock_post.call_args
-            assert kwargs["json"]["changed_by"] == "petrosa-cio:fail_safe_strat"
+            assert kwargs["json"]["changed_by"] == "petrosa-cio:shooting_star_reversal"
 
 
 @pytest.mark.asyncio
@@ -315,7 +318,7 @@ async def test_output_router_rest_429_clamping():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "clamp_strat"
+    context.strategy_id = "volume_surge_breakout"  # registered TA_BOT strategy
     context.decision_id = "test-decision-id"
     context.correlation_id = "rest-429-clamp"
 
@@ -342,20 +345,22 @@ async def test_output_router_rest_429_clamping():
             mock_response.json.return_value = {"retry_after": 0}
             mock_post.return_value = mock_response
             await router.route(context, decision)
-            mock_cache.set.assert_called_with("cio:freeze:clamp_strat", "LOCKED", ttl=1)
+            mock_cache.set.assert_called_with(
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=1
+            )
 
             # 2. Test too high (100000 -> 86400)
             mock_response.json.return_value = {"retry_after": 100000}
             await router.route(context, decision)
             mock_cache.set.assert_called_with(
-                "cio:freeze:clamp_strat", "LOCKED", ttl=86400
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=86400
             )
 
             # 3. Test float/string coercion
             mock_response.json.return_value = {"retry_after": "120.5"}
             await router.route(context, decision)
             mock_cache.set.assert_called_with(
-                "cio:freeze:clamp_strat", "LOCKED", ttl=120
+                "cio:freeze:volume_surge_breakout", "LOCKED", ttl=120
             )
 
 
@@ -418,7 +423,7 @@ async def test_output_router_rest_pause_strategy_skips_post_when_frozen():
     )
 
     context = MagicMock(spec=TriggerContext)
-    context.strategy_id = "already_paused_strat"
+    context.strategy_id = "ema_pullback_continuation"  # registered TA_BOT strategy
     context.decision_id = "dedup-test-id"
     context.correlation_id = "dedup-cid"
 
@@ -441,3 +446,278 @@ async def test_output_router_rest_pause_strategy_skips_post_when_frozen():
         ) as mock_post:
             await router.route(context, decision)
             mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_modify_params_dry_run_shadow_log(caplog):
+    """DRY_RUN branch of MODIFY_PARAMS logs [SHADOW MODE] and never POSTs."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        realtime_strategies_url="http://realtime",
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "modify-dry-run-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.MODIFY_PARAMS,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with caplog.at_level("INFO"):
+        with patch.dict(os.environ, {"DRY_RUN": "true"}):
+            with patch.object(
+                router.http_client, "post", new_callable=AsyncMock
+            ) as mock_post:
+                await router.route(context, decision)
+                mock_post.assert_not_called()
+
+    assert "[SHADOW MODE] Would have applied parameter change via REST" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_modify_params_builds_params_dict_from_param_change():
+    """When decision.param_change is set, the REST payload's `parameters`
+    dict is built from it (covers the populated-params_dict branch)."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "modify-param-change-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.MODIFY_PARAMS,
+        justification="Test",
+        thought_trace="Test",
+        param_change=AppliedParamChange(
+            strategy_id="momentum_pulse",
+            timestamp=datetime.now(UTC),
+            param="threshold",
+            old_value=1.0,
+            new_value=2.5,
+            direction=ParamChangeDirection.INCREASE,
+            reason="Test rationale",
+        ),
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_post.return_value.status_code = 200
+            await router.route(context, decision)
+
+            mock_post.assert_called_once()
+            _, kwargs = mock_post.call_args
+            assert kwargs["json"]["parameters"] == {"threshold": 2.5}
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_modify_params_post_exception_logged(caplog):
+    """An exception raised by http_client.post during MODIFY_PARAMS is caught
+    and logged, not propagated."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "modify-exception-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.MODIFY_PARAMS,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client,
+            "post",
+            new_callable=AsyncMock,
+            side_effect=Exception("connection reset"),
+        ):
+            await router.route(context, decision)  # must not raise
+
+    assert "Error applying parameter change via REST" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_pause_strategy_429_handling():
+    """PAUSE_STRATEGY: a 429 response triggers the rate-limit freeze path
+    (mirrors the MODIFY_PARAMS 429 test, but for the PAUSE_STRATEGY branch)."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "doji_reversal"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "pause-429-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 429
+            mock_response.json.return_value = {"retry_after": 900}
+            mock_response.text = "Rate limit exceeded"
+            mock_post.return_value = mock_response
+
+            await router.route(context, decision)
+
+            mock_cache.set.assert_called_with(
+                "cio:freeze:doji_reversal", "LOCKED", ttl=900
+            )
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_pause_strategy_post_exception_logged(caplog):
+    """An exception raised by http_client.post during PAUSE_STRATEGY is
+    caught and logged, not propagated."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "doji_reversal"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "pause-exception-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client,
+            "post",
+            new_callable=AsyncMock,
+            side_effect=Exception("connection reset"),
+        ):
+            await router.route(context, decision)  # must not raise
+
+    assert "Error applying strategy pause via REST" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_fail_safe_create_task_exception_logged(caplog):
+    """FAIL_SAFE: if scheduling the background REST pause task itself raises,
+    the exception is caught and logged, not propagated."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "shooting_star_reversal"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "fail-safe-exception-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.FAIL_SAFE,
+        justification="Critical failure",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch(
+            "cio.core.router.asyncio.create_task",
+            side_effect=Exception("no running loop"),
+        ):
+            await router.route(context, decision)  # must not raise
+
+    assert "Failed to fire fail-safe REST pause" in caplog.text
