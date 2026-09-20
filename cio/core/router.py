@@ -249,6 +249,36 @@ class OutputRouter:
         )
         decision.decided_leverage = leverage_decision.decided_leverage
 
+        # #1125 — `arbitrate_leverage` above only knows about the strategy's
+        # static `recommended_leverage`/`strategy_envelope`/`operator_max`;
+        # it has no visibility into `decision.leverage`, the *regime-capped*
+        # leverage CodeEngine computed for THIS decision
+        # (`cio/core/engine.py`: `min(strategy_defaults.leverage,
+        # REGIME_LEVERAGE_CAPS[regime])`). Without this clamp,
+        # `decided_leverage` can exceed the regime cap and the trade engine
+        # ends up executing at the (typically 10x) strategy/operator default
+        # even when CodeEngine determined the current regime only supports a
+        # lower leverage — reproducible in both bypass mode (#1125) and
+        # normal LLM-reasoning mode, since both paths route through this
+        # same method. `decision.leverage` is never `None` (model default
+        # 1.0), so this always applies once code_result has run.
+        _regime_leverage_cap = decision.leverage
+        if _regime_leverage_cap is not None and _regime_leverage_cap >= 1:
+            _capped_leverage = int(_regime_leverage_cap)
+            if decision.decided_leverage > _capped_leverage:
+                logger.info(
+                    "leverage_regime_cap_applied: arbiter_decided=%s "
+                    "regime_cap=%s -> %s",
+                    decision.decided_leverage,
+                    _capped_leverage,
+                    _capped_leverage,
+                    extra={
+                        "correlation_id": correlation_id,
+                        "strategy_id": strategy_id,
+                    },
+                )
+                decision.decided_leverage = _capped_leverage
+
         # 0. Record Metrics
         from cio.core.metrics import DECISION_ACTIONS
 
