@@ -113,7 +113,9 @@ def _make_context(**overrides) -> TriggerContext:
     return TriggerContext(**defaults)
 
 
-def _make_decision(position_usd: float = 100.0) -> DecisionResult:
+def _make_decision(
+    position_usd: float = 100.0, leverage: float = 1.0
+) -> DecisionResult:
     return DecisionResult(
         action=ActionType.EXECUTE,
         justification="test",
@@ -126,6 +128,7 @@ def _make_decision(position_usd: float = 100.0) -> DecisionResult:
         regime_fit=RegimeFit.GOOD,
         strategy_health=HealthStatus.HEALTHY,
         activation_recommendation=ActivationRecommendation.RUN,
+        leverage=leverage,
     )
 
 
@@ -187,9 +190,12 @@ class TestRouterEndToEndLeveragePropagation:
         router = OutputRouter(nats_client=mock_nats, vector_client=mock_vector)
 
         # Strategy prefers 5x, well within the operator ceiling of 10x —
-        # arbiter should accept it as-is.
+        # arbiter should accept it as-is. `leverage=10.0` means CodeEngine
+        # did not compute a tighter regime cap for this decision (#1125's
+        # clamp is a no-op here — this test targets the arbiter, not the
+        # regime cap).
         ctx = _make_context(recommended_leverage=5)
-        decision = _make_decision()
+        decision = _make_decision(leverage=10.0)
 
         expected = arbitrate_leverage(recommended_leverage=5, operator_max=10)
         assert expected.decided_leverage == 5
@@ -224,9 +230,10 @@ class TestRouterEndToEndLeveragePropagation:
 
         # Strategy asks for 25x — above the operator ceiling. Per AC3.b this
         # is an override (clamp), never a silent drop back to some
-        # tradeengine-local hardcoded default.
+        # tradeengine-local hardcoded default. `leverage=10.0` — no tighter
+        # regime cap for this decision (#1125's clamp is a no-op here).
         ctx = _make_context(recommended_leverage=25)
-        decision = _make_decision()
+        decision = _make_decision(leverage=10.0)
 
         await router.route(ctx, decision)
 
@@ -239,3 +246,132 @@ class TestRouterEndToEndLeveragePropagation:
         ]
         dispatched_payload = json.loads(legacy_calls[0].args[1])
         assert dispatched_payload["leverage"] == 10
+
+
+@pytest.mark.asyncio
+class TestRouterRegimeLeverageCap:
+    """#1125: `decided_leverage` must never exceed the regime-capped
+    leverage CodeEngine computed for this decision (`decision.leverage`,
+    set from `code_result.leverage` = `min(strategy_defaults.leverage,
+    REGIME_LEVERAGE_CAPS[regime])`). Before this fix, `arbitrate_leverage`
+    had no visibility into the regime cap at all, so a strategy/operator
+    default (typically 10x) could reach the dispatched Signal even when
+    CodeEngine determined the current regime only supports a lower
+    leverage — the symptom reported in #1125, reproducible in both bypass
+    mode and normal LLM-reasoning mode since both share this code path.
+    """
+
+    async def test_decided_leverage_clamped_to_regime_cap(self, monkeypatch):
+        monkeypatch.setenv("CIO_DEFAULT_MAX_LEVERAGE", "10")
+        monkeypatch.setenv("DRY_RUN", "false")
+
+        mock_nats = AsyncMock()
+        mock_vector = AsyncMock()
+        router = OutputRouter(nats_client=mock_nats, vector_client=mock_vector)
+
+        # No strategy recommendation -> arbiter falls back to operator_max
+        # (10x). But CodeEngine computed a regime cap of 3x for this
+        # decision (e.g. a choppy-regime REGIME_LEVERAGE_CAPS entry).
+        ctx = _make_context()
+        decision = _make_decision(leverage=3.0)
+
+        await router.route(ctx, decision)
+
+        assert decision.decided_leverage == 3
+
+        legacy_calls = [
+            call
+            for call in mock_nats.publish.call_args_list
+            if call.args[0] == "signals.trading.s1"
+        ]
+        assert len(legacy_calls) == 1
+        dispatched_payload = json.loads(legacy_calls[0].args[1])
+        assert dispatched_payload["leverage"] == 3
+        assert Signal(**dispatched_payload).leverage == 3
+
+    async def test_decided_leverage_unclamped_when_within_regime_cap(self, monkeypatch):
+        monkeypatch.setenv("CIO_DEFAULT_MAX_LEVERAGE", "10")
+        monkeypatch.setenv("DRY_RUN", "false")
+
+        mock_nats = AsyncMock()
+        mock_vector = AsyncMock()
+        router = OutputRouter(nats_client=mock_nats, vector_client=mock_vector)
+
+        # Strategy prefers 5x, regime cap is a generous 20x -> the strategy
+        # preference (not the regime cap) governs, per arbitrate_leverage's
+        # existing accept-branch semantics.
+        ctx = _make_context(recommended_leverage=5)
+        decision = _make_decision(leverage=20.0)
+
+        await router.route(ctx, decision)
+
+        assert decision.decided_leverage == 5
+
+    async def test_bypass_mode_decision_respects_regime_cap_end_to_end(
+        self, monkeypatch
+    ):
+        """Simulates the exact #1125 bypass-mode path: ActionClassifier's
+        bypass branch calls DecisionAssembler.assemble(), which sets
+        `decision.leverage = code_result.leverage` (the regime cap). The
+        router must clamp `decided_leverage` to that cap before dispatch —
+        the trade engine must not fall back to the 10x default.
+        """
+        from cio.core.assembler import DecisionAssembler
+        from cio.models import ActionType as _ActionType
+        from cio.models import CodeEngineResult
+
+        monkeypatch.setenv("CIO_DEFAULT_MAX_LEVERAGE", "10")
+        monkeypatch.setenv("DRY_RUN", "false")
+
+        ctx = _make_context()
+        code_result = CodeEngineResult(
+            hard_blocked=False,
+            block_context_fallback=False,
+            kelly_position_usd=100.0,
+            recommended_sl_pct=0.02,
+            recommended_tp_pct=0.04,
+            leverage=2.0,
+            gross_ev=0.01,
+            ev_unavailable=False,
+        )
+        regime = ctx.regime
+        from cio.models import (
+            ActivationRecommendation as _ActivationRecommendation,
+        )
+        from cio.models import HealthStatus as _HealthStatus
+        from cio.models import RegimeFit as _RegimeFit
+        from cio.models import StrategyResult as _StrategyResult
+
+        strategy_result = _StrategyResult(
+            health=_HealthStatus.HEALTHY,
+            activation_recommendation=_ActivationRecommendation.RUN,
+            regime_fit=_RegimeFit.GOOD,
+            thought_trace="DETERMINISTIC_BYPASS",
+        )
+
+        bypass_decision = DecisionAssembler.assemble(
+            context=ctx,
+            code_result=code_result,
+            regime_result=regime,
+            strategy_result=strategy_result,
+            llm_action=_ActionType.EXECUTE,
+            llm_justification="Deterministic bypass: Executing based on Code "
+            "Engine approval (NURSE_USE_LLM_REASONING=false).",
+        )
+        assert bypass_decision.leverage == 2.0
+        assert bypass_decision.decided_leverage is None  # not yet routed
+
+        mock_nats = AsyncMock()
+        mock_vector = AsyncMock()
+        router = OutputRouter(nats_client=mock_nats, vector_client=mock_vector)
+        await router.route(ctx, bypass_decision)
+
+        assert bypass_decision.decided_leverage == 2
+
+        legacy_calls = [
+            call
+            for call in mock_nats.publish.call_args_list
+            if call.args[0] == "signals.trading.s1"
+        ]
+        dispatched_payload = json.loads(legacy_calls[0].args[1])
+        assert dispatched_payload["leverage"] == 2
