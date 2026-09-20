@@ -20,12 +20,20 @@ class TargetServiceResolver:
     a specific strategy ID.
     """
 
-    # Strategies managed by the petrosa-realtime-strategies service
+    # Strategies managed by the petrosa-realtime-strategies service.
+    #
+    # petrosa-cio#214: reconciled against the producer's actual enabled set
+    # (petrosa-realtime-strategies/constants.py:get_enabled_strategies() and
+    # its underlying STRATEGY_ENABLED_* flags). Previously this set was 60%
+    # wrong: it listed "orderbook_skew" / "trade_momentum" /
+    # "ticker_velocity", none of which the producer emits (there is no
+    # corresponding STRATEGY_ENABLED_* flag or strategy module for any of
+    # them), while omitting "cross_exchange_spread" — enabled by default
+    # (constants.py:40-41) — which therefore resolved ServiceType.UNKNOWN
+    # and lost CIO governance (MODIFY_PARAMS/FAIL_SAFE) entirely.
     REALTIME_SERVICE_STRATEGIES: set[str] = {
-        "orderbook_skew",
-        "trade_momentum",
-        "ticker_velocity",
         "btc_dominance",
+        "cross_exchange_spread",
         "onchain_metrics",
         "iceberg_detector",
         # petrosa-cio#212: was absent, so a correctly-emitted canonical id
@@ -49,7 +57,7 @@ class TargetServiceResolver:
         "spread_liquidity_monitor": "spread_liquidity",
     }
 
-    # Strategies managed by the petrosa-bot-ta-analysis service (27 total)
+    # Strategies managed by the petrosa-bot-ta-analysis service (28 total)
     TA_BOT_SERVICE_STRATEGIES: set[str] = {
         "band_fade_reversal",
         "bear_trap_buy",
@@ -74,6 +82,12 @@ class TargetServiceResolver:
         "minervini_trend_template",
         "momentum_pulse",
         "multi_timeframe_trend_continuation",
+        # petrosa-cio#214: registered by the producer
+        # (petrosa-bot-ta-analysis/ta_bot/config.py) but the only one of 28
+        # missing here — resolved ServiceType.UNKNOWN, so
+        # MODIFY_PARAMS/FAIL_SAFE could never reach it while EXECUTE still
+        # dispatched its signals: it traded with no governance.
+        "order_flow_imbalance",
         "range_break_pop",
         "rsi_extreme_reversal",
         "shooting_star_reversal",

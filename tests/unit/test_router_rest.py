@@ -741,6 +741,162 @@ async def test_output_router_rest_pause_strategy_empty_str_exception_logs_exc_ty
 
 
 @pytest.mark.asyncio
+async def test_output_router_rest_modify_params_body_failure_skips_freeze(caplog):
+    """petrosa-cio#214 (defect 4, AC): a 200 response whose body reports
+    ``{"success": false}`` (the shape ta_bot/realtime-strategies actually
+    return on validation failure) must be treated as FAILED_TO_APPLY, not
+    SUCCESS — and must NOT set the ``cio:freeze:`` lock, leaving CIO free
+    to retry."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "body-failure-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.MODIFY_PARAMS,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR", "message": "bad param"},
+            }
+            mock_response.text = '{"success": false}'
+            mock_post.return_value = mock_response
+
+            await router.route(context, decision)
+
+            assert "FAILED_TO_APPLY parameter change" in caplog.text
+            mock_cache.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_pause_strategy_body_failure_skips_freeze(caplog):
+    """petrosa-cio#214: same body-vs-status fix applied to PAUSE_STRATEGY."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "doji_reversal"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "pause-body-failure-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {
+                "success": False,
+                "error": {"code": "VALIDATION_ERROR", "message": "bad param"},
+            }
+            mock_response.text = '{"success": false}'
+            mock_post.return_value = mock_response
+
+            await router.route(context, decision)
+
+            assert "FAILED_TO_APPLY strategy pause" in caplog.text
+            mock_cache.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_modify_params_200_no_success_key_still_freezes():
+    """Regression: a 2xx body with no ``"success"`` key at all (legacy
+    producer response shape) must still be treated as SUCCESS — the new
+    body check is additive, never more silent than the prior behavior."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "test-decision-id"
+    context.correlation_id = "legacy-body-id"
+
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.MODIFY_PARAMS,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = {"ok": True}
+            mock_post.return_value = mock_response
+
+            await router.route(context, decision)
+
+            mock_cache.set.assert_called_with(
+                "cio:freeze:momentum_pulse", "LOCKED", ttl=1800
+            )
+
+
+@pytest.mark.asyncio
 async def test_output_router_rest_fail_safe_create_task_exception_logged(caplog):
     """FAIL_SAFE: if scheduling the background REST pause task itself raises,
     the exception is caught and logged, not propagated."""

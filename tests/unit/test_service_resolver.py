@@ -89,11 +89,14 @@ def test_resolve_unknown_strategy_logs_warning(caplog):
 
 
 def test_regression_all_realtime_strategies_still_resolve():
-    """AC4 (part 1): all 7 REALTIME_SERVICE_STRATEGIES entries still resolve
-    to ServiceType.REALTIME_STRATEGIES (petrosa-cio#212 added "spread_liquidity",
-    raising the count from 6 to 7)."""
+    """AC4 (part 1): all 5 REALTIME_SERVICE_STRATEGIES entries still resolve
+    to ServiceType.REALTIME_STRATEGIES (petrosa-cio#214 reconciled the set
+    against the producer's actual enabled ids: removed "orderbook_skew",
+    "trade_momentum", "ticker_velocity" (never emitted by the producer) and
+    added "cross_exchange_spread" (enabled by default), raising the count
+    from 7 non-matching entries to 5 accurate ones)."""
     strategies = TargetServiceResolver.REALTIME_SERVICE_STRATEGIES
-    assert len(strategies) == 7
+    assert len(strategies) == 5
     for strategy_id in strategies:
         assert (
             TargetServiceResolver.resolve(strategy_id)
@@ -102,13 +105,111 @@ def test_regression_all_realtime_strategies_still_resolve():
 
 
 def test_regression_all_ta_bot_strategies_still_resolve():
-    """AC4 (part 2): all 27 TA_BOT_SERVICE_STRATEGIES entries still resolve
-    to ServiceType.TA_BOT."""
+    """AC4 (part 2): all 28 TA_BOT_SERVICE_STRATEGIES entries still resolve
+    to ServiceType.TA_BOT (petrosa-cio#214 added "order_flow_imbalance",
+    raising the count from 27 to 28)."""
     strategies = TargetServiceResolver.TA_BOT_SERVICE_STRATEGIES
-    assert len(strategies) == 27
+    assert len(strategies) == 28
     for strategy_id in strategies:
         assert TargetServiceResolver.resolve(strategy_id) == ServiceType.TA_BOT, (
             f"{strategy_id} no longer resolves to ServiceType.TA_BOT"
+        )
+
+
+def test_cross_exchange_spread_resolves_realtime_strategies():
+    """petrosa-cio#214: "cross_exchange_spread" is enabled by default in the
+    producer (petrosa-realtime-strategies/constants.py) but was previously
+    absent from the registry entirely — resolved ServiceType.UNKNOWN."""
+    assert (
+        TargetServiceResolver.resolve("cross_exchange_spread")
+        == ServiceType.REALTIME_STRATEGIES
+    )
+
+
+def test_order_flow_imbalance_resolves_ta_bot():
+    """petrosa-cio#214: "order_flow_imbalance" is registered by the producer
+    (ta_bot/config.py) but was the only one of 28 missing here, resolving
+    ServiceType.UNKNOWN and leaving the strategy unroutable for
+    MODIFY_PARAMS/FAIL_SAFE while still trading via EXECUTE."""
+    assert TargetServiceResolver.resolve("order_flow_imbalance") == ServiceType.TA_BOT
+
+
+@pytest.mark.parametrize(
+    "strategy_id", ["orderbook_skew", "trade_momentum", "ticker_velocity"]
+)
+def test_nonexistent_realtime_strategies_now_resolve_unknown(strategy_id):
+    """petrosa-cio#214: these three ids do not exist in the producer
+    (petrosa-realtime-strategies) at all — no STRATEGY_ENABLED_* flag, no
+    strategy module. They must resolve UNKNOWN, not a phantom service."""
+    assert TargetServiceResolver.resolve(strategy_id) == ServiceType.UNKNOWN
+
+
+def test_every_producer_strategy_id_resolves_to_a_known_service_type():
+    """petrosa-cio#214 acceptance criterion: a test asserts every strategy
+    id a producer can emit resolves to a known ServiceType, so the next
+    unregistered strategy fails CI instead of trading unsupervised.
+
+    This mirrors the two producers' full strategy catalogs verbatim:
+    - petrosa-bot-ta-analysis/ta_bot/config.py `enabled_strategies` (28 ids).
+    - petrosa-realtime-strategies/constants.py `get_enabled_strategies()`
+      possible outputs (5 ids gated by STRATEGY_ENABLED_* flags, including
+      "onchain_metrics" which defaults to disabled but is still a valid,
+      routable producer id).
+    """
+    ta_bot_producer_ids = {
+        "momentum_pulse",
+        "band_fade_reversal",
+        "golden_trend_sync",
+        "range_break_pop",
+        "divergence_trap",
+        "volume_surge_breakout",
+        "mean_reversion_scalper",
+        "ichimoku_cloud_momentum",
+        "liquidity_grab_reversal",
+        "multi_timeframe_trend_continuation",
+        "order_flow_imbalance",
+        "ema_alignment_bullish",
+        "bollinger_squeeze_alert",
+        "bollinger_breakout_signals",
+        "rsi_extreme_reversal",
+        "inside_bar_breakout",
+        "ema_pullback_continuation",
+        "ema_momentum_reversal",
+        "fox_trap_reversal",
+        "hammer_reversal_pattern",
+        "bear_trap_buy",
+        "inside_bar_sell",
+        "shooting_star_reversal",
+        "doji_reversal",
+        "ema_alignment_bearish",
+        "ema_slope_reversal_sell",
+        "minervini_trend_template",
+        "bear_trap_sell",
+    }
+    assert len(ta_bot_producer_ids) == 28
+    for strategy_id in ta_bot_producer_ids:
+        assert TargetServiceResolver.resolve(strategy_id) == ServiceType.TA_BOT, (
+            f"producer id {strategy_id!r} does not resolve to a known "
+            "ServiceType — the TA-bot registry has drifted from the "
+            "producer's enabled_strategies list"
+        )
+
+    realtime_producer_ids = {
+        "btc_dominance",
+        "cross_exchange_spread",
+        "onchain_metrics",
+        "spread_liquidity",
+        "iceberg_detector",
+    }
+    assert len(realtime_producer_ids) == 5
+    for strategy_id in realtime_producer_ids:
+        assert (
+            TargetServiceResolver.resolve(strategy_id)
+            == ServiceType.REALTIME_STRATEGIES
+        ), (
+            f"producer id {strategy_id!r} does not resolve to a known "
+            "ServiceType — the realtime-strategies registry has drifted "
+            "from the producer's get_enabled_strategies() list"
         )
 
 
