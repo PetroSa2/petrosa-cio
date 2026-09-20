@@ -856,6 +856,37 @@ class OutputRouter:
             return False, None
         return True, body.get("error")
 
+    @staticmethod
+    def _response_reports_failure(response: httpx.Response) -> tuple[bool, Any]:
+        """Body-vs-status failure detection (petrosa-cio#214, defect 4).
+
+        Producers (ta_bot/api/config_routes.py, realtime-strategies
+        strategies/api/config_routes.py) return HTTP 200 with a
+        ``{"success": false, "error": {...}}`` body on validation failure —
+        the REST framework never surfaces this as a 4xx. Relying on
+        ``status_code`` alone made a REJECTED parameter change look
+        identical to an ACCEPTED one: CIO logged SUCCESS, set a 30-minute
+        ``cio:freeze:`` lock, and stopped retrying, while the strategy kept
+        running its old parameters — silent divergence between CIO's model
+        of the world and reality.
+
+        Returns ``(reports_failure, error_detail)``. A non-JSON body, a
+        JSON body that isn't a dict, or a dict without a ``"success"`` key
+        are all treated as "no body opinion" (``reports_failure=False``) —
+        this check only ever makes failure detection LOUDER than the
+        pre-existing status-code check, never more silent. Callers should
+        OR this with the status-code check, not replace it.
+        """
+        try:
+            body = response.json()
+        except Exception:
+            return False, None
+        if not isinstance(body, dict) or "success" not in body:
+            return False, None
+        if body.get("success"):
+            return False, None
+        return True, body.get("error")
+
     async def _apply_rate_limit_freeze(
         self, strategy_id: str, correlation_id: str, response: httpx.Response
     ) -> None:
