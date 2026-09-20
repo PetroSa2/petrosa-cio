@@ -164,3 +164,76 @@ async def test_governance_action_skips_publish_in_dry_run(action: ActionType):
     mock_nc.publish.assert_not_called()
     mock_vc.upsert.assert_called_once()
     assert mock_vc.upsert.call_args.kwargs["payload"]["action"] == action.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action",
+    [
+        ActionType.RETRY_SAFE,
+        ActionType.ESCALATE,
+        ActionType.DOWN_WEIGHT,
+        ActionType.THROTTLE,
+        ActionType.VETO,
+        ActionType.FAIL_SAFE,
+    ],
+)
+async def test_router_sanitizes_spaced_strategy_id_in_nats_subjects(
+    action: ActionType,
+):
+    """petrosa-cio#211 regression: a producer-supplied display-name
+    strategy_id containing spaces (e.g. "Iceberg Order Detector  625") must
+    never reach a published NATS subject. NATS subjects cannot contain
+    whitespace — the server's processPub parser splits on it and rejects
+    the PUB (silently dropping cio.retry.*, signals.trading.*, etc.).
+    """
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+    )
+
+    context = _make_context("Iceberg Order Detector  625")
+    decision = _make_decision(action)
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        await router.route(context, decision)
+
+    assert mock_nc.publish.await_count >= 1
+    for call in mock_nc.publish.call_args_list:
+        subject = call.args[0]
+        assert " " not in subject, f"subject contains whitespace: {subject!r}"
+        assert subject == subject.strip()
+
+    published_subjects = {c.args[0] for c in mock_nc.publish.call_args_list}
+    assert any(s.endswith("iceberg_order_detector_625") for s in published_subjects), (
+        published_subjects
+    )
+
+
+@pytest.mark.asyncio
+async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
+    """EXECUTE fans out to both signals.trading.<id> (legacy) and
+    trade.execute.<id> (modern) — both must be whitespace-free (#211)."""
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+    )
+
+    context = _make_context("Spread Liquidity Monitor  625")
+    context.trigger_payload = {"symbol": "BTCUSDT"}
+    decision = _make_decision(ActionType.EXECUTE)
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        await router.route(context, decision)
+
+    published_subjects = {c.args[0] for c in mock_nc.publish.call_args_list}
+    for subject in published_subjects:
+        assert " " not in subject, f"subject contains whitespace: {subject!r}"
+
+    assert "trade.execute.spread_liquidity_monitor_625" in published_subjects
