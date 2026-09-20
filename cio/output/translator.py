@@ -6,6 +6,26 @@ from cio.models import DecisionResult, TriggerContext
 
 logger = logging.getLogger(__name__)
 
+# petrosa_k8s#213 (P0): explicit side->action mapping. This MUST stay a
+# closed lookup, never a binary `if/else`, because a binary else silently
+# folds every unrecognized/close token into "sell" — inverting a close
+# instruction into a position-opening SELL order. Any token not in this map
+# is a CONTRACT VIOLATION and is rejected (see `to_legacy_signal` below),
+# never defaulted to a direction.
+_LONG_ALIASES = frozenset({"long", "buy", "bullish"})
+_SHORT_ALIASES = frozenset({"short", "sell", "bearish"})
+# Plain "close" carries no direction by the time it reaches CIO — producers
+# (e.g. petrosa-realtime-strategies) currently collapse CLOSE_LONG/
+# CLOSE_SHORT into a single "close" token before this payload is built
+# (petrosa_k8s#213 root-cause chain, step 1). If/when a producer is fixed to
+# emit direction-qualified tokens, `_CLOSE_WITH_DIRECTION` below already
+# forwards `position_side` end-to-end without any change needed here.
+_CLOSE_ALIASES = frozenset({"close"})
+_CLOSE_WITH_DIRECTION: dict[str, str] = {
+    "close_long": "long",
+    "close_short": "short",
+}
+
 
 class TradeEngineTranslator:
     """
@@ -21,7 +41,10 @@ class TradeEngineTranslator:
         Maps new domain models to legacy Signal JSON structure.
 
         Mapping Rules:
-        - action: Maps to 'buy' or 'sell' based on payload side.
+        - action: Maps to 'buy'/'sell'/'close' via an explicit closed lookup
+          (petrosa_k8s#213). Never a binary else — any token not recognized
+          is a CONTRACT VIOLATION and translation is refused (returns None)
+          rather than defaulting to a direction.
         - quantity: Maps to base asset quantity (USD / current_price).
         - price: Maps to current_price from market_signals.
         - source: Fixed as 'petrosa-cio'.
@@ -54,8 +77,32 @@ class TradeEngineTranslator:
                 return None
 
             # 2. Action Mapping and Quantity Translation
+            # petrosa_k8s#213: explicit closed mapping — never a binary
+            # else. Unrecognized tokens are rejected (CONTRACT VIOLATION),
+            # never silently defaulted to a directional order.
             side_lower = str(side).lower()
-            action = "buy" if side_lower in ("long", "buy", "bullish") else "sell"
+            position_side: str | None = None
+            if side_lower in _LONG_ALIASES:
+                action = "buy"
+            elif side_lower in _SHORT_ALIASES:
+                action = "sell"
+            elif side_lower in _CLOSE_ALIASES:
+                action = "close"
+            elif side_lower in _CLOSE_WITH_DIRECTION:
+                action = "close"
+                position_side = _CLOSE_WITH_DIRECTION[side_lower]
+            else:
+                logger.critical(
+                    "CONTRACT VIOLATION: Unrecognized trade side/action — "
+                    "refusing to guess a direction",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "side": side,
+                        "side_lower": side_lower,
+                        "payload_keys": list(context.trigger_payload.keys()),
+                    },
+                )
+                return None
 
             # CRITICAL FIX: Convert USD position size to base asset quantity
             base_quantity = quantity_usd / current_price
@@ -100,6 +147,15 @@ class TradeEngineTranslator:
                     "cio_justification": decision.justification,
                     "thought_trace": decision.thought_trace,
                     "original_size_usd": quantity_usd,
+                    # petrosa_k8s#213: forwarded only when the producer sent
+                    # a direction-qualified close token (e.g. "close_long");
+                    # None for plain "close" (direction unknown at this hop)
+                    # and for buy/sell. Lives in `metadata` (untyped dict),
+                    # not top-level, because petrosa-tradeengine's Signal
+                    # contract has `extra="forbid"` (#599) — a new top-level
+                    # field would hard-reject every signal until the
+                    # consumer contract is updated to declare it.
+                    "position_side": position_side,
                 },
             }
 
