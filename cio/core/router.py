@@ -407,14 +407,30 @@ class OutputRouter:
                     try:
                         response = await self.http_client.post(url, json=payload)
 
-                        # d. If response status >= 400: log FAILED_TO_APPLY
-                        if response.status_code >= 400:
+                        # petrosa-cio#214 (defect 4): a 2xx status does not
+                        # mean success — producers can report a rejected
+                        # change in the body. Check both signals before
+                        # treating this as SUCCESS.
+                        body_failed, body_error = self._response_reports_failure(
+                            response
+                        )
+
+                        # d. If response status >= 400 OR the body reports
+                        # failure: log FAILED_TO_APPLY, do NOT set the
+                        # freeze lock — leave CIO free to retry.
+                        if response.status_code >= 400 or body_failed:
                             logger.error(
-                                "FAILED_TO_APPLY parameter change for %s. Status: %s, Body: %s",
+                                "FAILED_TO_APPLY parameter change for %s. Status: %s, "
+                                "Body: %s, body_reported_failure=%s, body_error=%s",
                                 strategy_id,
                                 response.status_code,
                                 response.text,
-                                extra={"correlation_id": correlation_id},
+                                body_failed,
+                                body_error,
+                                extra={
+                                    "correlation_id": correlation_id,
+                                    "body_reported_failure": body_failed,
+                                },
                             )
 
                             # Handle 429 specifically (AC2, AC4)
@@ -423,7 +439,9 @@ class OutputRouter:
                                     strategy_id, correlation_id, response
                                 )
                         else:
-                            # e. If response status 2xx: log SUCCESS, then set param freeze in Redis
+                            # e. If response status 2xx AND the body agrees
+                            # (or is silent): log SUCCESS, then set param
+                            # freeze in Redis
                             logger.info(
                                 "SUCCESS: Parameter change applied via REST to %s",
                                 strategy_id,
@@ -498,14 +516,29 @@ class OutputRouter:
                     try:
                         response = await self.http_client.post(url, json=payload)
 
-                        # d. If response status >= 400: log FAILED_TO_APPLY
-                        if response.status_code >= 400:
+                        # petrosa-cio#214 (defect 4): same body-vs-status gap
+                        # as MODIFY_PARAMS — a 2xx status does not mean the
+                        # pause was actually accepted.
+                        body_failed, body_error = self._response_reports_failure(
+                            response
+                        )
+
+                        # d. If response status >= 400 OR the body reports
+                        # failure: log FAILED_TO_APPLY, do NOT set the
+                        # freeze lock — leave CIO free to retry the pause.
+                        if response.status_code >= 400 or body_failed:
                             logger.error(
-                                "FAILED_TO_APPLY strategy pause for %s. Status: %s, Body: %s",
+                                "FAILED_TO_APPLY strategy pause for %s. Status: %s, "
+                                "Body: %s, body_reported_failure=%s, body_error=%s",
                                 strategy_id,
                                 response.status_code,
                                 response.text,
-                                extra={"correlation_id": correlation_id},
+                                body_failed,
+                                body_error,
+                                extra={
+                                    "correlation_id": correlation_id,
+                                    "body_reported_failure": body_failed,
+                                },
                             )
 
                             # Handle 429 specifically (AC2, AC4)
@@ -514,7 +547,9 @@ class OutputRouter:
                                     strategy_id, correlation_id, response
                                 )
                         else:
-                            # e. If response 2xx: log SUCCESS, then set freeze in Redis (AC3)
+                            # e. If response 2xx AND the body agrees (or is
+                            # silent): log SUCCESS, then set freeze in
+                            # Redis (AC3)
                             logger.info(
                                 "SUCCESS: Strategy %s paused via REST",
                                 strategy_id,
@@ -805,6 +840,37 @@ class OutputRouter:
                             "error": str(exc),
                         },
                     )
+
+    @staticmethod
+    def _response_reports_failure(response: httpx.Response) -> tuple[bool, Any]:
+        """Body-vs-status failure detection (petrosa-cio#214, defect 4).
+
+        Producers (ta_bot/api/config_routes.py, realtime-strategies
+        strategies/api/config_routes.py) return HTTP 200 with a
+        ``{"success": false, "error": {...}}`` body on validation failure —
+        the REST framework never surfaces this as a 4xx. Relying on
+        ``status_code`` alone made a REJECTED parameter change look
+        identical to an ACCEPTED one: CIO logged SUCCESS, set a 30-minute
+        ``cio:freeze:`` lock, and stopped retrying, while the strategy kept
+        running its old parameters — silent divergence between CIO's model
+        of the world and reality.
+
+        Returns ``(reports_failure, error_detail)``. A non-JSON body, a
+        JSON body that isn't a dict, or a dict without a ``"success"`` key
+        are all treated as "no body opinion" (``reports_failure=False``) —
+        this check only ever makes failure detection LOUDER than the
+        pre-existing status-code check, never more silent. Callers should
+        OR this with the status-code check, not replace it.
+        """
+        try:
+            body = response.json()
+        except Exception:
+            return False, None
+        if not isinstance(body, dict) or "success" not in body:
+            return False, None
+        if body.get("success"):
+            return False, None
+        return True, body.get("error")
 
     async def _apply_rate_limit_freeze(
         self, strategy_id: str, correlation_id: str, response: httpx.Response

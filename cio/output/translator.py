@@ -111,6 +111,42 @@ class TradeEngineTranslator:
                 extra={"correlation_id": correlation_id},
             )
 
+            # petrosa-cio#214: forward the trigger's real confidence and
+            # timeframe instead of hardcoding. Both producers (ta_bot,
+            # realtime-strategies) already set these on every signal
+            # (ta_bot/models/signal.py, strategies/models/signals.py), but
+            # this translator previously pinned confidence to a constant
+            # 0.9 and omitted timeframe entirely — tradeengine then applied
+            # its own default (contracts/signal.py: timeframe="1h") and
+            # signal_aggregator.py scored EVERY CIO-routed signal a
+            # constant 0.9*0.7=0.63 regardless of the strategy's actual
+            # timeframe, making per-timeframe weighting inert.
+            # `contracts.signal.Signal.confidence` is a REQUIRED float
+            # (0<=v<=1, no default) — unlike the arbiter's own tolerant
+            # default (`listener.py`'s `payload.get("confidence", 0.5)`),
+            # we must always emit a concrete, in-range value here or the
+            # downstream Signal(**result) construction raises.
+            raw_confidence = context.trigger_payload.get("confidence", 0.5)
+            try:
+                confidence = float(raw_confidence)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Non-numeric confidence %r in trigger_payload; defaulting to 0.5",
+                    raw_confidence,
+                    extra={"correlation_id": correlation_id},
+                )
+                confidence = 0.5
+            # Defensive clamp: producers already validate confidence via
+            # their own Signal model (ge=0, le=1) before publish, but never
+            # trust an upstream contract to hold forever — Signal(**result)
+            # would otherwise raise ValueError on an out-of-range value.
+            confidence = max(0.0, min(1.0, confidence))
+            # "1h" mirrors contracts/signal.py's own default so a payload
+            # that genuinely omits timeframe behaves exactly as before
+            # (silent fallback, not a new hardcode) — only the previous
+            # unconditional omission is fixed.
+            timeframe = context.trigger_payload.get("timeframe") or "1h"
+
             # 3. Build Legacy Payload
             # Matching petrosa-tradeengine/contracts/signal.py Signal model
             legacy_signal = {
@@ -121,10 +157,11 @@ class TradeEngineTranslator:
                 "price": current_price,
                 "current_price": current_price,
                 "quantity": base_quantity,
-                "confidence": 0.9,
+                "confidence": confidence,
                 "source": "petrosa-cio",
                 "strength": "strong",
                 "strategy_mode": "llm_reasoning",
+                "timeframe": timeframe,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "decision_id": context.decision_id,
                 # Map risk management parameters from decision (primary) or payload
