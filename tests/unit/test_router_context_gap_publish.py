@@ -1,19 +1,19 @@
-"""P1.4-AC2.b (#132) — OutputRouter publishes context-gap audit events.
+"""P1.4-AC4 (#132) — OutputRouter captures the PreDecisionContext bundle
+(including any ContextGap entries) on the dashboard DecisionRecord.
 
-When the PreDecisionContext bundle carries one or more ContextGap entries
-(populated by ContextBuilder during assembly), the router must emit one
-``cio.context.gap.<surface>`` NATS message per gap at dispatch time so the
-data-manager FR12 audit-trail consumer can persist them keyed by
-``decision_id``. The decision itself must still proceed — gap publishing
-is best-effort and must not block dispatch on a NATS hiccup.
-
-Scope: producer-side only. The consumer (data-manager#179 follow-up)
-subscribes to ``cio.context.gap.>`` and is out of scope for this ticket.
+petrosa-cio#215: this file used to also assert that the router published one
+``cio.context.gap.<surface>`` NATS message per gap so a data-manager FR12
+audit-trail consumer could persist them. That consumer was never built —
+data-manager's subscriber inventory has no ``cio.context.gap.*`` entry — so
+the publish was dead code with zero subscribers and has been removed from
+``OutputRouter.route`` (see the comment there for the full rationale). The
+gap data itself is not lost: it is captured below via
+``DecisionStore.record(...)``, which is what ``/api/dashboard/decisions/recent``
+actually reads.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -105,100 +105,10 @@ def _make_context(*, bundle: PreDecisionContext | None) -> TriggerContext:
 
 
 @pytest.mark.asyncio
-async def test_router_publishes_one_gap_event_per_surface():
-    """AC2.b — every ContextGap on the bundle becomes one NATS publish on
-    ``cio.context.gap.<surface>`` with a JSON payload containing
-    decision_id, correlation_id, strategy_id, surface, reason, observed_at."""
-    bundle = _make_bundle(with_gaps=True)
-    ctx = _make_context(bundle=bundle)
-    mock_nc = AsyncMock()
-    router = OutputRouter(
-        nats_client=mock_nc,
-        vector_client=AsyncMock(),
-        ta_bot_url="http://ta-bot",
-        decision_store=DecisionStore(),
-    )
-
-    with patch.dict(os.environ, {"DRY_RUN": "false"}):
-        await router.route(ctx, _make_decision(ActionType.ADMIT))
-
-    gap_calls = [
-        c
-        for c in mock_nc.publish.call_args_list
-        if str(c.args[0]).startswith("cio.context.gap.")
-    ]
-    assert len(gap_calls) == 2
-    subjects = {c.args[0] for c in gap_calls}
-    assert subjects == {
-        "cio.context.gap.evaluators",
-        "cio.context.gap.characterization",
-    }
-    for call in gap_calls:
-        payload = json.loads(call.args[1].decode())
-        assert payload["decision_id"] == "decision-gap-132"
-        assert payload["correlation_id"] == "corr-gap-132"
-        assert payload["strategy_id"] == "strat-gap"
-        assert payload["surface"] in {"evaluators", "characterization"}
-        assert payload["reason"]
-        assert "observed_at" in payload
-
-
-@pytest.mark.asyncio
-async def test_router_does_not_publish_when_no_gaps():
-    """AC2.b — happy-path bundle (empty gaps list) emits zero context.gap
-    messages; the rest of the dispatch is unaffected."""
-    bundle = _make_bundle(with_gaps=False)
-    ctx = _make_context(bundle=bundle)
-    mock_nc = AsyncMock()
-    router = OutputRouter(
-        nats_client=mock_nc,
-        vector_client=AsyncMock(),
-        ta_bot_url="http://ta-bot",
-        decision_store=DecisionStore(),
-    )
-
-    with patch.dict(os.environ, {"DRY_RUN": "false"}):
-        await router.route(ctx, _make_decision(ActionType.ADMIT))
-
-    gap_calls = [
-        c
-        for c in mock_nc.publish.call_args_list
-        if str(c.args[0]).startswith("cio.context.gap.")
-    ]
-    assert gap_calls == []
-
-
-@pytest.mark.asyncio
-async def test_router_swallows_publish_errors_on_gap_events():
-    """AC2.b — gap publication is best-effort: a NATS publish exception
-    must not propagate out of route() because the decision has already
-    been committed at this point."""
-    bundle = _make_bundle(with_gaps=True)
-    ctx = _make_context(bundle=bundle)
-    mock_nc = AsyncMock()
-
-    async def _publish_side_effect(subject: str, payload: bytes) -> None:
-        if subject.startswith("cio.context.gap."):
-            raise RuntimeError("simulated NATS outage")
-
-    mock_nc.publish.side_effect = _publish_side_effect
-
-    router = OutputRouter(
-        nats_client=mock_nc,
-        vector_client=AsyncMock(),
-        ta_bot_url="http://ta-bot",
-        decision_store=DecisionStore(),
-    )
-
-    with patch.dict(os.environ, {"DRY_RUN": "false"}):
-        # Must not raise.
-        await router.route(ctx, _make_decision(ActionType.ADMIT))
-
-
-@pytest.mark.asyncio
 async def test_router_stores_bundle_on_decision_record():
     """AC4.a — DecisionStore.record(...) captures the bundle so
-    /api/dashboard/decisions/recent can return it."""
+    /api/dashboard/decisions/recent can return it, independent of any NATS
+    publish."""
     bundle = _make_bundle(with_gaps=True)
     ctx = _make_context(bundle=bundle)
     store = DecisionStore()
@@ -221,3 +131,30 @@ async def test_router_stores_bundle_on_decision_record():
     assert rec.pre_decision_context.evaluator_verdicts_available is False
     assert len(rec.pre_decision_context.gaps) == 2
     assert rec.decision_id == "decision-gap-132"
+
+
+@pytest.mark.asyncio
+async def test_router_no_longer_publishes_context_gap_events():
+    """Regression guard for petrosa-cio#215: the dead
+    ``cio.context.gap.<surface>`` publish must stay removed. If a future
+    change resurrects it, wire a real consumer instead and update this
+    test rather than reverting it."""
+    bundle = _make_bundle(with_gaps=True)
+    ctx = _make_context(bundle=bundle)
+    mock_nc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=AsyncMock(),
+        ta_bot_url="http://ta-bot",
+        decision_store=DecisionStore(),
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        await router.route(ctx, _make_decision(ActionType.ADMIT))
+
+    gap_calls = [
+        c
+        for c in mock_nc.publish.call_args_list
+        if str(c.args[0]).startswith("cio.context.gap.")
+    ]
+    assert gap_calls == []

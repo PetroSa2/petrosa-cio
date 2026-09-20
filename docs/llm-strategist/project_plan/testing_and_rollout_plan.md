@@ -34,8 +34,10 @@ PYTHONPATH=. python3 scripts/verify_live_heartbeat.py
 - [ ] Log shows `Starting reasoning loop` with a unique `correlation_id`.
 - [ ] Log shows `Final decision: execute`.
 - [ ] Log shows `[SHADOW MODE] Would have published to signals.trading`.
-- [ ] Log shows `[SHADOW MODE] Would have published to trade.execute.momentum_v1`.
 - [ ] Log shows `Mock Vector Upsert` (Audit path verified).
+
+> **Superseded (petrosa-cio#215):** the `trade.execute.momentum_v1` publish this
+> checklist used to expect was removed — it had zero subscribers ecosystem-wide.
 
 ---
 

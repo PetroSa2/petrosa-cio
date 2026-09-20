@@ -188,8 +188,17 @@ class OutputRouter:
         """
         Routes the decision following the T-Junction logic:
         1. Legacy Path -> Translated Signal -> signals.trading (Only for EXECUTE)
-        2. Modern Path -> Raw DecisionResult -> trade.execute.{id} (Only for EXECUTE)
-        3. Audit Path -> DecisionResult + Context -> Vector DB (Always enabled for all actions)
+        2. Audit Path -> DecisionResult + Context -> Vector DB (Always enabled for all actions)
+
+        petrosa-cio#215: a "Modern Path" branch used to also publish the raw
+        DecisionResult on `trade.execute.{id}` for EXECUTE actions. It had zero
+        subscribers anywhere in the ecosystem (tradeengine only consumes
+        `signals.trading.*`; data-manager only consumes `cio.intent.>` and
+        `signals.trading.>`) and was removed. Nothing was lost: the audit path
+        below already persists the full `DecisionResult` (including
+        `rejection_source`, `thought_trace`, `decided_leverage`) via
+        `vector_client.upsert`, which is the same payload the dead branch used
+        to publish.
         """
         correlation_id = context.correlation_id
         decision_id = context.decision_id
@@ -198,7 +207,7 @@ class OutputRouter:
         # id. NATS subjects cannot contain whitespace — the parser splits on
         # it and rejects the PUB (processPub Parse Error), silently dropping
         # every downstream subject built from this value (cio.retry.*,
-        # signals.trading.*, trade.execute.*, cio.escalation.*, cio.weight.*,
+        # signals.trading.*, cio.escalation.*, cio.weight.*,
         # cio.throttle.*, cio.veto.*, cio.lifecycle.*, cio.position.*,
         # cio.failure.*). Reuse the same normaliser already applied to REST
         # routing (TargetServiceResolver._normalize, petrosa-cio#200) once
@@ -359,12 +368,6 @@ class OutputRouter:
                 dispatch_tasks_data.append(
                     (legacy_subject, json.dumps(legacy_data).encode())
                 )
-
-            # MODERN BRANCH: Send raw DecisionResult to vNext topic
-            modern_subject = f"trade.execute.{strategy_id}"
-            dispatch_tasks_data.append(
-                (modern_subject, decision.model_dump_json().encode())
-            )
 
         elif action == ActionType.MODIFY_PARAMS:
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
@@ -808,38 +811,19 @@ class OutputRouter:
                 payload=alert_payload,
             )
 
-        # P1.4-AC2.b (#132): publish per-surface context-gap audit events on
-        # `cio.context.gap.<surface>`. data-manager's FR12 audit-trail
-        # consumer subscribes to `cio.context.gap.>` and persists each event
-        # keyed by decision_id. Producer-side only — the decision itself has
-        # already proceeded so the publish is best-effort: a NATS hiccup
-        # must not block the dispatch.
-        pdc = getattr(context, "pre_decision_context", None)
-        if pdc is not None and pdc.gaps and not is_dry_run:
-            for gap in pdc.gaps:
-                gap_payload = {
-                    "decision_id": decision_id,
-                    "correlation_id": correlation_id,
-                    "strategy_id": strategy_id,
-                    "surface": gap.surface,
-                    "reason": gap.reason,
-                    "observed_at": gap.observed_at.isoformat(),
-                }
-                try:
-                    await self.nats_client.publish(
-                        f"cio.context.gap.{gap.surface}",
-                        json.dumps(gap_payload).encode(),
-                    )
-                except Exception as exc:  # noqa: BLE001 — best-effort
-                    logger.warning(
-                        "Failed to publish context.gap event",
-                        extra={
-                            "correlation_id": correlation_id,
-                            "decision_id": decision_id,
-                            "surface": gap.surface,
-                            "error": str(exc),
-                        },
-                    )
+        # petrosa-cio#215: `cio.context.gap.<surface>` used to be published here
+        # per P1.4-AC2.b (#132) on the (incorrect) claim that "data-manager's
+        # FR12 audit-trail consumer subscribes to `cio.context.gap.>` and
+        # persists each event keyed by decision_id". That consumer was never
+        # built (data-manager's subscriber inventory has no `cio.context.gap.*`
+        # entry) and CIO's own test admitted the scope gap explicitly. The
+        # publish was removed rather than wired to a real consumer because the
+        # same gap data (`pre_decision_context.gaps`) is already captured
+        # without NATS via `decision_store.record(...)` a few lines below,
+        # which feeds `/api/dashboard/decisions/recent` — so removing this
+        # dead publish loses no data. If a real FR12 NATS-driven audit-trail
+        # consumer is wanted in data-manager, file it as a follow-up feature
+        # ticket rather than resurrecting an unconsumed publish.
 
     @staticmethod
     def _response_reports_failure(response: httpx.Response) -> tuple[bool, Any]:
