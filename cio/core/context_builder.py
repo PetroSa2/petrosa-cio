@@ -13,6 +13,7 @@ except ImportError:  # pragma: no cover — py310 compatibility
 
 import httpx
 
+from cio.core.service_resolver import TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
     CharacterizationRef,
@@ -139,7 +140,18 @@ class ContextBuilder:
         )
 
         symbol = payload.get("symbol", "BTCUSDT")
-        strategy_id = payload.get("strategy_id", "unknown")
+        # petrosa-cio#212: the raw payload value may be a human display name
+        # ("Spread Liquidity Monitor" instead of "spread_liquidity") — the
+        # routing path already normalizes via the same resolver
+        # (router.py:_resolve_routing_strategy_id / TargetServiceResolver),
+        # but this context path previously used the raw value verbatim for
+        # every downstream fetch key and URL (_fetch_strategy_data,
+        # vector_client.query, and /analysis/performance/{strategy_id} in
+        # _fetch_strategy_stats). A display-name id there is a guaranteed
+        # data-manager URL miss -> empty stats -> pause_strategy bias.
+        strategy_id = TargetServiceResolver.canonicalize(
+            payload.get("strategy_id", "unknown")
+        )
 
         # 1. Parallelize independent fetches to reduce total latency (max vs sum)
         # P1.4-AC2 (#132): per-build gap collector — passed to fetches so they
