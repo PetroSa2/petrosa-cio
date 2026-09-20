@@ -280,15 +280,15 @@ class Orchestrator:
                     # #175 (FR60/P1.4-AC7) — register the admitted position
                     # with the in-position re-evaluation cadence loop so it
                     # gets re-reviewed on a schedule after admission, not
-                    # just once at intent time. Same keying convention as
-                    # `portfolio_tracker` above (per-strategy, since
-                    # tradeengine does not yet surface a distinct
-                    # position_id back to CIO — see portfolio_tracker.py's
-                    # documented record_exit limitation for the symmetric
-                    # gap on the removal side).
+                    # just once at intent time. petrosa_k8s#1127: use the
+                    # synthetic position_id as the key instead of
+                    # strategy_id to avoid (strategy_id, strategy_id)
+                    # key collisions when a strategy has multiple open
+                    # positions.
                     if self.position_review_loop is not None:
                         self.position_review_loop.add_position(
-                            context.strategy_id, context.strategy_id
+                            context.strategy_id,
+                            context.position_id or context.strategy_id,
                         )
 
             if code_result.hard_blocked:

@@ -119,6 +119,11 @@ class NATSListener:
 
         # 4. Assemble Context
         decision_id = uuid.uuid4().hex
+        # petrosa_k8s#1127: generate a synthetic position_id at admission
+        # time so every position gets a unique identifier. The trade engine
+        # echoes this back as client_order_id on position updates; the CIO
+        # listener maps it back to the in-position tracking dict.
+        position_id = uuid.uuid4().hex[:16]
         try:
             # For trade.intent.*, we assume TriggerType.TRADE_INTENT
             context = await self.context_builder.build(
@@ -128,6 +133,8 @@ class NATSListener:
                 trigger_type=TriggerType.TRADE_INTENT,
                 payload=payload,
             )
+            # Attach the position_id to the assembled context
+            context.position_id = position_id
         except Exception as e:
             logger.error(
                 f"Failed to build context: {e}",
