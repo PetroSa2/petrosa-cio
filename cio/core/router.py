@@ -193,7 +193,22 @@ class OutputRouter:
         """
         correlation_id = context.correlation_id
         decision_id = context.decision_id
-        strategy_id = context.strategy_id
+        # petrosa-cio#211: producers sometimes emit a human display name
+        # ("Iceberg Order Detector  625") instead of a canonical snake_case
+        # id. NATS subjects cannot contain whitespace — the parser splits on
+        # it and rejects the PUB (processPub Parse Error), silently dropping
+        # every downstream subject built from this value (cio.retry.*,
+        # signals.trading.*, trade.execute.*, cio.escalation.*, cio.weight.*,
+        # cio.throttle.*, cio.veto.*, cio.lifecycle.*, cio.position.*,
+        # cio.failure.*). Reuse the same normaliser already applied to REST
+        # routing (TargetServiceResolver._normalize, petrosa-cio#200) once
+        # here so every subject built below from `strategy_id` is guaranteed
+        # whitespace-free.
+        strategy_id = (
+            TargetServiceResolver._normalize(context.strategy_id)
+            if context.strategy_id
+            else context.strategy_id
+        )
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 

@@ -245,7 +245,12 @@ def evaluator_unhealthy_subject(subsystem: str) -> str:
 
 def cio_action_subject(action: str, strategy_id: str) -> str:
     safe_action = (action or "unknown").lower()
-    safe_strategy = (strategy_id or "unknown").strip() or "unknown"
+    # petrosa-cio#211: .strip() alone leaves internal whitespace (e.g.
+    # "Iceberg Order Detector  625"), which NATS subjects cannot contain.
+    # Collapse internal whitespace to "_" (same whitespace-collapse rule as
+    # TargetServiceResolver._normalize) without changing case, since this
+    # helper never lowercased strategy_id before.
+    safe_strategy = "_".join((strategy_id or "unknown").strip().split()) or "unknown"
     return f"alerts.cio.{safe_action}.{safe_strategy}"
 
 
