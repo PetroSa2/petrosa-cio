@@ -23,6 +23,7 @@ from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.decision_store import DecisionStore
 from cio.core.evaluator_subscriber import EvaluatorSubscriber
+from cio.core.execution_events_consumer import ExecutionEventsConsumer
 from cio.core.health_evaluator import CIOHealthEvaluator
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
 from cio.core.lifecycle import StrategyLifecycleStore
@@ -360,13 +361,30 @@ async def main():
     else:
         logger.info("Position review loop disabled (SIGNAL_ARBITRATION_ENABLED=false).")
 
+    # petrosa_k8s#1130: closes the position lifecycle loop back into CIO.
+    # The trade engine echoes position closures on execution.events.>
+    # (petrosa_k8s#586); nothing consumed that subject before this, so
+    # PortfolioTracker.record_exit and PositionReviewLoop.remove_position
+    # were never driven from a real close (ghost positions, #1128/#1129).
+    # Wired against the same `orchestrator.portfolio_tracker` singleton the
+    # admission path (`Orchestrator.run`) records into, and the same
+    # `position_review_loop` instance admission registers positions with —
+    # so a real close now retires exactly what admission tracked.
+    execution_events_consumer = ExecutionEventsConsumer(
+        nats_client=nc,
+        portfolio_tracker=orchestrator.portfolio_tracker,
+        position_review_loop=position_review_loop,
+    )
+    app.state.execution_events_consumer = execution_events_consumer
+
     # #175 (FR66/FR62) — DrawdownBreachEmitter and EnvelopeDriftEmitter are
     # instantiated so they exist as live collaborators on app.state, closing
     # the "never instantiated" half of #175's AC3. The producers that call
     # their `check_and_emit` (a live drawdown-vs-envelope comparator, and a
-    # characterization-drift NATS consumer) do not exist yet in this repo —
-    # same documented gap as `PortfolioTracker.record_exit` — and are
-    # tracked as follow-up wiring, not silently dropped.
+    # characterization-drift NATS consumer) do not exist yet in this repo
+    # and are tracked as follow-up wiring, not silently dropped.
+    # (`PortfolioTracker.record_exit` had the same shape of gap — now closed
+    # by `ExecutionEventsConsumer` below, petrosa_k8s#1130.)
     drawdown_breach_emitter = DrawdownBreachEmitter(nats_client=nc)
     app.state.drawdown_breach_emitter = drawdown_breach_emitter
     envelope_drift_emitter = EnvelopeDriftEmitter(nats_client=nc)
@@ -402,6 +420,10 @@ async def main():
     app.state.cio_health_evaluator = health_evaluator
     await health_evaluator.start()
     logger.info("CIO health evaluator publishing on evaluator.cio.verdict")
+
+    # petrosa_k8s#1130: start consuming trade-engine position closures.
+    await execution_events_consumer.start()
+    logger.info("Execution events consumer listening on execution.events.>")
 
     # #175 (FR60/P1.4-AC7): start the in-position cadence task after
     # everything it depends on (arbiter → context_builder/enforcer/router)
@@ -455,6 +477,7 @@ async def main():
     logger.info("Cleaning up resources...")
     if position_review_loop is not None:
         await position_review_loop.stop()
+    await execution_events_consumer.stop()
     await publisher.stop()
     await responder.stop()
     await health_evaluator.stop()

@@ -15,11 +15,10 @@ incoming admission when
 
 where ``new_position_contribution = new_size × new_leverage / equity``.
 
-Position-exit wiring (``record_exit``) is intentionally exposed but not
-yet driven from a TE event stream — that wire-up is a follow-up. Until
-then the tracker reflects "what CIO has admitted" rather than "what
-TE currently holds open". Documented limitation; the producer-side
-admission check is unchanged.
+Position-exit wiring (``record_exit``): driven by
+:class:`cio.core.execution_events_consumer.ExecutionEventsConsumer` on a
+full close (``execution.events.>``, petrosa_k8s#1130) — the tracker now
+reflects "what TE currently holds open", not just "what CIO has admitted".
 """
 
 from __future__ import annotations
