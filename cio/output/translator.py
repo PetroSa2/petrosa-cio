@@ -149,6 +149,8 @@ class TradeEngineTranslator:
 
             # 3. Build Legacy Payload
             # Matching petrosa-tradeengine/contracts/signal.py Signal model
+            # petrosa_k8s#1127: include position_id as client_order_id so
+            # the trade engine can echo it back on position updates.
             legacy_signal = {
                 "strategy_id": context.strategy_id,
                 "strategy": context.strategy_id,
@@ -164,6 +166,7 @@ class TradeEngineTranslator:
                 "timeframe": timeframe,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "decision_id": context.decision_id,
+                "client_order_id": context.position_id,
                 # Map risk management parameters from decision (primary) or payload
                 # P1.5-AC3 (#137) / #174 — admission-time leverage decided by
                 # CIO's leverage arbiter. `decision.decided_leverage` is set

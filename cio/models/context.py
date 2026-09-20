@@ -145,6 +145,18 @@ class TriggerContext(BaseModel):
     # contract) flip this to required once they ship.
     pre_decision_context: "PreDecisionContext | None" = None
 
+    # petrosa_k8s#1127: synthetic position ID generated at admission time.
+    # Uniquely identifies this position so the trade engine can echo it
+    # back on position-update payloads; the CIO listener maps the echoed
+    # client_order_id back to this position_id for per-position tracking.
+    position_id: str | None = Field(
+        None,
+        description=(
+            "Synthetic position ID generated at admission time; "
+            "echoed back by tradeengine on position updates as client_order_id"
+        ),
+    )
+
 
 # ----------------------------------------------------------------------
 # P1.4-AC1 / FR55-FR58 (petrosa-cio#131): PreDecisionContext bundle
