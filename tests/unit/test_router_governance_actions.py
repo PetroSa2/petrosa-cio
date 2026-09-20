@@ -215,8 +215,9 @@ async def test_router_sanitizes_spaced_strategy_id_in_nats_subjects(
 
 @pytest.mark.asyncio
 async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
-    """EXECUTE fans out to both signals.trading.<id> (legacy) and
-    trade.execute.<id> (modern) — both must be whitespace-free (#211)."""
+    """EXECUTE fans out to signals.trading.<id> (legacy) — must be
+    whitespace-free (#211). petrosa-cio#215 removed the dead
+    trade.execute.<id> "modern" publish (zero subscribers ecosystem-wide)."""
     mock_nc = AsyncMock()
     mock_vc = AsyncMock()
     router = OutputRouter(
@@ -236,4 +237,4 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
     for subject in published_subjects:
         assert " " not in subject, f"subject contains whitespace: {subject!r}"
 
-    assert "trade.execute.spread_liquidity_monitor_625" in published_subjects
+    assert "trade.execute.spread_liquidity_monitor_625" not in published_subjects

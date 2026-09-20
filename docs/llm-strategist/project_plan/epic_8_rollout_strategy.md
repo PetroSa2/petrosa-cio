@@ -28,7 +28,7 @@ Before CIO deployment, we must verify and update the surrounding services.
 2.  **`petrosa-tradeengine`:**
     *   *Audit:* Verify `/state` API returns `portfolio`, `risk_limits`, and `env_stats` keys.
     *   *Bridge:* Initial rollout will publish translated `Signal` objects to the legacy `signals.trading` topic to ensure compatibility without requiring immediate TradeEngine reconfiguration.
-    *   *Contract:* Future phase will update TradeEngine to listen to `trade.execute.{strategy_id}` and accept the `DecisionResult` payload directly.
+    *   *Contract:* ~~Future phase will update TradeEngine to listen to `trade.execute.{strategy_id}` and accept the `DecisionResult` payload directly.~~ **Superseded (petrosa-cio#215):** this publish shipped with zero subscribers and was removed; the audit-trail data it carried (`rejection_source`, `thought_trace`, `decided_leverage`) is already captured via the Vector DB audit path in `OutputRouter.route`. Revisit only if a real consumer is designed.
 3.  **`petrosa-ta-bot` / `realtime-strategies`:**
     *   *Audit:* Verify `/strategy/{id}/config` returns `stats` and `defaults` matching our `StrategyStats` and `StrategyDefaults` models.
     *   *Contract:* Ensure they emit `trade.intent.*` NATS messages with the correct correlation ID headers.
