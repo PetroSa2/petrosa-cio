@@ -28,6 +28,9 @@ class TargetServiceResolver:
         "btc_dominance",
         "onchain_metrics",
         "iceberg_detector",
+        # petrosa-cio#212: was absent, so a correctly-emitted canonical id
+        # still resolved to ServiceType.UNKNOWN.
+        "spread_liquidity",
     }
 
     # petrosa-cio#200: display-name / alias -> canonical strategy id.
@@ -39,6 +42,11 @@ class TargetServiceResolver:
     # their canonical form (e.g. abbreviations or renames).
     STRATEGY_ID_ALIASES: dict[str, str] = {
         "iceberg_order_detector": "iceberg_detector",
+        # petrosa-cio#212: "Spread Liquidity Monitor" (display name) ->
+        # "spread_liquidity_monitor" (normalised) -> "spread_liquidity"
+        # (canonical, matches strategies/market_logic/spread_liquidity.py's
+        # metadata.strategy_id in petrosa-realtime-strategies).
+        "spread_liquidity_monitor": "spread_liquidity",
     }
 
     # Strategies managed by the petrosa-bot-ta-analysis service (27 total)
@@ -85,6 +93,22 @@ class TargetServiceResolver:
         return "_".join(strategy_id.strip().lower().split())
 
     @classmethod
+    def canonicalize(cls, strategy_id: str) -> str:
+        """Normalise then alias-resolve a strategy id to its canonical form.
+
+        petrosa-cio#212: this is the same (normalise -> alias-lookup) chain
+        ``resolve()`` already applied internally, extracted so callers that
+        need the canonical id itself (not just a ``ServiceType`` verdict —
+        e.g. ``ContextBuilder`` building a data-manager URL or a cache key)
+        can reuse the identical logic instead of re-deriving it and risking
+        drift between the two call sites.
+
+        Returns ``""`` for a falsy input, matching ``resolve()``'s handling.
+        """
+        normalized = cls._normalize(strategy_id) if strategy_id else ""
+        return cls.STRATEGY_ID_ALIASES.get(normalized, normalized)
+
+    @classmethod
     def resolve(cls, strategy_id: str) -> ServiceType:
         """
         Maps a strategy ID to the service responsible for it.
@@ -99,8 +123,7 @@ class TargetServiceResolver:
         strategy set. Callers MUST handle UNKNOWN explicitly rather than
         assuming a concrete service.
         """
-        normalized = cls._normalize(strategy_id) if strategy_id else ""
-        canonical = cls.STRATEGY_ID_ALIASES.get(normalized, normalized)
+        canonical = cls.canonicalize(strategy_id)
 
         if canonical in cls.REALTIME_SERVICE_STRATEGIES:
             return ServiceType.REALTIME_STRATEGIES
