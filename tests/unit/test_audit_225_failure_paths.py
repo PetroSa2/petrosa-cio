@@ -60,7 +60,9 @@ class TestLLMMissingInputSkipStrategyAssessor:
             user_context={"strategy_id": "test"},
             response_model=StrategyResult,
         )
-        assert result.action in SAFE_DEFAULTS["PETROSA_PROMPT_STRATEGY_ASSESSOR"]
+        assert result.activation_recommendation == SAFE_DEFAULTS[
+            "PETROSA_PROMPT_STRATEGY_ASSESSOR"
+        ].activation_recommendation
 
 
 class TestLLMMissingInputSkipRegimeClassifier:
@@ -96,7 +98,9 @@ class TestLLMMissingInputSkipRegimeClassifier:
             user_context={"symbol": "BTCUSDT"},
             response_model=RegimeResult,
         )
-        assert result.regime in SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"]
+        assert result.regime == SAFE_DEFAULTS[
+            "PETROSA_PROMPT_REGIME_CLASSIFIER"
+        ].regime
 
 
 class TestContextFetchTimeoutStorm:
@@ -121,7 +125,7 @@ class TestContextFetchTimeoutStorm:
             ctx = await builder.build(
                 correlation_id="storm-test",
                 source_subject="test",
-                trigger_type=TriggerType.NEW_SIGNAL,
+                trigger_type=TriggerType.STRATEGY_DEGRADED,
                 payload={"symbol": "BTCUSDT", "strategy_id": "test"},
             )
 
@@ -170,7 +174,7 @@ class TestContextFetchTimeoutStorm:
             ctx = await builder.build(
                 correlation_id="single-timeout",
                 source_subject="test",
-                trigger_type=TriggerType.NEW_SIGNAL,
+                trigger_type=TriggerType.STRATEGY_DEGRADED,
                 payload={"symbol": "BTCUSDT", "strategy_id": "test"},
             )
 
@@ -222,16 +226,21 @@ class TestClientFactoryMock:
         client = ClientFactory.create()
         assert isinstance(client, MockLLMClient)
 
-    def test_mock_client_complete_with_full_context(self):
+    @pytest.mark.asyncio
+    async def test_mock_client_complete_with_full_context(self):
         """Mock client with all required fields → valid JSON, no error."""
         client = MockLLMClient()
-        raw = client.complete(
+        raw = await client.complete(
             prompt_id="PETROSA_PROMPT_STRATEGY_ASSESSOR",
             system_prompt="classify",
             user_context={
-                "consecutive_losses": 0,
-                "win_rate_delta": 0.05,
                 "strategy_id": "test",
+                "win_rate": 0.5,
+                "win_rate_delta": 0.05,
+                "consecutive_losses": 0,
+                "recent_pnl_trend": "positive",
+                "regime": "choppy",
+                "regime_confidence": "low",
             },
         )
         assert raw.error is None
@@ -245,9 +254,13 @@ class TestClientFactoryMock:
             prompt_id="PETROSA_PROMPT_STRATEGY_ASSESSOR",
             system_prompt="classify",
             user_context={
-                "consecutive_losses": 0,
-                "win_rate_delta": 0.05,
                 "strategy_id": "test",
+                "win_rate": 0.5,
+                "win_rate_delta": 0.05,
+                "consecutive_losses": 0,
+                "recent_pnl_trend": "positive",
+                "regime": "choppy",
+                "regime_confidence": "low",
             },
         )
         assert raw.error is None
@@ -323,7 +336,7 @@ class TestDataManagerStructuralGap:
             ctx = await builder.build(
                 correlation_id="gap-test",
                 source_subject="test",
-                trigger_type=TriggerType.NEW_SIGNAL,
+                trigger_type=TriggerType.STRATEGY_DEGRADED,
                 payload={"symbol": "BTCUSDT", "strategy_id": "bollinger_squeeze"},
             )
 
@@ -351,7 +364,7 @@ class TestDataManagerStructuralGap:
             ctx = await builder.build(
                 correlation_id="unreachable-test",
                 source_subject="test",
-                trigger_type=TriggerType.NEW_SIGNAL,
+                trigger_type=TriggerType.STRATEGY_DEGRADED,
                 payload={"symbol": "BTCUSDT", "strategy_id": "test"},
             )
 
