@@ -18,7 +18,6 @@ from cio.clients.factory import ClientFactory
 from cio.clients.llm_client import MockLLMClient
 from cio.core.context_builder import ContextBuilder, TriggerType
 
-
 # ---------------------------------------------------------------------------
 # 1. LLM_MISSING_INPUT_SKIP — strategy_assessor
 # ---------------------------------------------------------------------------
