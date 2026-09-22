@@ -22,6 +22,7 @@ from cio.core.context_builder import ContextBuilder, TriggerType
 # 1. LLM_MISSING_INPUT_SKIP — strategy_assessor
 # ---------------------------------------------------------------------------
 
+
 class TestLLMMissingInputSkipStrategyAssessor:
     """Verify that a self-reported MISSING_INPUT from the strategy assessor
     prompt returns SAFE_DEFAULTS without unhandled exceptions."""
@@ -55,9 +56,12 @@ class TestLLMMissingInputSkipStrategyAssessor:
             user_context={"strategy_id": "test"},
             response_model=StrategyResult,
         )
-        assert result.activation_recommendation == SAFE_DEFAULTS[
-            "PETROSA_PROMPT_STRATEGY_ASSESSOR"
-        ].activation_recommendation
+        assert (
+            result.activation_recommendation
+            == SAFE_DEFAULTS[
+                "PETROSA_PROMPT_STRATEGY_ASSESSOR"
+            ].activation_recommendation
+        )
 
 
 class TestLLMMissingInputSkipRegimeClassifier:
@@ -93,9 +97,7 @@ class TestLLMMissingInputSkipRegimeClassifier:
             user_context={"symbol": "BTCUSDT"},
             response_model=RegimeResult,
         )
-        assert result.regime == SAFE_DEFAULTS[
-            "PETROSA_PROMPT_REGIME_CLASSIFIER"
-        ].regime
+        assert result.regime == SAFE_DEFAULTS["PETROSA_PROMPT_REGIME_CLASSIFIER"].regime
 
 
 class TestContextFetchTimeoutStorm:
