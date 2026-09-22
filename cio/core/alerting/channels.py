@@ -85,6 +85,11 @@ class EmailChannel(AlertChannel):
         self.from_email = os.getenv("ALERT_EMAIL_FROM", "alerts@petrosa.com")
         self.to_email = os.getenv("ALERT_EMAIL_TO", "admin@petrosa.com")
 
+    @property
+    def configured(self) -> bool:
+        """Whether this channel has the credentials required to send mail."""
+        return bool(self.smtp_user and self.smtp_pass)
+
     def _send_sync(self, msg: MIMEText):
         """Synchronous SMTP send to be run in a thread."""
         with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
@@ -93,7 +98,7 @@ class EmailChannel(AlertChannel):
             server.send_message(msg)
 
     async def send(self, message: str, context: dict[str, Any]) -> bool:
-        if not self.smtp_user or not self.smtp_pass:
+        if not self.configured:
             logger.warning("SMTP credentials not configured, skipping email alert.")
             return False
 

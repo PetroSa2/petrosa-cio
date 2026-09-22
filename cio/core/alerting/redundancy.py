@@ -19,11 +19,18 @@ class RedundantAlertDispatcher:
     """
 
     def __init__(self):
-        self.channels: list[AlertChannel] = [
+        channels: list[AlertChannel] = [
             GrafanaChannel(),
             OtelChannel(),
-            EmailChannel(),
         ]
+        email_channel = EmailChannel()
+        if email_channel.configured:
+            channels.append(email_channel)
+        else:
+            logger.info(
+                "Email alert channel disabled: SMTP credentials are not configured."
+            )
+        self.channels = channels
 
     async def dispatch(
         self, message: str, context: dict[str, Any] | None = None
