@@ -221,7 +221,12 @@ async def main():
             "NATS_TRANSPORT_ERROR: exc_type=%s detail=%s",
             exc_type,
             detail,
-            extra={"correlation_id": "SYSTEM", "exc_type": exc_type},
+            extra={
+                "correlation_id": "SYSTEM",
+                "exc_type": exc_type,
+                "audit_exempt": True,
+                "transient": True,
+            },
         )
 
     async def _nats_disconnected_cb() -> None:

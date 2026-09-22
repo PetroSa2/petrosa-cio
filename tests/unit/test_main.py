@@ -186,3 +186,5 @@ async def test_nats_error_cb_logs_structured_exc_type_not_bare_str(caplog):
     body = warning_records[0].message
     assert "exc_type=_EmptyStrConnectionError" in body
     assert "detail=<empty>" in body
+    assert warning_records[0].audit_exempt is True
+    assert warning_records[0].transient is True

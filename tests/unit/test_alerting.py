@@ -23,30 +23,42 @@ async def test_alert_manager_dispatch():
 @pytest.mark.asyncio
 async def test_redundant_dispatcher_all_channels():
     """Test that RedundantAlertDispatcher calls all channels."""
-    dispatcher = RedundantAlertDispatcher()
+    with patch.dict("os.environ", {"SMTP_USER": "user", "SMTP_PASS": "pass"}):
+        dispatcher = RedundantAlertDispatcher()
 
-    # Mock all channels
-    for channel in dispatcher.channels:
-        channel.send = AsyncMock(return_value=True)
+        # Mock all channels
+        for channel in dispatcher.channels:
+            channel.send = AsyncMock(return_value=True)
 
-    success = await dispatcher.dispatch("Test message", {"foo": "bar"})
+        success = await dispatcher.dispatch("Test message", {"foo": "bar"})
 
-    assert success is True
-    for channel in dispatcher.channels:
-        channel.send.assert_called_once_with("Test message", {"foo": "bar"})
+        assert success is True
+        for channel in dispatcher.channels:
+            channel.send.assert_called_once_with("Test message", {"foo": "bar"})
+
+
+def test_redundant_dispatcher_disables_unconfigured_email():
+    with patch.dict("os.environ", {}, clear=True):
+        dispatcher = RedundantAlertDispatcher()
+
+    assert [type(channel) for channel in dispatcher.channels] == [
+        GrafanaChannel,
+        OtelChannel,
+    ]
 
 
 @pytest.mark.asyncio
 async def test_redundant_dispatcher_partial_failure():
     """Test that RedundantAlertDispatcher succeeds if at least one channel works."""
-    dispatcher = RedundantAlertDispatcher()
+    with patch.dict("os.environ", {"SMTP_USER": "user", "SMTP_PASS": "pass"}):
+        dispatcher = RedundantAlertDispatcher()
 
-    dispatcher.channels[0].send = AsyncMock(return_value=False)
-    dispatcher.channels[1].send = AsyncMock(side_effect=Exception("Otel failed"))
-    dispatcher.channels[2].send = AsyncMock(return_value=True)
+        dispatcher.channels[0].send = AsyncMock(return_value=False)
+        dispatcher.channels[1].send = AsyncMock(side_effect=Exception("Otel failed"))
+        dispatcher.channels[2].send = AsyncMock(return_value=True)
 
-    success = await dispatcher.dispatch("Test message")
-    assert success is True
+        success = await dispatcher.dispatch("Test message")
+        assert success is True
 
 
 @pytest.mark.asyncio
@@ -108,3 +120,12 @@ async def test_email_channel_smtp():
             mock_server.starttls.assert_called_once()
             mock_server.login.assert_called_once_with("user", "pass")
             mock_server.send_message.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_email_channel_returns_false_without_credentials():
+    with patch.dict("os.environ", {}, clear=True):
+        channel = EmailChannel()
+        result = await channel.send("Test Email", {"alert_type": "RED"})
+
+    assert result is False
