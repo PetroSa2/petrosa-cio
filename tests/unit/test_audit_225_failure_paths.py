@@ -9,18 +9,14 @@ Each test verifies that the service degrades gracefully (returns safe defaults
 or structured warnings) rather than crashing.
 """
 
-import asyncio
-import json
-import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-from cio.clients.llm_client import MockLLMClient
 from cio.clients.factory import ClientFactory
+from cio.clients.llm_client import MockLLMClient
 from cio.core.context_builder import ContextBuilder, TriggerType
-from cio.core.listener import NATSListener
 
 
 # ---------------------------------------------------------------------------
