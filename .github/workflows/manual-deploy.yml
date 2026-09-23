@@ -99,6 +99,28 @@ jobs:
           token: ${{ steps.generate-token.outputs.token }}
           path: petrosa_k8s
 
+      - name: Mint umbrella checkout token
+        id: umbrella-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.GITOPS_APP_ID }}
+          private-key: ${{ secrets.GITOPS_APP_PRIVATE_KEY }}
+          owner: PetroSa2
+          repositories: petrosa
+
+      - name: Check out agent tooling from the umbrella
+        uses: actions/checkout@v7
+        with:
+          repository: PetroSa2/petrosa
+          token: ${{ steps.umbrella-token.outputs.token }}
+          path: .agent-tooling
+          clean: false
+
+      - name: Put agent tooling on the expected path
+        run: |
+          ln -sfn ../.agent-tooling/scripts petrosa_k8s/scripts
+          test -f petrosa_k8s/scripts/gitops-rebase-main.sh
+
       - name: Rebase on main
         run: ./scripts/gitops-rebase-main.sh
         working-directory: petrosa_k8s
