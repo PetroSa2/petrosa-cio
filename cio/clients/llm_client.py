@@ -18,6 +18,16 @@ from cio.models import SAFE_DEFAULTS, RawLLMResponse
 
 logger = logging.getLogger(__name__)
 
+# #234 AC2 — per-call timeout for individual litellm.acompletion calls,
+# independent of NurseEnforcer's umbrella AUDIT_TIMEOUT_SECONDS. Previously
+# no timeout was passed to litellm at all, so a single hanging provider
+# call had no bound of its own and could (with the primary+fallback retry
+# path) consume the entire audit budget by itself. Configurable via
+# LLM_CALL_TIMEOUT_MS (default: 7000ms = 7s).
+LLM_CALL_TIMEOUT_SECONDS: float = (
+    int(os.environ.get("LLM_CALL_TIMEOUT_MS", "7000")) / 1000.0
+)
+
 
 def _env_bool(name: str, default: bool = True) -> bool:
     value = os.getenv(name)
@@ -628,13 +638,19 @@ class LiteLLMClient(CIO_LLM_Client):
         start_time = time.perf_counter()
 
         # 2. Retry Loop for Primary Model
+        # #234 AC3 — reduced from stop_after_attempt(3)/max=10 to
+        # stop_after_attempt(2)/max=3: NurseEnforcer already provides a
+        # RETRY_SAFE fail-safe on the outer AUDIT_TIMEOUT_SECONDS umbrella,
+        # so unbounded backoff sleep here (previously up to ~20s across 3
+        # attempts, on top of request latency) was redundant with — and
+        # actively fighting — that fail-safe design.
         try:
             async for attempt in AsyncRetrying(
                 retry=retry_if_exception_type(
                     (RateLimitError, ServiceUnavailableError)
                 ),
-                wait=wait_random_exponential(multiplier=1, max=10),
-                stop=stop_after_attempt(3),
+                wait=wait_random_exponential(multiplier=1, max=3),
+                stop=stop_after_attempt(2),
                 before_sleep=lambda retry_state: logger.warning(
                     f"Retrying LLM call (attempt {retry_state.attempt_number})",
                     extra={
@@ -648,6 +664,7 @@ class LiteLLMClient(CIO_LLM_Client):
                     response = await litellm.acompletion(
                         model=routing_primary,
                         api_base=api_base,
+                        timeout=LLM_CALL_TIMEOUT_SECONDS,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": json.dumps(user_context)},
@@ -674,6 +691,7 @@ class LiteLLMClient(CIO_LLM_Client):
                 fallback_response = await litellm.acompletion(
                     model=routing_fallback,
                     api_base=fallback_api_base,
+                    timeout=LLM_CALL_TIMEOUT_SECONDS,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
@@ -734,6 +752,7 @@ class LiteLLMClient(CIO_LLM_Client):
             response = await litellm.acompletion(
                 model=routing_fallback,
                 api_base=fallback_api_base,
+                timeout=LLM_CALL_TIMEOUT_SECONDS,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_context)},
