@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import time
@@ -332,56 +333,78 @@ class Orchestrator:
                 self._emit_decision_action(_bypass_decision.action)
                 return _bypass_decision
 
-            # 2. REGIME ANALYSIS (S3-S5)
-            # Check cache first for HOT path
-            regime = None
+            # 2. REGIME ANALYSIS + 3. STRATEGY ASSESSMENT (S3-S5)
+            # Check cache first for HOT path (each surface independently).
+            cached_regime_result: RegimeResult | None = None
             if self.cache:
                 cached_regime = await self.cache.get(f"regime:{context.strategy_id}")
                 if cached_regime:
                     try:
-                        regime = RegimeResult.model_validate_json(cached_regime)
+                        cached_regime_result = RegimeResult.model_validate_json(
+                            cached_regime
+                        )
                         logger.debug("Regime cache hit. Using cached result.")
                     except Exception as e:
                         logger.warning(f"Failed to validate cached regime: {e}")
 
-            if not regime:
-                logger.info(
-                    "Running Regime Classifier (LLM)...",
-                    extra={"correlation_id": context.correlation_id},
-                )
-                regime = await self.regime_analyst.classify(context)
-                if self.cache:
-                    await self.cache.set(
-                        f"regime:{context.strategy_id}",
-                        regime.model_dump_json(),
-                        ttl=900,
-                    )
-
-            # 3. STRATEGY ASSESSMENT (S3-S5)
-            strategy = None
+            cached_strategy_result: StrategyResult | None = None
             if self.cache:
                 cached_strategy = await self.cache.get(
                     f"strategy:{context.strategy_id}"
                 )
                 if cached_strategy:
                     try:
-                        strategy = StrategyResult.model_validate_json(cached_strategy)
+                        cached_strategy_result = StrategyResult.model_validate_json(
+                            cached_strategy
+                        )
                         logger.debug("Strategy cache hit. Using cached result.")
                     except Exception as e:
                         logger.warning(f"Failed to validate cached strategy: {e}")
 
-            if not strategy:
+            # #234 AC1 — regime_analyst.classify and strategy_assessor.assess
+            # each take only `context` and do not depend on each other's
+            # output. They were previously run sequentially under the same
+            # NurseEnforcer umbrella timeout; resolve them concurrently via
+            # asyncio.gather instead, so a cold-path audit pays for the
+            # slower of the two LLM calls, not the sum of both. Each
+            # resolver short-circuits to the cached value with no I/O when
+            # available, so a HOT/HOT or HOT/COLD mix still behaves as
+            # before.
+            async def _resolve_regime() -> RegimeResult:
+                if cached_regime_result is not None:
+                    return cached_regime_result
+                logger.info(
+                    "Running Regime Classifier (LLM)...",
+                    extra={"correlation_id": context.correlation_id},
+                )
+                result = await self.regime_analyst.classify(context)
+                if self.cache:
+                    await self.cache.set(
+                        f"regime:{context.strategy_id}",
+                        result.model_dump_json(),
+                        ttl=900,
+                    )
+                return result
+
+            async def _resolve_strategy() -> StrategyResult:
+                if cached_strategy_result is not None:
+                    return cached_strategy_result
                 logger.info(
                     "Running Strategy Assessor (LLM)...",
                     extra={"correlation_id": context.correlation_id},
                 )
-                strategy = await self.strategy_assessor.assess(context)
+                result = await self.strategy_assessor.assess(context)
                 if self.cache:
                     await self.cache.set(
                         f"strategy:{context.strategy_id}",
-                        strategy.model_dump_json(),
+                        result.model_dump_json(),
                         ttl=900,
                     )
+                return result
+
+            regime, strategy = await asyncio.gather(
+                _resolve_regime(), _resolve_strategy()
+            )
 
             # 4. ACTION CLASSIFICATION
             logger.info(
