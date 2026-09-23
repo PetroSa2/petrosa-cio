@@ -53,6 +53,20 @@ _DEFAULT_VOLATILITY_PERCENTILE = 0.5
 _DEFAULT_TREND_STRENGTH = 0.0
 _DEFAULT_PRICE_ACTION = "Neutral"
 
+# #236: "Failed to fetch portfolio/risk: All connection attempts failed" is
+# httpx.ConnectError — a fast TCP-level failure (connection refused / no
+# route), not a slow read timeout. #199 already trimmed CIO_CONTEXT_FETCH
+# _TIMEOUT_S specifically to stop retries-via-timeout from burning the
+# decision window, so retrying here is deliberately scoped to *only* the
+# fast connect-failure case, with a short capped backoff — a transient NATS
+# / tradeengine network blip self-heals without adding meaningful latency to
+# the decision path, while a persistent outage still falls back to the
+# existing conservative defaults after retries are exhausted.
+_PORTFOLIO_FETCH_MAX_RETRIES = int(os.getenv("CIO_PORTFOLIO_FETCH_RETRIES", "2"))
+_PORTFOLIO_FETCH_RETRY_BACKOFF_S = float(
+    os.getenv("CIO_PORTFOLIO_FETCH_RETRY_BACKOFF_S", "0.25")
+)
+
 _SIGNAL_STRENGTH_TO_TREND = {
     "weak": 0.25,
     "medium": 0.5,
@@ -813,50 +827,73 @@ class ContextBuilder:
         Code Engine's gross_exposure=1.0 / orders=999 trigger-block path
         continues to fire — AC2 is record-not-block.
         """
-        try:
-            url = f"{self.tradeengine_url}/state?symbol={symbol}"
-            response = await self.client.get(url)
-            response.raise_for_status()
-            data = response.json()
+        url = f"{self.tradeengine_url}/state?symbol={symbol}"
+        last_exc: Exception = RuntimeError("unreachable")
+        for attempt in range(_PORTFOLIO_FETCH_MAX_RETRIES + 1):
+            try:
+                response = await self.client.get(url)
+                response.raise_for_status()
+                data = response.json()
 
-            portfolio = PortfolioSummary(**data["portfolio"])
-            risk = RiskLimits(**data["risk_limits"])
-            env_stats = data["env_stats"]
+                portfolio = PortfolioSummary(**data["portfolio"])
+                risk = RiskLimits(**data["risk_limits"])
+                env_stats = data["env_stats"]
 
-            return portfolio, risk, env_stats
-        except Exception as e:
-            logger.error(
-                f"Failed to fetch portfolio/risk: {e}",
-                extra={"correlation_id": correlation_id},
-            )
-            if gaps is not None:
-                gaps.append(
-                    ContextGap(
-                        surface="portfolio",
-                        reason=f"fetch_error: {e}",
+                return portfolio, risk, env_stats
+            except httpx.ConnectError as e:
+                last_exc = e
+                if attempt < _PORTFOLIO_FETCH_MAX_RETRIES:
+                    logger.warning(
+                        "PORTFOLIO_FETCH_CONNECT_RETRY attempt=%d/%d endpoint=%s "
+                        "detail=%s",
+                        attempt + 1,
+                        _PORTFOLIO_FETCH_MAX_RETRIES,
+                        url,
+                        str(e) or "<empty>",
+                        extra={"correlation_id": correlation_id},
                     )
+                    await asyncio.sleep(
+                        _PORTFOLIO_FETCH_RETRY_BACKOFF_S * (attempt + 1)
+                    )
+                    continue
+                break
+            except Exception as e:
+                last_exc = e
+                break
+
+        e = last_exc
+        logger.error(
+            f"Failed to fetch portfolio/risk: {e}",
+            extra={"correlation_id": correlation_id},
+        )
+        if gaps is not None:
+            gaps.append(
+                ContextGap(
+                    surface="portfolio",
+                    reason=f"fetch_error: {e}",
                 )
-            if availability is not None:
-                availability["portfolio"] = False
-            # Safe conservative defaults (trigger blocks)
-            return (
-                PortfolioSummary(
-                    gross_exposure=1.0,
-                    same_asset_pct=1.0,
-                    open_positions_count=999,
-                ),
-                RiskLimits(
-                    max_drawdown_pct=0.0,
-                    max_orders_global=0,
-                    max_orders_per_symbol=0,
-                    max_position_size_usd=0.0,
-                ),
-                {
-                    "global_drawdown_pct": 1.0,
-                    "open_orders_global": 999,
-                    "available_capital_usd": 0.0,
-                },
             )
+        if availability is not None:
+            availability["portfolio"] = False
+        # Safe conservative defaults (trigger blocks)
+        return (
+            PortfolioSummary(
+                gross_exposure=1.0,
+                same_asset_pct=1.0,
+                open_positions_count=999,
+            ),
+            RiskLimits(
+                max_drawdown_pct=0.0,
+                max_orders_global=0,
+                max_orders_per_symbol=0,
+                max_position_size_usd=0.0,
+            ),
+            {
+                "global_drawdown_pct": 1.0,
+                "open_orders_global": 999,
+                "available_capital_usd": 0.0,
+            },
+        )
 
     async def _fetch_strategy_data(
         self,
