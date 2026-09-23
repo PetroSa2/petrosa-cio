@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI
@@ -190,6 +191,20 @@ async def main():
 
     # 1. Load Configuration
     nats_url = os.getenv("NATS_URL", "nats://localhost:4222")
+    # #236: computed up-front (rather than in step 4 below, where it was
+    # previously computed inline right before `listener.start()`) so the
+    # NATS reconnect-and-resubscribe supervisor added below can replay the
+    # exact same subject after a permanent-closure reconnect.
+    intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    if not intents_subject.endswith(">"):
+        _base_subject = intents_subject.rstrip(".*")
+        subscribe_subject = f"{_base_subject}.>"
+    else:
+        subscribe_subject = intents_subject
+    # #236: graceful-shutdown event, created early so the NATS reconnect
+    # supervisor (defined below, before any subscriber exists) can check it
+    # without a forward reference.
+    stop_event = asyncio.Event()
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
     data_manager_url = os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:80")
     tradeengine_url = os.getenv(
@@ -245,11 +260,87 @@ async def main():
             extra={"correlation_id": "SYSTEM"},
         )
 
+    # #236: prior to this fix, closed_cb only logged — nats.py's own
+    # max_reconnect_attempts=-1 budget does NOT cover every path to
+    # CLOSED (e.g. Client._process_err() force-closes on a server-sent
+    # protocol -ERR regardless of the reconnect budget, see
+    # nats/aio/client.py::_process_err -> _close(Client.CLOSED)). Once
+    # CLOSED, the client never reconnects itself — the only recovery path
+    # was the pod's liveness/readiness probe eventually failing and
+    # kubelet restarting the whole process (the 2026-09-23 02:36-02:39
+    # incident this ticket reports). `_resubscribe_callbacks` is
+    # populated below as each NATS-driven subscriber starts, and
+    # `_nats_reconnect_and_resubscribe` replays it after a successful
+    # in-process reconnect so the service self-heals without a restart.
+    _resubscribe_callbacks: list[tuple[str, Any]] = []
+    _nats_reconnect_state: dict[str, Any] = {"task": None}
+
+    async def _nats_reconnect_and_resubscribe() -> None:
+        if stop_event.is_set():
+            return
+        backoff = 1.0
+        max_backoff = 30.0
+        while not stop_event.is_set():
+            try:
+                await nc.connect(
+                    nats_url,
+                    error_cb=_nats_error_cb,
+                    disconnected_cb=_nats_disconnected_cb,
+                    reconnected_cb=_nats_reconnected_cb,
+                    closed_cb=_nats_closed_cb,
+                    max_reconnect_attempts=-1,
+                    reconnect_time_wait=NATS_RECONNECT_TIME_WAIT_SECONDS,
+                )
+                logger.info(
+                    "NATS_RECONNECT_SUCCESS: reconnected to %s after permanent "
+                    "closure — replaying %d subscription(s)",
+                    nats_url,
+                    len(_resubscribe_callbacks),
+                    extra={"correlation_id": "SYSTEM"},
+                )
+                for name, start_cb in _resubscribe_callbacks:
+                    try:
+                        await start_cb()
+                    except Exception as sub_err:
+                        logger.error(
+                            "NATS_RESUBSCRIBE_FAILED: component=%s exc_type=%s "
+                            "detail=%s",
+                            name,
+                            type(sub_err).__name__,
+                            str(sub_err) or "<empty>",
+                            extra={"correlation_id": "SYSTEM"},
+                        )
+                return
+            except Exception as e:
+                logger.error(
+                    "NATS_RECONNECT_ATTEMPT_FAILED: exc_type=%s detail=%s "
+                    "next_attempt_in=%.1fs",
+                    type(e).__name__,
+                    str(e) or "<empty>",
+                    backoff,
+                    extra={"correlation_id": "SYSTEM"},
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+
     async def _nats_closed_cb() -> None:
         logger.error(
             "NATS_CLOSED: connection to %s permanently closed",
             nats_url,
             extra={"correlation_id": "SYSTEM"},
+        )
+        if stop_event.is_set():
+            return
+        existing_task = _nats_reconnect_state.get("task")
+        if existing_task is not None and not existing_task.done():
+            return  # a reconnect attempt is already in flight
+        # Decoupled via create_task (not awaited inline): closed_cb runs
+        # inside nats.py's own _close(), which still touches internal
+        # client state (_client_id etc.) after do_cbs returns — awaiting a
+        # blocking reconnect here would race that cleanup and could
+        # clobber a just-restored connection.
+        _nats_reconnect_state["task"] = asyncio.create_task(
+            _nats_reconnect_and_resubscribe()
         )
 
     nc = NATS()
@@ -430,6 +521,32 @@ async def main():
     await execution_events_consumer.start()
     logger.info("Execution events consumer listening on execution.events.>")
 
+    # #236: every NATS subscription established above is replayed by
+    # `_nats_reconnect_and_resubscribe` after a permanent-closure
+    # reconnect. Registered here (after each `.start()` succeeded once)
+    # rather than at definition time, so a reconnect never replays a
+    # subscription that never actually started.
+    _resubscribe_callbacks.extend(
+        [
+            (
+                "heartbeat_responder",
+                lambda: responder.start(subject=heartbeat_subject),
+            ),
+            (
+                "heartbeat_publisher",
+                lambda: publisher.start(subject=heartbeat_subject),
+            ),
+            ("evaluator_subscriber", evaluator_subscriber.start),
+            ("alerts_consumer", alerts_consumer.start),
+            ("health_evaluator", health_evaluator.start),
+            ("execution_events_consumer", execution_events_consumer.start),
+            ("listener", lambda: listener.start(subject=subscribe_subject)),
+        ]
+    )
+    # Exposed for introspection/tests — mirrors the app.state.nats_client
+    # pattern already used for the connection itself.
+    app.state.nats_reconnect_state = _nats_reconnect_state
+
     # #175 (FR60/P1.4-AC7): start the in-position cadence task after
     # everything it depends on (arbiter → context_builder/enforcer/router)
     # is live.
@@ -441,8 +558,6 @@ async def main():
         )
 
     # 3. Graceful Shutdown Setup
-    stop_event = asyncio.Event()
-
     def signal_handler():
         logger.info("Shutdown signal received. Starting graceful exit...")
         stop_event.set()
@@ -452,15 +567,6 @@ async def main():
         loop.add_signal_handler(sig, signal_handler)
 
     # 4. Start Listening
-    intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
-    # AC: Use multi-token wildcard '>' to capture all strategy-specific intents
-    # following the Petrosa NATS contract.
-    if not intents_subject.endswith(">"):
-        base_subject = intents_subject.rstrip(".*")
-        subscribe_subject = f"{base_subject}.>"
-    else:
-        subscribe_subject = intents_subject
-
     await listener.start(subject=subscribe_subject)
     logger.info(f"CIO Strategist is live and listening on {subscribe_subject}")
 
