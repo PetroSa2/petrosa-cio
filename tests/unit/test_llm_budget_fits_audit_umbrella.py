@@ -17,6 +17,18 @@ from cio.core.orchestrator import SEQUENTIAL_LLM_STAGES
 from cio.models import TIMEOUT_RETRY_RESULT, ActionType, TriggerContext
 
 
+def test_audit_timeout_clamps_unsafe_configuration(monkeypatch):
+    monkeypatch.setenv("LLM_AUDIT_TIMEOUT_MS", "20000")
+
+    assert enforcer_module._resolve_audit_timeout_seconds() == 60.0
+
+
+def test_audit_timeout_uses_default_for_invalid_configuration(monkeypatch):
+    monkeypatch.setenv("LLM_AUDIT_TIMEOUT_MS", "not-a-duration")
+
+    assert enforcer_module._resolve_audit_timeout_seconds() == 60.0
+
+
 def test_llm_budget_fits_inside_audit_umbrella():
     worst_case_single_call = (
         LLM_CALL_TIMEOUT_SECONDS * LLM_RETRY_ATTEMPTS

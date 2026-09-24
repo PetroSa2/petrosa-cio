@@ -28,9 +28,36 @@ logger = logging.getLogger(__name__)
 
 # Global configuration for Nurse Enforcer
 AUDIT_TIMEOUT_DEFAULT_MS = 60000
-AUDIT_TIMEOUT_SECONDS: float = (
-    int(os.environ.get("LLM_AUDIT_TIMEOUT_MS", str(AUDIT_TIMEOUT_DEFAULT_MS))) / 1000.0
-)
+AUDIT_TIMEOUT_MIN_MS = AUDIT_TIMEOUT_DEFAULT_MS
+
+
+def _resolve_audit_timeout_seconds() -> float:
+    configured_ms = os.environ.get("LLM_AUDIT_TIMEOUT_MS")
+    try:
+        timeout_ms = (
+            AUDIT_TIMEOUT_DEFAULT_MS if configured_ms is None else int(configured_ms)
+        )
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid LLM_AUDIT_TIMEOUT_MS; using the safe default",
+            extra={"configured_timeout_ms": configured_ms},
+        )
+        timeout_ms = AUDIT_TIMEOUT_DEFAULT_MS
+
+    if timeout_ms < AUDIT_TIMEOUT_MIN_MS:
+        logger.warning(
+            "LLM_AUDIT_TIMEOUT_MS below the safe minimum; clamping value",
+            extra={
+                "configured_timeout_ms": timeout_ms,
+                "minimum_timeout_ms": AUDIT_TIMEOUT_MIN_MS,
+            },
+        )
+        timeout_ms = AUDIT_TIMEOUT_MIN_MS
+
+    return timeout_ms / 1000.0
+
+
+AUDIT_TIMEOUT_SECONDS: float = _resolve_audit_timeout_seconds()
 
 
 class NurseEnforcer:

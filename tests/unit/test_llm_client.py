@@ -820,6 +820,35 @@ async def test_complete_with_schema_transport_error_emits_fallback_skip(caplog):
 
 
 @pytest.mark.asyncio
+async def test_complete_skips_duplicate_primary_and_fallback_route():
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=RuntimeError("inference unavailable")
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is not None
+    assert "Fallback skipped: duplicate route" in result.error
+    assert fake_litellm.acompletion.await_count == 2
+    assert all(
+        call.kwargs["model"] == "openai/meta/llama-3.2-11b-vision-instruct"
+        for call in fake_litellm.acompletion.await_args_list
+    )
+
+
+@pytest.mark.asyncio
 async def test_response_format_none_when_get_supported_openai_params_raises():
     """_supports_json_mode returns False when litellm raises — no json_object format."""
     client = LiteLLMClient()
