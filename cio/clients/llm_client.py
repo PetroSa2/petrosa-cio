@@ -697,6 +697,31 @@ class LiteLLMClient(CIO_LLM_Client):
 
         except Exception as primary_error:
             # 3. Fallback Attempt
+            if routing_primary == routing_fallback and api_base == fallback_api_base:
+                self._record_failure()
+                latency_ms = int((time.perf_counter() - start_time) * 1000)
+                logger.error(
+                    "LLM fallback skipped because it resolves to the failed primary route",
+                    extra={
+                        "prompt_id": prompt_id,
+                        "model": primary_model,
+                        "api_base": api_base,
+                    },
+                )
+                return RawLLMResponse(
+                    prompt_id=prompt_id,
+                    content="",
+                    error=(
+                        f"Primary: {str(primary_error)} | "
+                        "Fallback skipped: duplicate route"
+                    ),
+                    model=fallback_model,
+                    input_tokens=0,
+                    output_tokens=0,
+                    latency_ms=latency_ms,
+                    timestamp=datetime.now(UTC),
+                )
+
             logger.error(
                 f"Primary LLM failed ({primary_model}), attempting fallback ({fallback_model})",
                 extra={"prompt_id": prompt_id, "error": str(primary_error)},
