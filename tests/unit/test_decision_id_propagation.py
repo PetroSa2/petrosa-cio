@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from petrosa_contracts import Signal
+
 from cio.models import (
     ActivationRecommendation,
     ConfidenceLevel,
@@ -131,3 +133,11 @@ class TestDecisionIdInTranslator:
         assert result is not None
         assert result["decision_id"] == ctx.decision_id
         assert result["metadata"]["decision_id"] == ctx.decision_id
+
+    def test_translator_payload_round_trips_through_canonical_signal(self):
+        ctx = _make_context(decision_id="canonical-round-trip")
+        result = TradeEngineTranslator.to_legacy_signal(ctx, _make_decision())
+
+        assert result is not None
+        signal = Signal(**result)
+        assert signal.decision_id == "canonical-round-trip"
