@@ -27,10 +27,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Global configuration for Nurse Enforcer
-# Configurable via LLM_AUDIT_TIMEOUT_MS env var (default: 20000ms = 20s).
-# Raised from 10s to 20s default to accommodate novita/3B latency (cio#167).
+AUDIT_TIMEOUT_DEFAULT_MS = 60000
 AUDIT_TIMEOUT_SECONDS: float = (
-    int(os.environ.get("LLM_AUDIT_TIMEOUT_MS", "20000")) / 1000.0
+    int(os.environ.get("LLM_AUDIT_TIMEOUT_MS", str(AUDIT_TIMEOUT_DEFAULT_MS))) / 1000.0
 )
 
 

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from cio.core.position_review_loop import PositionReviewLoop
 
 logger = logging.getLogger(__name__)
+SEQUENTIAL_LLM_STAGES = 2
 
 
 class Orchestrator:

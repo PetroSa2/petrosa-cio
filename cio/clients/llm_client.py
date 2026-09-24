@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -27,6 +28,18 @@ logger = logging.getLogger(__name__)
 LLM_CALL_TIMEOUT_SECONDS: float = (
     int(os.environ.get("LLM_CALL_TIMEOUT_MS", "7000")) / 1000.0
 )
+LLM_RETRY_ATTEMPTS = 2
+LLM_RETRY_MAX_BACKOFF_SECONDS = 3.0
+
+
+async def _acompletion_with_timeout(litellm_module: Any, **kwargs: Any) -> Any:
+    return await asyncio.wait_for(
+        litellm_module.acompletion(
+            **kwargs,
+            timeout=LLM_CALL_TIMEOUT_SECONDS,
+        ),
+        timeout=LLM_CALL_TIMEOUT_SECONDS,
+    )
 
 
 def _env_bool(name: str, default: bool = True) -> bool:
@@ -649,8 +662,10 @@ class LiteLLMClient(CIO_LLM_Client):
                 retry=retry_if_exception_type(
                     (RateLimitError, ServiceUnavailableError)
                 ),
-                wait=wait_random_exponential(multiplier=1, max=3),
-                stop=stop_after_attempt(2),
+                wait=wait_random_exponential(
+                    multiplier=1, max=LLM_RETRY_MAX_BACKOFF_SECONDS
+                ),
+                stop=stop_after_attempt(LLM_RETRY_ATTEMPTS),
                 before_sleep=lambda retry_state: logger.warning(
                     f"Retrying LLM call (attempt {retry_state.attempt_number})",
                     extra={
@@ -661,10 +676,10 @@ class LiteLLMClient(CIO_LLM_Client):
                 ),
             ):
                 with attempt:
-                    response = await litellm.acompletion(
+                    response = await _acompletion_with_timeout(
+                        litellm,
                         model=routing_primary,
                         api_base=api_base,
-                        timeout=LLM_CALL_TIMEOUT_SECONDS,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": json.dumps(user_context)},
@@ -688,10 +703,10 @@ class LiteLLMClient(CIO_LLM_Client):
             )
 
             try:
-                fallback_response = await litellm.acompletion(
+                fallback_response = await _acompletion_with_timeout(
+                    litellm,
                     model=routing_fallback,
                     api_base=fallback_api_base,
-                    timeout=LLM_CALL_TIMEOUT_SECONDS,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": json.dumps(user_context)},
@@ -749,10 +764,10 @@ class LiteLLMClient(CIO_LLM_Client):
 
         try:
             start_time = time.perf_counter()
-            response = await litellm.acompletion(
+            response = await _acompletion_with_timeout(
+                litellm,
                 model=routing_fallback,
                 api_base=fallback_api_base,
-                timeout=LLM_CALL_TIMEOUT_SECONDS,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(user_context)},
