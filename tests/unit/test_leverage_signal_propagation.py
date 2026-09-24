@@ -36,6 +36,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from petrosa_contracts import Signal  # noqa: E402
+
 from cio.core.leverage_arbiter import arbitrate_leverage  # noqa: E402
 from cio.core.router import OutputRouter  # noqa: E402
 from cio.models import (  # noqa: E402
@@ -57,7 +59,6 @@ from cio.models import (  # noqa: E402
     VolatilityLevel,
 )
 from cio.output.translator import TradeEngineTranslator  # noqa: E402
-from contracts.signal import Signal  # noqa: E402
 
 
 def _make_context(**overrides) -> TriggerContext:
@@ -216,7 +217,12 @@ class TestRouterEndToEndLeveragePropagation:
         assert len(legacy_calls) == 1
         dispatched_payload = json.loads(legacy_calls[0].args[1])
         assert dispatched_payload["leverage"] == 5
-        assert Signal(**dispatched_payload).leverage == 5
+        signal_payload = {
+            key: value
+            for key, value in dispatched_payload.items()
+            if key != "_otel_trace_context"
+        }
+        assert Signal(**signal_payload).leverage == 5
 
     async def test_recommended_leverage_over_ceiling_is_clamped_not_dropped(
         self, monkeypatch
@@ -287,6 +293,7 @@ class TestRouterRegimeLeverageCap:
         assert len(legacy_calls) == 1
         dispatched_payload = json.loads(legacy_calls[0].args[1])
         assert dispatched_payload["leverage"] == 3
+        dispatched_payload.pop("_otel_trace_context", None)
         assert Signal(**dispatched_payload).leverage == 3
 
     async def test_decided_leverage_unclamped_when_within_regime_cap(self, monkeypatch):

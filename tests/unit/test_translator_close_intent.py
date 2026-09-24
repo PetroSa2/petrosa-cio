@@ -28,6 +28,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from petrosa_contracts import Signal  # noqa: E402
+
 from cio.models import (  # noqa: E402
     ActionType,
     ActivationRecommendation,
@@ -47,7 +49,6 @@ from cio.models import (  # noqa: E402
     VolatilityLevel,
 )
 from cio.output.translator import TradeEngineTranslator  # noqa: E402
-from contracts.signal import Signal  # noqa: E402
 
 
 def _make_context(**overrides) -> TriggerContext:

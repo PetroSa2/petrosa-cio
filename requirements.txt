@@ -21,6 +21,7 @@ opentelemetry-sdk>=1.22.0
 
 # Unified OpenTelemetry package for Petrosa services
 petrosa-otel[all]>=1.0.6
+petrosa-contracts>=0.1.0
 
 # Metrics — Prometheus counters for FR66 alert producers (#139, #140)
 prometheus-client>=0.19.0
