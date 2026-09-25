@@ -42,6 +42,37 @@ async def _acompletion_with_timeout(litellm_module: Any, **kwargs: Any) -> Any:
     )
 
 
+def _transient_llm_exceptions() -> tuple[type[BaseException], ...]:
+    from litellm.exceptions import RateLimitError, ServiceUnavailableError
+
+    exceptions: list[type[BaseException]] = [
+        RateLimitError,
+        ServiceUnavailableError,
+        asyncio.TimeoutError,
+    ]
+    try:
+        from litellm.exceptions import (
+            APIConnectionError,
+            BadGatewayError,
+            InternalServerError,
+            Timeout,
+        )
+    except ImportError:
+        pass
+    else:
+        exceptions.extend(
+            [Timeout, APIConnectionError, InternalServerError, BadGatewayError]
+        )
+    return tuple(dict.fromkeys(exceptions))
+
+
+def _describe_exception(exc: BaseException) -> str:
+    detail = str(exc)
+    if not detail:
+        return type(exc).__name__
+    return f"{type(exc).__name__}: {detail}"[:300]
+
+
 def _env_bool(name: str, default: bool = True) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -63,6 +94,23 @@ def _build_routing_model(model: str, api_base: str | None) -> str:
     if model.startswith(prefix):
         return model
     return f"{prefix}{model}"
+
+
+def _resolve_llm_routes() -> tuple[str, str, str | None, str, str, str | None]:
+    primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
+    fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
+    api_base = os.getenv("LLM_API_BASE")
+    fallback_api_base = os.getenv("LLM_FALLBACK_API_BASE", api_base)
+    routing_primary = _build_routing_model(primary_model, api_base)
+    routing_fallback = _build_routing_model(fallback_model, fallback_api_base)
+    return (
+        primary_model,
+        routing_primary,
+        api_base,
+        fallback_model,
+        routing_fallback,
+        fallback_api_base,
+    )
 
 
 def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:
@@ -309,7 +357,7 @@ class CIO_LLM_Client(ABC):
         # 2. Check for transport errors
         if raw.error:
             logger.error(
-                "LLM transport error",
+                f"LLM transport error prompt_id={prompt_id} error={raw.error}",
                 extra={"prompt_id": prompt_id, "error": raw.error},
             )
             try:
@@ -321,7 +369,8 @@ class CIO_LLM_Client(ABC):
             except ImportError:
                 pass
             logger.error(
-                "LLM_PARSE_FAILURE_SKIP",
+                f"LLM_PARSE_FAILURE_SKIP prompt_id={prompt_id} reason=transport_error "
+                f"error={raw.error}",
                 extra={
                     "prompt_id": prompt_id,
                     "reason": "transport_error",
@@ -532,7 +581,7 @@ class CIO_LLM_Client(ABC):
             except ImportError:
                 pass
             logger.error(
-                "LLM_PARSE_FAILURE_SKIP",
+                f"LLM_PARSE_FAILURE_SKIP prompt_id={prompt_id} reason=validation_error",
                 extra={
                     "prompt_id": prompt_id,
                     "reason": "validation_error",
@@ -568,6 +617,20 @@ class LiteLLMClient(CIO_LLM_Client):
         self._failure_count = 0
         self._last_failure_time = 0.0
         self._breaker_open_until = 0.0
+        (
+            primary_model,
+            routing_primary,
+            api_base,
+            _fallback_model,
+            routing_fallback,
+            fallback_api_base,
+        ) = _resolve_llm_routes()
+        if routing_primary == routing_fallback and api_base == fallback_api_base:
+            logger.warning(
+                f"LLM_FALLBACK_DISABLED primary and fallback resolve to the same "
+                f"route model={primary_model} — a primary failure is retried on the "
+                "same route only (petrosa_k8s#893)"
+            )
 
     def _response_format_for_completion(
         self, litellm_module: Any, routing_model: str
@@ -621,7 +684,8 @@ class LiteLLMClient(CIO_LLM_Client):
         circuit breaker, and fallback model. Supports Requesty proxy via api_base.
         """
         import litellm
-        from litellm.exceptions import RateLimitError, ServiceUnavailableError
+
+        transient_exceptions = _transient_llm_exceptions()
 
         # 1. Check Circuit Breaker
         breaker_error = self._check_circuit_breaker()
@@ -637,16 +701,14 @@ class LiteLLMClient(CIO_LLM_Client):
                 timestamp=datetime.now(UTC),
             )
 
-        primary_model = os.getenv("LLM_MODEL", DEFAULT_PRIMARY_MODEL)
-        fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
-        api_base = os.getenv("LLM_API_BASE")
-        # LLM_FALLBACK_API_BASE allows the fallback to bypass a broken proxy
-        # (e.g. Requesty down) by routing directly to a different provider endpoint.
-        # Defaults to the same api_base so existing deployments are unaffected.
-        fallback_api_base = os.getenv("LLM_FALLBACK_API_BASE", api_base)
-
-        routing_primary = _build_routing_model(primary_model, api_base)
-        routing_fallback = _build_routing_model(fallback_model, fallback_api_base)
+        (
+            primary_model,
+            routing_primary,
+            api_base,
+            fallback_model,
+            routing_fallback,
+            fallback_api_base,
+        ) = _resolve_llm_routes()
 
         start_time = time.perf_counter()
 
@@ -659,19 +721,20 @@ class LiteLLMClient(CIO_LLM_Client):
         # actively fighting — that fail-safe design.
         try:
             async for attempt in AsyncRetrying(
-                retry=retry_if_exception_type(
-                    (RateLimitError, ServiceUnavailableError)
-                ),
+                retry=retry_if_exception_type(transient_exceptions),
                 wait=wait_random_exponential(
                     multiplier=1, max=LLM_RETRY_MAX_BACKOFF_SECONDS
                 ),
                 stop=stop_after_attempt(LLM_RETRY_ATTEMPTS),
+                reraise=True,
                 before_sleep=lambda retry_state: logger.warning(
                     f"Retrying LLM call (attempt {retry_state.attempt_number})",
                     extra={
                         "prompt_id": prompt_id,
                         "model": primary_model,
-                        "exception": str(retry_state.outcome.exception()),
+                        "exception": _describe_exception(
+                            retry_state.outcome.exception()
+                        ),
                     },
                 ),
             ):
@@ -700,8 +763,10 @@ class LiteLLMClient(CIO_LLM_Client):
             if routing_primary == routing_fallback and api_base == fallback_api_base:
                 self._record_failure()
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
-                logger.error(
-                    "LLM fallback skipped because it resolves to the failed primary route",
+                logger.warning(
+                    "LLM fallback skipped because it resolves to the failed primary "
+                    f"route prompt_id={prompt_id} model={primary_model} "
+                    f"primary_error={_describe_exception(primary_error)}",
                     extra={
                         "prompt_id": prompt_id,
                         "model": primary_model,
@@ -712,7 +777,7 @@ class LiteLLMClient(CIO_LLM_Client):
                     prompt_id=prompt_id,
                     content="",
                     error=(
-                        f"Primary: {str(primary_error)} | "
+                        f"Primary: {_describe_exception(primary_error)} | "
                         "Fallback skipped: duplicate route"
                     ),
                     model=fallback_model,
@@ -724,7 +789,10 @@ class LiteLLMClient(CIO_LLM_Client):
 
             logger.error(
                 f"Primary LLM failed ({primary_model}), attempting fallback ({fallback_model})",
-                extra={"prompt_id": prompt_id, "error": str(primary_error)},
+                extra={
+                    "prompt_id": prompt_id,
+                    "error": _describe_exception(primary_error),
+                },
             )
 
             try:
@@ -754,13 +822,17 @@ class LiteLLMClient(CIO_LLM_Client):
                 self._record_failure()
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
                 logger.error(
-                    f"LLM Fallback failed for {prompt_id}: {str(fallback_error)}"
+                    f"LLM Fallback failed for {prompt_id}: "
+                    f"{_describe_exception(fallback_error)}"
                 )
 
                 return RawLLMResponse(
                     prompt_id=prompt_id,
                     content="",
-                    error=f"Primary: {str(primary_error)} | Fallback: {str(fallback_error)}",
+                    error=(
+                        f"Primary: {_describe_exception(primary_error)} | "
+                        f"Fallback: {_describe_exception(fallback_error)}"
+                    ),
                     model=fallback_model,
                     input_tokens=0,
                     output_tokens=0,

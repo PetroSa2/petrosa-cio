@@ -46,6 +46,7 @@ def test_llm_budget_fits_inside_audit_umbrella():
 async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     monkeypatch.setattr(enforcer_module, "AUDIT_TIMEOUT_SECONDS", 0.5)
     monkeypatch.setattr(llm_client_module, "LLM_CALL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0.01)
 
     async def slow_completion(**kwargs):
         await asyncio.sleep(kwargs["timeout"] * 10)
@@ -75,4 +76,4 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
 
     assert decision.action == ActionType.RETRY_SAFE
     assert elapsed < enforcer_module.AUDIT_TIMEOUT_SECONDS
-    assert completion.await_count == 2
+    assert completion.await_count == 3
