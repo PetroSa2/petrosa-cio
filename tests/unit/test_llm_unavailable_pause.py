@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -213,6 +213,31 @@ async def test_upstream_outage_pauses_without_classifier_call():
     assert ACTION_PROMPT_ID not in client.calls
 
 
+@pytest.mark.parametrize("failed_prompt", [REGIME_PROMPT_ID, STRATEGY_PROMPT_ID])
+@pytest.mark.asyncio
+async def test_each_upstream_outage_skips_classifier(failed_prompt):
+    client = ScriptedClient({failed_prompt: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+
+    decision = await orchestrator.run(_make_context())
+
+    assert decision.action == ActionType.PAUSE_STRATEGY
+    assert failed_prompt in decision.justification
+    assert ACTION_PROMPT_ID not in client.calls
+
+
+@pytest.mark.asyncio
+async def test_both_upstream_outages_list_both_stages():
+    client = ScriptedClient(
+        {REGIME_PROMPT_ID: "transport", STRATEGY_PROMPT_ID: "transport"}
+    )
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+
+    decision = await orchestrator.run(_make_context())
+
+    assert f"{REGIME_PROMPT_ID},{STRATEGY_PROMPT_ID}" in decision.justification
+
+
 @pytest.mark.asyncio
 async def test_safe_default_results_are_not_cached():
     client = ScriptedClient({STRATEGY_PROMPT_ID: "transport"})
@@ -224,6 +249,88 @@ async def test_safe_default_results_are_not_cached():
     keys = [call.args[0] for call in cache.set.call_args_list]
     assert any(key.startswith("regime:") for key in keys)
     assert not any(key.startswith("strategy:") for key in keys)
+
+
+@pytest.mark.parametrize("strategy_id", ["unknown", ""])
+@pytest.mark.asyncio
+async def test_unresolvable_strategy_id_outage_skips(strategy_id, caplog):
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+    context = _make_context().model_copy(update={"strategy_id": strategy_id})
+
+    with caplog.at_level("ERROR"):
+        decision = await orchestrator.run(context)
+
+    assert decision.action == ActionType.SKIP
+    assert decision.rejection_source == RejectionSource.LLM_UNAVAILABLE
+    assert any(
+        record.getMessage().startswith("LLM_UNAVAILABLE_UNRESOLVABLE_STRATEGY")
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_metric_emitted():
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+    metric = MagicMock()
+
+    with patch("cio.core.metrics.LLM_UNAVAILABLE_DECISIONS", metric):
+        await orchestrator.run(_make_context())
+
+    metric.add.assert_called_once_with(
+        1,
+        {"stage": ACTION_PROMPT_ID, "action": ActionType.PAUSE_STRATEGY.value},
+    )
+
+
+@pytest.mark.asyncio
+async def test_hard_block_with_classifier_outage_stays_block():
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+    context = _make_context().model_copy(update={"global_drawdown_pct": 0.5})
+
+    decision = await orchestrator.run(context)
+
+    assert decision.action == ActionType.BLOCK
+    assert decision.rejection_source is None
+
+
+@pytest.mark.asyncio
+async def test_deterministic_bypass_is_not_an_outage(monkeypatch):
+    monkeypatch.setenv("NURSE_USE_LLM_REASONING", "false")
+    client = ScriptedClient(
+        {
+            REGIME_PROMPT_ID: "transport",
+            STRATEGY_PROMPT_ID: "transport",
+            ACTION_PROMPT_ID: "transport",
+        }
+    )
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+
+    decision = await orchestrator.run(_make_context())
+
+    assert decision.action == ActionType.EXECUTE
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_pause_log_line_in_message_text(caplog):
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+
+    with caplog.at_level("WARNING"):
+        await orchestrator.run(_make_context())
+
+    assert [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("LLM_UNAVAILABLE_PAUSE")
+    ] == [
+        "LLM_UNAVAILABLE_PAUSE strategy_id=test_strat "
+        "stages=PETROSA_PROMPT_ACTION_CLASSIFIER "
+        "correlation_id=test-persona-concurrency"
+    ]
 
 
 @pytest.mark.asyncio
