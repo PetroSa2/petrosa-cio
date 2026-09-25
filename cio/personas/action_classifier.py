@@ -15,6 +15,7 @@ from cio.models import (
     StrategyResult,
     TriggerContext,
 )
+from cio.models.decision import is_safe_default
 from cio.prompts.loader import select_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,17 @@ class ActionClassifier:
             user_context=user_context,
             response_model=ActionResult,
         )
+
+        if code_result.hard_blocked is not True and is_safe_default(
+            PROMPT_ID, action_result
+        ):
+            return DecisionAssembler.assemble_llm_unavailable(
+                context=context,
+                code_result=code_result,
+                regime_result=regime_result,
+                strategy_result=strategy_result,
+                failed_stages=[PROMPT_ID],
+            )
 
         # Assembles the raw action from LLM into the final full DecisionResult
         return DecisionAssembler.assemble(

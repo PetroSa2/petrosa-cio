@@ -28,9 +28,12 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.decision import is_safe_default
 from cio.models.enums import RejectionSource
 from cio.personas.action_classifier import ActionClassifier
+from cio.personas.regime_analyst import PROMPT_ID as REGIME_PROMPT_ID
 from cio.personas.regime_analyst import RegimeAnalyst
+from cio.personas.strategy_assessor import PROMPT_ID as STRATEGY_PROMPT_ID
 from cio.personas.strategy_assessor import StrategyAssessor
 
 if TYPE_CHECKING:
@@ -399,7 +402,7 @@ class Orchestrator:
                     extra={"correlation_id": context.correlation_id},
                 )
                 result = await self.regime_analyst.classify(context)
-                if self.cache:
+                if self.cache and not is_safe_default(REGIME_PROMPT_ID, result):
                     await self.cache.set(
                         f"regime:{context.strategy_id}",
                         result.model_dump_json(),
@@ -415,7 +418,7 @@ class Orchestrator:
                     extra={"correlation_id": context.correlation_id},
                 )
                 result = await self.strategy_assessor.assess(context)
-                if self.cache:
+                if self.cache and not is_safe_default(STRATEGY_PROMPT_ID, result):
                     await self.cache.set(
                         f"strategy:{context.strategy_id}",
                         result.model_dump_json(),
@@ -426,6 +429,26 @@ class Orchestrator:
             regime, strategy = await asyncio.gather(
                 _resolve_regime(), _resolve_strategy()
             )
+
+            failed = [
+                prompt_id
+                for prompt_id, result in (
+                    (REGIME_PROMPT_ID, regime),
+                    (STRATEGY_PROMPT_ID, strategy),
+                )
+                if is_safe_default(prompt_id, result)
+            ]
+            if failed:
+                decision = DecisionAssembler.assemble_llm_unavailable(
+                    context=context,
+                    code_result=code_result,
+                    regime_result=regime,
+                    strategy_result=strategy,
+                    failed_stages=failed,
+                )
+                await self._check_spend_ceiling(context.correlation_id)
+                self._emit_decision_action(decision.action)
+                return decision
 
             # 4. ACTION CLASSIFICATION
             logger.info(

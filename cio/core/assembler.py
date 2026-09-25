@@ -15,6 +15,7 @@ from cio.models import (
     StrategyResult,
     TriggerContext,
 )
+from cio.models.decision import LLM_UNAVAILABLE_TRACE
 from cio.models.enums import RejectionSource
 
 logger = logging.getLogger(__name__)
@@ -170,3 +171,60 @@ class DecisionAssembler:
         )
 
         return decision
+
+    @staticmethod
+    def assemble_llm_unavailable(
+        context: TriggerContext,
+        code_result: CodeEngineResult,
+        regime_result: RegimeResult,
+        strategy_result: StrategyResult,
+        failed_stages: list[str],
+    ) -> DecisionResult:
+        stages = ",".join(failed_stages)
+        resolvable = bool(context.strategy_id) and context.strategy_id != "unknown"
+
+        if resolvable:
+            action = ActionType.PAUSE_STRATEGY
+            justification = (
+                f"LLM_UNAVAILABLE: {stages} fell back to SAFE_DEFAULTS; "
+                "pausing strategy (policy: pause on LLM outage)"
+            )
+            logger.warning(
+                f"LLM_UNAVAILABLE_PAUSE strategy_id={context.strategy_id} "
+                f"stages={stages} correlation_id={context.correlation_id}"
+            )
+        else:
+            action = ActionType.SKIP
+            justification = (
+                f"LLM_UNAVAILABLE: {stages} fell back to SAFE_DEFAULTS; "
+                "strategy_id unresolvable, skipping signal"
+            )
+            logger.error(
+                f"LLM_UNAVAILABLE_UNRESOLVABLE_STRATEGY "
+                f"strategy_id={context.strategy_id!r} stages={stages} "
+                f"correlation_id={context.correlation_id}"
+            )
+
+        try:
+            from cio.core.metrics import LLM_UNAVAILABLE_DECISIONS
+
+            LLM_UNAVAILABLE_DECISIONS.add(1, {"stage": stages, "action": action.value})
+        except ImportError:
+            pass
+
+        return DecisionResult(
+            hard_blocked=False,
+            ev_passes=code_result.ev_unavailable is False,
+            cost_viable=False,
+            regime_confidence=regime_result.regime_confidence,
+            regime_fit=strategy_result.regime_fit,
+            strategy_health=strategy_result.health,
+            activation_recommendation=ActivationRecommendation.PAUSE,
+            computed_position_size_usd=0.0,
+            leverage=code_result.leverage,
+            risk_warnings=code_result.risk_warnings,
+            action=action,
+            justification=justification,
+            thought_trace=LLM_UNAVAILABLE_TRACE,
+            rejection_source=RejectionSource.LLM_UNAVAILABLE,
+        )

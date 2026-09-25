@@ -144,3 +144,11 @@ CRITICAL_FAILURE_RESULT = DecisionResult(
     justification="CRITICAL_FAILURE: System error or unhandled exception. Safe-failing to FAIL_SAFE.",
     thought_trace="CRITICAL_FAILURE_ENFORCEMENT",
 )
+
+LLM_UNAVAILABLE_TRACE = "LLM_UNAVAILABLE"
+
+
+def is_safe_default(prompt_id: str, result: BaseModel) -> bool:
+    """Return whether ``result`` is the identity of the outage fallback."""
+    fallback = SAFE_DEFAULTS.get(prompt_id)
+    return fallback is not None and result is fallback

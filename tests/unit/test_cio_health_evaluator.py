@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover — py310 compatibility
 
 from cio.core.health_evaluator import (
     DECISION_AUDIT_PATTERN,
+    FALLBACK_TRACE_MARKERS,
     HEALTHY,
     INTENT_PATTERN,
     SIGNAL_PATTERN,
@@ -101,6 +102,22 @@ async def test_missing_reasoning_context_yields_unhealthy(evaluator):
     verdict, reason = evaluator.evaluate()
     assert verdict == UNHEALTHY
     assert "reasoning-context" in reason or "fallback" in reason
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_trace_counts_as_missing_context(evaluator):
+    for i in range(3):
+        await _decision(
+            evaluator,
+            action="pause_strategy",
+            thought_trace="LLM_UNAVAILABLE",
+            decision_id=f"llm-{i}",
+        )
+    await _decision(evaluator, action="execute", thought_trace="ok", decision_id="ok")
+
+    verdict, _ = evaluator.evaluate()
+    assert verdict == UNHEALTHY
+    assert "LLM_UNAVAILABLE" in FALLBACK_TRACE_MARKERS
 
 
 # ---------------------------------------------------------------------------
