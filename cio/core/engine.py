@@ -145,7 +145,10 @@ class CodeEngine:
         result.leverage = min(context.strategy_defaults.leverage, lev_cap)
 
         # 5. EV CALCULATION
-        win_rate = context.strategy_stats.win_rate
+        stats = context.strategy_stats
+        win_rate = (
+            None if stats.history_status == "insufficient_history" else stats.win_rate
+        )
         if win_rate is None:
             result.ev_unavailable = True
         else:
