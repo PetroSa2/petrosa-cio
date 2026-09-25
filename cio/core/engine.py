@@ -56,6 +56,28 @@ class CodeEngine:
         result = CodeEngineResult()
 
         # 1. RISK GATES
+        pre_decision = context.pre_decision_context
+        if pre_decision is not None and pre_decision.portfolio_state_available is False:
+            gap_reason = next(
+                (gap.reason for gap in pre_decision.gaps if gap.surface == "portfolio"),
+                "unknown",
+            )
+            result.hard_blocked = True
+            result.block_context_fallback = True
+            result.block_reason = (
+                "PORTFOLIO_CONTEXT_UNAVAILABLE: tradeengine /state fetch failed "
+                f"({gap_reason}); risk limits could not be evaluated. "
+                "Fail-safe BLOCK, not a risk breach."
+            )
+            RISK_GATE_CONTEXT_FALLBACK.add(1)
+            logger.warning(
+                "PORTFOLIO_CONTEXT_UNAVAILABLE: risk gate fail-safe BLOCK on "
+                "context-fetch FALLBACK defaults (NOT a real risk breach — "
+                "tradeengine /state fetch failed) reason=%s",
+                gap_reason,
+            )
+            return result
+
         # Hard block if drawdown, global orders, or symbol orders exceed limits
         if context.global_drawdown_pct >= context.risk_limits.max_drawdown_pct:
             result.hard_blocked = True
@@ -77,43 +99,15 @@ class CodeEngine:
             )
 
         if result.hard_blocked:
-            # P1.4-AC2 (#132) fallback provenance (#172): the portfolio/risk
-            # surface's *_available flag tells us whether global_drawdown_pct
-            # / open_orders_* / risk_limits came from a live tradeengine
-            # /state response or from ContextBuilder's conservative safe
-            # defaults (returned when the fetch itself failed). A block
-            # driven by fallback defaults is a context-fetch outage, not a
-            # real risk breach — conflating the two caused #172 (repeated
-            # misdiagnosis of "drawdown limit 0.00%" as a real risk state).
-            pre_decision = context.pre_decision_context
-            portfolio_available = (
-                pre_decision.portfolio_state_available
-                if pre_decision is not None
-                else True
+            RISK_GATE_REAL_BREACH.add(1)
+            logger.warning(
+                "Risk gate triggered (live portfolio/risk data)",
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "block_reason": result.block_reason,
+                    "block_context_fallback": False,
+                },
             )
-            result.block_context_fallback = not portfolio_available
-            if result.block_context_fallback:
-                RISK_GATE_CONTEXT_FALLBACK.add(1)
-                logger.warning(
-                    "Risk gate triggered by context-fetch FALLBACK defaults "
-                    "(NOT a real risk breach — tradeengine /state fetch "
-                    "failed; see #172)",
-                    extra={
-                        "correlation_id": context.correlation_id,
-                        "block_reason": result.block_reason,
-                        "block_context_fallback": True,
-                    },
-                )
-            else:
-                RISK_GATE_REAL_BREACH.add(1)
-                logger.warning(
-                    "Risk gate triggered (live portfolio/risk data)",
-                    extra={
-                        "correlation_id": context.correlation_id,
-                        "block_reason": result.block_reason,
-                        "block_context_fallback": False,
-                    },
-                )
             return result
 
         # 2. REGIME HARD BLOCKS (Fix 4)

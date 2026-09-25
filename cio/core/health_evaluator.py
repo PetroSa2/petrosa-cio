@@ -86,8 +86,10 @@ FALLBACK_TRACE_MARKERS: frozenset[str] = frozenset(
         "CRITICAL_FAILURE_ENFORCEMENT",
         "TIMEOUT_ENFORCEMENT",
         "DETERMINISTIC_BYPASS",
+        "PORTFOLIO_CONTEXT_UNAVAILABLE",
     }
 )
+PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE = "PORTFOLIO_CONTEXT_UNAVAILABLE"
 
 
 @dataclass(slots=True)
@@ -332,6 +334,23 @@ class CIOHealthEvaluator:
             return UNKNOWN, "no recent CIO decisions observed in window"
 
         total = len(decisions)
+        portfolio_unavailable = sum(
+            1
+            for d in decisions
+            if d.thought_trace == PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE
+        )
+        portfolio_unavailable_fraction = portfolio_unavailable / total
+        if portfolio_unavailable_fraction > self._missing_context_threshold:
+            pct = round(portfolio_unavailable_fraction * 100)
+            return (
+                UNHEALTHY,
+                (
+                    f"portfolio context unavailable on {pct}% of recent decisions "
+                    f"({portfolio_unavailable}/{total}) — tradeengine /state fetch "
+                    "failing; BLOCKs are fail-safe, not a risk breach"
+                ),
+            )
+
         missing_context = sum(
             1
             for d in decisions

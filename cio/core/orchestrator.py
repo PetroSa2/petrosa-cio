@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from cio.clients.factory import ClientFactory
+from cio.core.assembler import DecisionAssembler
 from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
@@ -292,6 +293,25 @@ class Orchestrator:
                             context.strategy_id,
                             context.position_id or context.strategy_id,
                         )
+
+            if (
+                code_result.hard_blocked is True
+                and code_result.block_context_fallback is True
+            ):
+                logger.warning(
+                    f"⛔ HARD BLOCK (PORTFOLIO_CONTEXT_UNAVAILABLE) | "
+                    f"Reason: {code_result.block_reason} | skipping "
+                    "Action Classifier LLM call",
+                    extra={"correlation_id": context.correlation_id},
+                )
+                _fallback_decision = DecisionAssembler.assemble(
+                    context=context,
+                    code_result=code_result,
+                    regime_result=bypass_regime,
+                    strategy_result=bypass_strategy,
+                )
+                self._emit_decision_action(_fallback_decision.action)
+                return _fallback_decision
 
             if code_result.hard_blocked:
                 # Bypassing persona analysis for hard blocks

@@ -3,16 +3,22 @@ from datetime import UTC, datetime
 
 from cio.models import (
     ActionType,
+    ActivationRecommendation,
     AppliedParamChange,
     CodeEngineResult,
+    ConfidenceLevel,
     DecisionResult,
+    HealthStatus,
     ParamChangeDirection,
+    RegimeFit,
     RegimeResult,
     StrategyResult,
     TriggerContext,
 )
+from cio.models.enums import RejectionSource
 
 logger = logging.getLogger(__name__)
+PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE = "PORTFOLIO_CONTEXT_UNAVAILABLE"
 
 
 class DecisionAssembler:
@@ -41,6 +47,29 @@ class DecisionAssembler:
 
         # 1. HARD BLOCK PASSTHROUGH
         if code_result.hard_blocked:
+            if code_result.block_context_fallback is True:
+                logger.info(
+                    "Final decision: BLOCK (PORTFOLIO_CONTEXT_UNAVAILABLE)",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "reason": code_result.block_reason,
+                    },
+                )
+                return DecisionResult(
+                    hard_blocked=True,
+                    hard_block_reason=code_result.block_reason,
+                    ev_passes=False,
+                    cost_viable=False,
+                    regime_confidence=ConfidenceLevel.LOW,
+                    regime_fit=RegimeFit.NEUTRAL,
+                    strategy_health=HealthStatus.HEALTHY,
+                    activation_recommendation=ActivationRecommendation.RUN,
+                    computed_position_size_usd=0.0,
+                    action=ActionType.BLOCK,
+                    justification=code_result.block_reason,
+                    thought_trace=PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE,
+                    rejection_source=RejectionSource.PORTFOLIO_CONTEXT_UNAVAILABLE,
+                )
             logger.info(
                 "Final decision: BLOCK",
                 extra={

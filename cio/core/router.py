@@ -711,6 +711,12 @@ class OutputRouter:
             "action": action.value,
             "thought_trace": decision.thought_trace,
             "justification": decision.justification,
+            "rejection_source": (
+                decision.rejection_source.value
+                if decision.rejection_source is not None
+                else None
+            ),
+            "hard_block_reason": decision.hard_block_reason,
         }
         if authority_was_disabled:
             audit_copy_payload["authority_fallback_from"] = original_action.value
