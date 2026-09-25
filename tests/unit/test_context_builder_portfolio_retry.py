@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
+from cio.core import context_builder as context_builder_module
 from cio.core.context_builder import ContextBuilder
 from cio.models import ContextGap
 
@@ -48,10 +49,11 @@ _PORTFOLIO_SUCCESS_PAYLOAD = {
 }
 
 
-def _make_builder() -> ContextBuilder:
+def _make_builder(clock=None) -> ContextBuilder:
     return ContextBuilder(
         data_manager_url="http://dm",
         tradeengine_url="http://te",
+        clock=clock,
     )
 
 
@@ -186,6 +188,90 @@ async def test_without_gaps_collector_preserves_legacy_contract():
     )
     assert portfolio.open_positions_count == 999
     assert risk.max_orders_global == 0
+    assert env_stats["open_orders_global"] == 999
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_recent_cache_is_used_after_connect_error(monkeypatch, caplog):
+    monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
+    now = [100.0]
+    builder = _make_builder(clock=lambda: now[0])
+    builder.client.get = AsyncMock(
+        side_effect=[
+            _success_response(),
+            httpx.ConnectError("All connection attempts failed"),
+        ]
+    )
+
+    await builder._fetch_portfolio_and_risk("BTCUSDT", "cid-cache-1")
+    now[0] = 101.5
+    gaps: list[ContextGap] = []
+    availability = {"portfolio": True}
+    portfolio, risk, env_stats = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-cache-2", gaps=gaps, availability=availability
+    )
+
+    assert portfolio.gross_exposure == 0.2
+    assert risk.max_orders_global == 50
+    assert env_stats["available_capital_usd"] == 5000.0
+    assert [gap.reason for gap in gaps] == ["portfolio_state_stale_cache"]
+    assert availability["portfolio"] is False
+    assert any(
+        "PORTFOLIO_FETCH_STALE_CACHE_USED age_s=1.500" in r.message
+        for r in caplog.records
+    )
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_expired_cache_keeps_fail_closed_fallback(monkeypatch):
+    monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
+    now = [100.0]
+    builder = _make_builder(clock=lambda: now[0])
+    builder.client.get = AsyncMock(
+        side_effect=[
+            _success_response(),
+            httpx.ConnectError("All connection attempts failed"),
+        ]
+    )
+
+    await builder._fetch_portfolio_and_risk("BTCUSDT", "cid-expired-1")
+    now[0] = 220.0
+    portfolio, risk, env_stats = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-expired-2"
+    )
+
+    assert portfolio.gross_exposure == 1.0
+    assert portfolio.open_positions_count == 999
+    assert risk.max_orders_global == 0
+    assert env_stats["open_orders_global"] == 999
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_cache_is_scoped_per_symbol(monkeypatch):
+    monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
+    now = [100.0]
+    builder = _make_builder(clock=lambda: now[0])
+    builder.client.get = AsyncMock(
+        side_effect=[
+            _success_response(),
+            httpx.ConnectError("All connection attempts failed"),
+        ]
+    )
+
+    await builder._fetch_portfolio_and_risk("BTCUSDT", "cid-symbol-1")
+    now[0] = 101.0
+    portfolio, _risk, env_stats = await builder._fetch_portfolio_and_risk(
+        "ETHUSDT", "cid-symbol-2"
+    )
+
+    assert portfolio.gross_exposure == 1.0
+    assert portfolio.open_positions_count == 999
     assert env_stats["open_orders_global"] == 999
 
     await builder.close()
