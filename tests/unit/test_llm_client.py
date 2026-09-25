@@ -4,12 +4,14 @@ Unit tests for LiteLLMClient fixes:
   - AC1: response_format=json_object only when supported/configured
 """
 
+import asyncio
 import json
 import logging
 import os
 import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -278,7 +280,7 @@ def _mock_litellm_response(content: str, model: str = "openai/fallback"):
 def _mock_litellm_runtime(
     *,
     acompletion_return: MagicMock | None = None,
-    acompletion_side_effect: Exception | None = None,
+    acompletion_side_effect: Any = None,
     supported_params: list[str] | None = None,
 ):
     fake_litellm = SimpleNamespace(
@@ -295,6 +297,102 @@ def _mock_litellm_runtime(
         sys.modules,
         {"litellm": fake_litellm, "litellm.exceptions": fake_exceptions},
     ), fake_litellm
+
+
+def test_transient_llm_exceptions_includes_timeouts_and_5xx():
+    import litellm.exceptions as litellm_exceptions
+
+    transient = llm_client_module._transient_llm_exceptions()
+
+    assert asyncio.TimeoutError in transient
+    assert litellm_exceptions.Timeout in transient
+    assert litellm_exceptions.APIConnectionError in transient
+    assert litellm_exceptions.InternalServerError in transient
+    assert litellm_exceptions.BadGatewayError in transient
+    assert litellm_exceptions.RateLimitError in transient
+    assert litellm_exceptions.ServiceUnavailableError in transient
+
+
+@pytest.mark.asyncio
+async def test_primary_timeout_retried_once_on_duplicate_route(monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=TimeoutError()
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert fake_litellm.acompletion.await_count == 2
+    assert result.error is not None
+    assert "Fallback skipped: duplicate route" in result.error
+    assert "TimeoutError" in result.error
+
+
+@pytest.mark.asyncio
+async def test_primary_timeout_then_success_returns_response(monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[
+            TimeoutError(),
+            _mock_litellm_response('{"ok": true}'),
+        ]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert result.content == '{"ok": true}'
+    assert fake_litellm.acompletion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_non_transient_primary_error_not_retried(monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=ValueError("bad request")
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert fake_litellm.acompletion.await_count == 1
+    assert result.error is not None
+    assert "ValueError: bad request" in result.error
 
 
 @pytest.mark.asyncio
@@ -816,7 +914,83 @@ async def test_complete_with_schema_transport_error_emits_fallback_skip(caplog):
         1,
         {"prompt_id": "PETROSA_PROMPT_ACTION_CLASSIFIER", "reason": "transport_error"},
     )
-    assert "LLM_PARSE_FAILURE_SKIP" in caplog.text
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        "LLM transport error prompt_id=PETROSA_PROMPT_ACTION_CLASSIFIER "
+        "error=upstream_timeout"
+    ) in messages
+    assert any(
+        message.startswith(
+            "LLM_PARSE_FAILURE_SKIP prompt_id=PETROSA_PROMPT_ACTION_CLASSIFIER "
+            "reason=transport_error"
+        )
+        for message in messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_route_skip_logged_as_warning_with_primary_error(
+    caplog, monkeypatch
+):
+    caplog.set_level(logging.WARNING, logger="cio.clients.llm_client")
+    client = LiteLLMClient()
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=TimeoutError()
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        await client.complete("test", "system", {})
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.getMessage().startswith(
+            "LLM fallback skipped because it resolves to the failed primary route"
+        )
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert "prompt_id=test" in warnings[0].getMessage()
+    assert "primary_error=TimeoutError" in warnings[0].getMessage()
+
+
+def test_init_warns_fallback_disabled_on_duplicate_route(caplog, monkeypatch):
+    caplog.set_level(logging.WARNING, logger="cio.clients.llm_client")
+    monkeypatch.setenv("LLM_MODEL", "meta/llama-3.2-11b-vision-instruct")
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "meta/llama-3.2-11b-vision-instruct")
+    monkeypatch.setenv("LLM_API_BASE", "https://inference.example/v1")
+
+    LiteLLMClient()
+
+    warnings = [
+        record
+        for record in caplog.records
+        if "LLM_FALLBACK_DISABLED" in record.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+def test_init_no_fallback_disabled_warning_on_distinct_routes(caplog, monkeypatch):
+    caplog.set_level(logging.WARNING, logger="cio.clients.llm_client")
+    monkeypatch.setenv("LLM_MODEL", "meta/llama-3.2-11b-vision-instruct")
+    monkeypatch.setenv("LLM_FALLBACK_MODEL", "openai/gpt-4o-mini")
+
+    LiteLLMClient()
+
+    assert not any(
+        "LLM_FALLBACK_DISABLED" in record.getMessage() for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio
@@ -846,6 +1020,30 @@ async def test_complete_skips_duplicate_primary_and_fallback_route():
         call.kwargs["model"] == "openai/meta/llama-3.2-11b-vision-instruct"
         for call in fake_litellm.acompletion.await_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_record_failure_called_once_per_failed_complete(monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=TimeoutError()
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_FALLBACK_MODEL": "meta/llama-3.2-11b-vision-instruct",
+                "LLM_API_BASE": "https://inference.example/v1",
+            },
+        ),
+        litellm_patch,
+    ):
+        await client.complete("test", "system", {})
+
+    assert client._failure_count == 1
 
 
 @pytest.mark.asyncio
