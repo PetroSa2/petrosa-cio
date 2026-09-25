@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import os
+import time
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -66,6 +68,7 @@ _PORTFOLIO_FETCH_MAX_RETRIES = int(os.getenv("CIO_PORTFOLIO_FETCH_RETRIES", "2")
 _PORTFOLIO_FETCH_RETRY_BACKOFF_S = float(
     os.getenv("CIO_PORTFOLIO_FETCH_RETRY_BACKOFF_S", "0.25")
 )
+_PORTFOLIO_STALE_MAX_S = float(os.getenv("CIO_PORTFOLIO_STALE_MAX_S", "120"))
 
 _SIGNAL_STRENGTH_TO_TREND = {
     "weak": 0.25,
@@ -96,10 +99,15 @@ class ContextBuilder:
         tradeengine_url: str,
         vector_client: VectorClientProtocol | None = None,
         evaluator_subscriber: Any | None = None,
+        clock: Callable[[], float] | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
         self.vector_client = vector_client
+        self._clock = clock or time.monotonic
+        self._portfolio_cache: dict[
+            str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
+        ] = {}
         # P1.4-AC1 (#131): wired in by main.py at startup so the
         # PreDecisionContext bundle can read live evaluator verdicts
         # without coupling to NATS in this layer. ``None`` is the legacy
@@ -838,6 +846,12 @@ class ContextBuilder:
                 portfolio = PortfolioSummary(**data["portfolio"])
                 risk = RiskLimits(**data["risk_limits"])
                 env_stats = data["env_stats"]
+                self._portfolio_cache[symbol] = (
+                    self._clock(),
+                    portfolio.model_copy(deep=True),
+                    risk.model_copy(deep=True),
+                    dict(env_stats),
+                )
 
                 return portfolio, risk, env_stats
             except httpx.ConnectError as e:
@@ -860,6 +874,33 @@ class ContextBuilder:
             except Exception as e:
                 last_exc = e
                 break
+
+        if isinstance(last_exc, httpx.ConnectError):
+            cached = self._portfolio_cache.get(symbol)
+            if cached is not None:
+                fetched_at, portfolio, risk, env_stats = cached
+                age_s = self._clock() - fetched_at
+                if 0 <= age_s < _PORTFOLIO_STALE_MAX_S:
+                    logger.warning(
+                        "PORTFOLIO_FETCH_STALE_CACHE_USED age_s=%.3f symbol=%s",
+                        age_s,
+                        symbol,
+                        extra={"correlation_id": correlation_id},
+                    )
+                    if gaps is not None:
+                        gaps.append(
+                            ContextGap(
+                                surface="portfolio",
+                                reason="portfolio_state_stale_cache",
+                            )
+                        )
+                    if availability is not None:
+                        availability["portfolio"] = False
+                    return (
+                        portfolio.model_copy(deep=True),
+                        risk.model_copy(deep=True),
+                        dict(env_stats),
+                    )
 
         e = last_exc
         logger.error(
