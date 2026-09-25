@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 try:
     from datetime import UTC
@@ -26,7 +26,9 @@ class StrategyStats(BaseModel):
     """
     Historical and real-time performance metrics for a strategy.
     All fields are Optional to support new strategies with no trading history.
-    When all fields are None, the Code Engine defaults to HealthStatus.HEALTHY.
+    ``history_status`` distinguishes computed metrics, insufficient closed-trade
+    history, and unavailable performance data. ``None`` preserves the legacy
+    behavior for callers that construct this model directly.
     """
 
     win_rate: float | None = None
@@ -35,6 +37,9 @@ class StrategyStats(BaseModel):
     win_rate_delta: float | None = None
     consecutive_losses: int | None = None
     recent_pnl_trend: PnlTrend | None = None
+    history_status: (
+        Literal["computed", "insufficient_history", "unavailable"] | None
+    ) = None
 
 
 class PortfolioSummary(BaseModel):

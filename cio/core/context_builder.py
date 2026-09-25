@@ -55,6 +55,35 @@ _DEFAULT_VOLATILITY_PERCENTILE = 0.5
 _DEFAULT_TREND_STRENGTH = 0.0
 _DEFAULT_PRICE_ACTION = "Neutral"
 
+DM_PERFORMANCE_COMPUTED_SOURCE = "data-manager-pnl-calculator"
+
+
+def classify_strategy_history(raw: dict) -> str:
+    """Classify the completeness and provenance of performance history."""
+    stats = raw.get("stats")
+    if not isinstance(stats, dict):
+        return "unavailable"
+
+    required_fields = ("win_rate", "win_rate_delta", "consecutive_losses")
+    if all(stats.get(field) is not None for field in required_fields):
+        return "computed"
+
+    metadata = raw.get("metadata")
+    fills_replayed = (
+        metadata.get("fills_replayed") if isinstance(metadata, dict) else None
+    )
+    if (
+        isinstance(metadata, dict)
+        and metadata.get("source") == DM_PERFORMANCE_COMPUTED_SOURCE
+        and all(field in stats for field in required_fields)
+        and isinstance(fills_replayed, int)
+        and not isinstance(fills_replayed, bool)
+        and fills_replayed >= 0
+    ):
+        return "insufficient_history"
+    return "unavailable"
+
+
 # #236: "Failed to fetch portfolio/risk: All connection attempts failed" is
 # httpx.ConnectError — a fast TCP-level failure (connection refused / no
 # route), not a slow read timeout. #199 already trimmed CIO_CONTEXT_FETCH
@@ -960,50 +989,47 @@ class ContextBuilder:
         correlation_id: str,
         gaps: list[ContextGap] | None = None,
     ) -> StrategyStats:
-        """Fetches historical performance metrics from Data Manager analysis API.
-
-        AC4 (#197): when the fetch falls back to the degenerate
-        ``StrategyStats(recent_pnl_trend=NEUTRAL)`` default, record a
-        ``ContextGap(surface='strategy_stats')`` so downstream logic (and
-        the emitted ``TriggerContext.pre_decision_context.gaps``) can
-        distinguish "data unavailable" from "zero performance" — the gap
-        collector is threaded through from ``build()`` the same way
-        market/portfolio already are.
-
-        #209 root cause: a 200 response is not the same as *complete* data.
-        ``petrosa-data-manager``'s ``/analysis/performance/{strategy_id}``
-        never populates ``win_rate_delta`` or ``consecutive_losses`` on any
-        response branch (confirmed by inspection of
-        ``data_manager/api/routes/analysis.py::get_strategy_performance`` —
-        both fields are hardcoded ``None`` even on its best-data
-        "pnl-calculator" success path). Because
-        ``strategy_assessor.REQUIRED_CONTEXT_FIELDS`` treats both as
-        mandatory, every strategy_assessor call self-reports
-        ``MISSING_INPUT`` regardless of whether the strategy has real
-        trading history — this was previously invisible because the old
-        code only recorded a gap on *exception*, never on a successful
-        response carrying structurally-absent fields.         Computing these two
-        fields is out of scope here (data-manager analytics, tracked
-        separately per the #209 ticket body as
-        PetroSa2/petrosa-data-manager#318); this records the gap so the
-        degradation is audit-trail visible instead of silently
-        indistinguishable from "field genuinely populated as None".
-        """
+        """Fetch historical performance metrics and classify their provenance."""
         url = f"{self.data_manager_url}/analysis/performance/{strategy_id}"
         try:
             response = await self.client.get(url)
             response.raise_for_status()
             data = response.json()
-            stats = StrategyStats(**data["stats"])
+            history_status = classify_strategy_history(data)
+            stats_data = {
+                key: value
+                for key, value in data["stats"].items()
+                if key not in ("history_status", "fill_count")
+            }
+            stats = StrategyStats(**stats_data).model_copy(
+                update={"history_status": history_status}
+            )
             structurally_absent = [
                 field
                 for field, value in (
+                    ("win_rate", stats.win_rate),
                     ("win_rate_delta", stats.win_rate_delta),
                     ("consecutive_losses", stats.consecutive_losses),
                 )
                 if value is None
             ]
-            if structurally_absent and gaps is not None:
+            if history_status == "insufficient_history":
+                fills_replayed = data["metadata"]["fills_replayed"]
+                logger.info(
+                    "STRATEGY_STATS_INSUFFICIENT_HISTORY strategy_id=%s "
+                    "fills_replayed=%s null_fields=%s",
+                    strategy_id,
+                    fills_replayed,
+                    ",".join(structurally_absent),
+                    extra={
+                        "correlation_id": correlation_id,
+                        "surface": "strategy_stats",
+                        "strategy_id": strategy_id,
+                        "fills_replayed": fills_replayed,
+                        "null_fields": structurally_absent,
+                    },
+                )
+            elif structurally_absent and gaps is not None:
                 logger.warning(
                     "STRATEGY_STATS_STRUCTURAL_GAP: fields=%s strategy_id=%s "
                     "endpoint=%s — data-manager returned 200 but these fields "
@@ -1053,7 +1079,10 @@ class ContextBuilder:
                         reason=f"read_timeout endpoint={url} timeout_s={timeout_s}",
                     )
                 )
-            return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
+            return StrategyStats(
+                recent_pnl_trend=PnlTrend.NEUTRAL,
+                history_status="unavailable",
+            )
         except Exception as e:
             exc_type = type(e).__name__
             detail = str(e) or "<empty>"
@@ -1074,7 +1103,10 @@ class ContextBuilder:
                         reason=f"fetch_error exc_type={exc_type} detail={detail}",
                     )
                 )
-            return StrategyStats(recent_pnl_trend=PnlTrend.NEUTRAL)
+            return StrategyStats(
+                recent_pnl_trend=PnlTrend.NEUTRAL,
+                history_status="unavailable",
+            )
 
     async def _fetch_strategy_defaults(
         self,

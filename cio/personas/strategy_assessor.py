@@ -5,12 +5,21 @@ from typing import Any
 import yaml
 
 from cio.clients.llm_client import CIO_LLM_Client
-from cio.models import ContextGap, StrategyResult, TriggerContext
+from cio.models import (
+    ActivationRecommendation,
+    ContextGap,
+    HealthStatus,
+    RegimeFit,
+    StrategyResult,
+    TriggerContext,
+)
 from cio.prompts.loader import select_system_prompt
 
 logger = logging.getLogger(__name__)
 
 PROMPT_ID = "PETROSA_PROMPT_STRATEGY_ASSESSOR"
+COLD_START_TRACE = "COLD_START: insufficient closed-trade history; neutral prior"
+COLD_START_ENV = "CIO_COLD_START_ENABLED"
 
 # #202 — the prompt's required_context_fields. When any of these arrives as
 # None the LLM self-reports {"error": "MISSING_INPUT"} (input-contract rule
@@ -26,6 +35,15 @@ REQUIRED_CONTEXT_FIELDS = (
     "regime",
     "regime_confidence",
 )
+
+
+def cold_start_enabled() -> bool:
+    return os.getenv(COLD_START_ENV, "true").lower() not in {
+        "false",
+        "0",
+        "no",
+        "off",
+    }
 
 
 class StrategyAssessor:
@@ -47,6 +65,27 @@ class StrategyAssessor:
         Runs the LLM assessment loop for the strategy's health and fit.
         """
         user_context = self._build_user_context(context)
+        if (
+            context.strategy_stats.history_status == "insufficient_history"
+            and cold_start_enabled()
+        ):
+            logger.info(
+                "STRATEGY_COLD_START_ASSESSMENT strategy_id=%s "
+                "history_status=insufficient_history",
+                context.strategy_id,
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "strategy_id": context.strategy_id,
+                    "history_status": "insufficient_history",
+                },
+            )
+            return StrategyResult(
+                health=HealthStatus.HEALTHY,
+                regime_fit=RegimeFit.NEUTRAL,
+                activation_recommendation=ActivationRecommendation.RUN,
+                param_change=None,
+                thought_trace=COLD_START_TRACE,
+            )
         self._warn_on_missing_required_fields(context, user_context)
 
         # complete_with_schema handles Pydantic validation and SAFE_DEFAULTS fallback
