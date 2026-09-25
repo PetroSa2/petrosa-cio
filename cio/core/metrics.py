@@ -80,3 +80,13 @@ LLM_MISSING_INPUT_SKIPS = meter.create_counter(
         "parse failure"
     ),
 )
+
+AUTO_RESUME_EVENTS = meter.create_counter(
+    "cio_auto_resume_events_total",
+    description="Auto-resume outcomes for LLM_UNAVAILABLE pauses (attribute: result)",
+)
+
+LLM_HEALTH_PROBES = meter.create_counter(
+    "cio_llm_health_probes_total",
+    description="Active LLM health probes sent by the auto-resume loop (attribute: result)",
+)

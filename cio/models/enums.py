@@ -145,6 +145,10 @@ class RejectionSource(StrEnum):
     # BLOCK with no freeze, distinct from CONTEXT_UNAVAILABLE's non-authoritative
     # timeout-storm SKIP path.
     PORTFOLIO_CONTEXT_UNAVAILABLE = "portfolio_context_unavailable"
+    # LLM outage policy (operator decision 2026-09-24): a persona stage fell
+    # back to SAFE_DEFAULTS and cio paused the strategy. Only this source is
+    # eligible for automatic resume.
+    LLM_UNAVAILABLE = "llm_unavailable"
 
 
 class TriggerType(StrEnum):

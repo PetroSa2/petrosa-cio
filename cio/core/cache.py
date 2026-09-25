@@ -40,3 +40,46 @@ class AsyncRedisCache:
             await self.redis.delete(key)
         except Exception as e:
             logger.error(f"Redis delete error for key {key}: {e}")
+
+    async def hget(self, key: str, field: str) -> str | None:
+        try:
+            value = await self.redis.hget(key, field)
+            if value is None:
+                return None
+            return value.decode("utf-8") if isinstance(value, bytes) else value
+        except Exception as e:
+            logger.error(f"Redis hget error for key {key}: {e}")
+            return None
+
+    async def hset(self, key: str, field: str, value: str) -> None:
+        try:
+            await self.redis.hset(key, field, value)
+        except Exception as e:
+            logger.error(f"Redis hset error for key {key}: {e}")
+
+    async def hdel(self, key: str, field: str) -> None:
+        try:
+            await self.redis.hdel(key, field)
+        except Exception as e:
+            logger.error(f"Redis hdel error for key {key}: {e}")
+
+    async def hgetall(self, key: str) -> dict[str, str]:
+        try:
+            values = await self.redis.hgetall(key)
+            return {
+                field.decode("utf-8")
+                if isinstance(field, bytes)
+                else field: value.decode("utf-8") if isinstance(value, bytes) else value
+                for field, value in values.items()
+            }
+        except Exception as e:
+            logger.error(f"Redis hgetall error for key {key}: {e}")
+            return {}
+
+    async def set_if_absent(self, key: str, value: str, ttl: int) -> bool:
+        try:
+            result = await self.redis.set(key, value, ex=ttl, nx=True)
+            return bool(result)
+        except Exception as e:
+            logger.error(f"Redis set_if_absent error for key {key}: {e}")
+            return False
