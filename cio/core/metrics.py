@@ -81,6 +81,11 @@ LLM_MISSING_INPUT_SKIPS = meter.create_counter(
     ),
 )
 
+LLM_UNAVAILABLE_DECISIONS = meter.create_counter(
+    "cio_llm_unavailable_decisions_total",
+    description="Decisions forced by an LLM outage (a persona stage returned SAFE_DEFAULTS)",
+)
+
 AUTO_RESUME_EVENTS = meter.create_counter(
     "cio_auto_resume_events_total",
     description="Auto-resume outcomes for LLM_UNAVAILABLE pauses (attribute: result)",

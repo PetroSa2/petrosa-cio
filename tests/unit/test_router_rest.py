@@ -17,6 +17,7 @@ from cio.models import (
     RegimeFit,
     TriggerContext,
 )
+from cio.models.enums import RejectionSource
 
 
 @pytest.mark.asyncio
@@ -446,6 +447,89 @@ async def test_output_router_rest_pause_strategy_skips_post_when_frozen():
         ) as mock_post:
             await router.route(context, decision)
             mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_pause_skips_post_when_frozen():
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value="LOCKED")
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "ema_pullback_continuation"
+    context.decision_id = "llm-dedup-test-id"
+    context.correlation_id = "llm-dedup-cid"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=False,
+        cost_viable=False,
+        regime_confidence=ConfidenceLevel.LOW,
+        regime_fit=RegimeFit.POOR,
+        strategy_health=HealthStatus.FAILING,
+        activation_recommendation=ActivationRecommendation.PAUSE,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="LLM_UNAVAILABLE: x",
+        thought_trace="LLM_UNAVAILABLE",
+        rejection_source=RejectionSource.LLM_UNAVAILABLE,
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            await router.route(context, decision)
+            mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_llm_unavailable_pause_posts_and_sets_freeze():
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "doji_reversal"
+    context.decision_id = "llm-post-test-id"
+    context.correlation_id = "llm-post-cid"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=False,
+        cost_viable=False,
+        regime_confidence=ConfidenceLevel.LOW,
+        regime_fit=RegimeFit.POOR,
+        strategy_health=HealthStatus.FAILING,
+        activation_recommendation=ActivationRecommendation.PAUSE,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="LLM_UNAVAILABLE: x",
+        thought_trace="LLM_UNAVAILABLE",
+        rejection_source=RejectionSource.LLM_UNAVAILABLE,
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            mock_post.return_value.status_code = 200
+            await router.route(context, decision)
+            mock_post.assert_called_once()
+            assert mock_post.call_args.kwargs["json"]["reason"] == (
+                "CIO_PAUSE: LLM_UNAVAILABLE: x"
+            )
+            mock_cache.set.assert_awaited_with(
+                "cio:freeze:doji_reversal", "LOCKED", ttl=1800
+            )
 
 
 @pytest.mark.asyncio
