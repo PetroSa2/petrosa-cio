@@ -141,6 +141,10 @@ class RejectionSource(StrEnum):
     # invoked and the cycle is non-authoritative — the previous state is
     # held rather than deciding on empty/degraded context.
     CONTEXT_UNAVAILABLE = "context_unavailable"
+    # #247 — portfolio/risk context failed to load. This is a fail-closed
+    # BLOCK with no freeze, distinct from CONTEXT_UNAVAILABLE's non-authoritative
+    # timeout-storm SKIP path.
+    PORTFOLIO_CONTEXT_UNAVAILABLE = "portfolio_context_unavailable"
 
 
 class TriggerType(StrEnum):
