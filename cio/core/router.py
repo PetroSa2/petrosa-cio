@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import os
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
 
@@ -18,6 +18,7 @@ from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
+from cio.models.enums import RejectionSource
 from cio.output.translator import TradeEngineTranslator
 
 try:
@@ -29,6 +30,9 @@ except ImportError:
     _inject_trace_context = None
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from cio.core.auto_resume import LLMPauseRegistry
 
 
 # Lifecycle ActionType values (per #114 P1.2). Kept as a module-level set so the
@@ -80,6 +84,7 @@ class OutputRouter:
         cache: AsyncRedisCache | None = None,
         authority_store: Any = None,
         decision_store: "DecisionStore | None" = None,
+        pause_registry: "LLMPauseRegistry | None" = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
@@ -94,6 +99,7 @@ class OutputRouter:
             "REALTIME_STRATEGIES_URL", ""
         )
         self.cache = cache
+        self.pause_registry = pause_registry
 
         if not self.ta_bot_url:
             logger.warning(
@@ -503,6 +509,16 @@ class OutputRouter:
                         )
 
         elif action == ActionType.PAUSE_STRATEGY:
+            is_llm_unavailable = (
+                decision.rejection_source == RejectionSource.LLM_UNAVAILABLE
+            )
+            if self.pause_registry is not None and not is_dry_run:
+                if is_llm_unavailable:
+                    await self.pause_registry.touch_unavailable(strategy_id)
+                else:
+                    await self.pause_registry.remove(
+                        strategy_id, "non_llm_pause action=pause_strategy"
+                    )
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
             # returns None and logs when the strategy can't be routed).
             base_url = self._resolve_base_url_for_dispatch(
@@ -596,6 +612,15 @@ class OutputRouter:
                                     strategy_id,
                                     extra={"correlation_id": correlation_id},
                                 )
+                            if is_llm_unavailable and self.pause_registry is not None:
+                                service = TargetServiceResolver.resolve(
+                                    self._resolve_routing_strategy_id(
+                                        context, strategy_id
+                                    )
+                                ).value
+                                await self.pause_registry.record_pause(
+                                    strategy_id, service
+                                )
                     except Exception as e:
                         # #209 (AC4): several httpx exceptions (and some
                         # connection-reset errors) stringify to "" — logging
@@ -669,6 +694,10 @@ class OutputRouter:
                 )
             )
         elif action == ActionType.FAIL_SAFE:
+            if self.pause_registry is not None and not is_dry_run:
+                await self.pause_registry.remove(
+                    strategy_id, "non_llm_pause action=fail_safe"
+                )
             # 1. NATS Failure Signal
             dispatch_tasks_data.append(
                 (f"cio.failure.{strategy_id}", decision.model_dump_json().encode())

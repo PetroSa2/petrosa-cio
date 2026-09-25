@@ -20,6 +20,13 @@ from cio.core.alerting.envelope_drift_emitter import EnvelopeDriftEmitter
 from cio.core.alerts_consumer import AlertsConsumer
 from cio.core.arbiter import SignalArbiter
 from cio.core.authority import AuthorityStore
+from cio.core.auto_resume import (
+    AutoResumeLoop,
+    LLMHealthTracker,
+    LLMPauseRegistry,
+    auto_resume_enabled,
+    instrument_llm_health,
+)
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.decision_store import DecisionStore
@@ -35,6 +42,7 @@ from cio.core.position_review_loop import (
     PositionReviewLoop,
 )
 from cio.core.router import OutputRouter
+from cio.core.service_resolver import ServiceType
 
 # Optional OpenTelemetry imports
 try:
@@ -368,6 +376,9 @@ async def main():
 
     # Factory creates LiteLLMClient or MockLLMClient based on LLM_PROVIDER env
     llm_client = ClientFactory.create()
+    llm_health_tracker = LLMHealthTracker()
+    instrument_llm_health(llm_client, llm_health_tracker)
+    pause_registry = LLMPauseRegistry(cache)
 
     # Epic 7: Vector Client for COLD Path
     vector_provider = os.getenv("VECTOR_PROVIDER", "mock").lower()
@@ -397,6 +408,7 @@ async def main():
         realtime_strategies_url=realtime_strategies_url,
         cache=cache,
         decision_store=app.state.decision_store,
+        pause_registry=pause_registry,
     )
     # P2.6 (#597): evaluator-verdict subscriber + arbiter pause gate.
     # Started before arbiter construction so the arbiter wires the
@@ -557,6 +569,28 @@ async def main():
             "on cadence."
         )
 
+    auto_resume_loop = None
+    if not auto_resume_enabled():
+        logger.info("AUTO_RESUME_DISABLED reason=env_flag")
+    elif os.getenv("DRY_RUN", "false").lower() == "true":
+        logger.info("AUTO_RESUME_DISABLED reason=dry_run")
+    else:
+        auto_resume_loop = AutoResumeLoop(
+            registry=pause_registry,
+            health_tracker=llm_health_tracker,
+            llm_client=llm_client,
+            http_client=router.http_client,
+            service_urls={
+                ServiceType.TA_BOT.value: ta_bot_url,
+                ServiceType.REALTIME_STRATEGIES.value: realtime_strategies_url,
+            },
+            cache=cache,
+            nats_client=nc,
+            interval_seconds=float(os.getenv("CIO_AUTO_RESUME_INTERVAL_SECONDS", "60")),
+        )
+        app.state.auto_resume_loop = auto_resume_loop
+        await auto_resume_loop.start()
+
     # 3. Graceful Shutdown Setup
     def signal_handler():
         logger.info("Shutdown signal received. Starting graceful exit...")
@@ -588,6 +622,11 @@ async def main():
     logger.info("Cleaning up resources...")
     if position_review_loop is not None:
         await position_review_loop.stop()
+    if auto_resume_loop is not None:
+        try:
+            await auto_resume_loop.stop()
+        except Exception as exc:
+            logger.warning(f"AUTO_RESUME_STOP_FAILED exc_type={type(exc).__name__}")
     await execution_events_consumer.stop()
     await publisher.stop()
     await responder.stop()
