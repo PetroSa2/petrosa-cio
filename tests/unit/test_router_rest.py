@@ -868,7 +868,7 @@ async def test_output_router_rest_modify_params_body_failure_skips_freeze(caplog
             mock_response.status_code = 200
             mock_response.json.return_value = {
                 "success": False,
-                "error": {"code": "VALIDATION_ERROR", "message": "bad param"},
+                "error": {"code": "INTERNAL_ERROR", "message": "bad param"},
             }
             mock_response.text = '{"success": false}'
             mock_post.return_value = mock_response
@@ -916,10 +916,10 @@ async def test_output_router_rest_pause_strategy_body_failure_skips_freeze(caplo
             router.http_client, "post", new_callable=AsyncMock
         ) as mock_post:
             mock_response = MagicMock()
-            mock_response.status_code = 200
+            mock_response.status_code = 503
             mock_response.json.return_value = {
                 "success": False,
-                "error": {"code": "VALIDATION_ERROR", "message": "bad param"},
+                "error": {"code": "INTERNAL_ERROR", "message": "bad param"},
             }
             mock_response.text = '{"success": false}'
             mock_post.return_value = mock_response
@@ -928,6 +928,114 @@ async def test_output_router_rest_pause_strategy_body_failure_skips_freeze(caplo
 
             assert "FAILED_TO_APPLY strategy pause" in caplog.text
             mock_cache.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "action,strategy_id",
+    [
+        (ActionType.MODIFY_PARAMS, "momentum_pulse"),
+        (ActionType.PAUSE_STRATEGY, "doji_reversal"),
+    ],
+)
+async def test_output_router_rest_validation_error_freezes_and_logs(
+    action, strategy_id, caplog
+):
+    """Deterministic validation failures are bounded and visibly not pauses."""
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value=None)
+    router = OutputRouter(
+        nats_client=AsyncMock(),
+        vector_client=AsyncMock(),
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = strategy_id
+    context.decision_id = "validation-error-id"
+    context.correlation_id = "validation-error-correlation"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=action,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(router.http_client, "post", new_callable=AsyncMock) as post:
+            response = MagicMock(
+                status_code=200,
+                text='{"success": false}',
+            )
+            response.json.return_value = {
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Unknown parameter: enabled",
+                },
+            }
+            post.return_value = response
+
+            await router.route(context, decision)
+
+    mock_cache.set.assert_awaited_once_with(
+        f"cio:freeze:{strategy_id}", "LOCKED", ttl=300
+    )
+    assert caplog.text.count("FAILED_TO_APPLY") == 1
+    assert "did NOT take effect" in caplog.text
+    assert "enabled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_fail_safe_validation_error_freezes():
+    """FAIL_SAFE inspects its background response without blocking route()."""
+    mock_cache = AsyncMock()
+    router = OutputRouter(
+        nats_client=AsyncMock(),
+        vector_client=AsyncMock(),
+        ta_bot_url="http://ta-bot",
+        cache=mock_cache,
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "shooting_star_reversal"
+    context.decision_id = "fail-safe-validation-id"
+    context.correlation_id = "fail-safe-validation-correlation"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.FAIL_SAFE,
+        justification="Critical failure",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(router.http_client, "post", new_callable=AsyncMock) as post:
+            response = MagicMock(status_code=200, text='{"success": false}')
+            response.json.return_value = {
+                "success": False,
+                "error": {
+                    "code": "VALIDATION_ERROR",
+                    "message": "Unknown parameter: enabled",
+                },
+            }
+            post.return_value = response
+            await router.route(context, decision)
+            await asyncio.sleep(0)
+
+    mock_cache.set.assert_awaited_once_with(
+        "cio:freeze:shooting_star_reversal", "LOCKED", ttl=300
+    )
 
 
 @pytest.mark.asyncio

@@ -21,6 +21,8 @@ from cio.models import ActionType, DecisionResult, TriggerContext
 from cio.models.enums import RejectionSource
 from cio.output.translator import TradeEngineTranslator
 
+VALIDATION_ERROR_FREEZE_TTL_SECONDS = 300
+
 try:
     from petrosa_otel import inject_trace_context as _inject_trace_context
 
@@ -477,6 +479,14 @@ class OutputRouter:
                                 await self._apply_rate_limit_freeze(
                                     strategy_id, correlation_id, response
                                 )
+                            elif (
+                                body_failed
+                                and isinstance(body_error, dict)
+                                and body_error.get("code") == "VALIDATION_ERROR"
+                            ):
+                                await self._apply_validation_error_freeze(
+                                    strategy_id, correlation_id, body_error
+                                )
                         else:
                             # e. If response status 2xx AND the body agrees
                             # (or is silent): log SUCCESS, then set param
@@ -594,6 +604,14 @@ class OutputRouter:
                             if response.status_code == 429:
                                 await self._apply_rate_limit_freeze(
                                     strategy_id, correlation_id, response
+                                )
+                            elif (
+                                body_failed
+                                and isinstance(body_error, dict)
+                                and body_error.get("code") == "VALIDATION_ERROR"
+                            ):
+                                await self._apply_validation_error_freeze(
+                                    strategy_id, correlation_id, body_error
                                 )
                         else:
                             # e. If response 2xx AND the body agrees (or is
@@ -722,10 +740,14 @@ class OutputRouter:
                     "validate_only": False,
                 }
                 if not is_dry_run:
+                    fail_safe_task = self._send_fail_safe_pause(
+                        url, payload, strategy_id, correlation_id
+                    )
                     try:
                         # We don't await here to not block the NATS publish
-                        asyncio.create_task(self.http_client.post(url, json=payload))
+                        asyncio.create_task(fail_safe_task)
                     except Exception as e:
+                        fail_safe_task.close()
                         logger.error(f"Failed to fire fail-safe REST pause: {e}")
 
         # 2b. Audit copy on cio.decision.audit.<action> — feeds the CIO
@@ -946,3 +968,64 @@ class OutputRouter:
             retry_after,
             extra={"correlation_id": correlation_id},
         )
+
+    async def _apply_validation_error_freeze(
+        self, strategy_id: str, correlation_id: str, body_error: dict[str, Any]
+    ) -> None:
+        """Bound retries for deterministic config validation failures."""
+        if not self.cache:
+            return
+
+        rejected_parameter = body_error.get("parameter") or body_error.get(
+            "message", "unknown"
+        )
+        await self.cache.set(
+            f"cio:freeze:{strategy_id}",
+            "LOCKED",
+            ttl=VALIDATION_ERROR_FREEZE_TTL_SECONDS,
+        )
+        logger.warning(
+            "VALIDATION_ERROR_FREEZE: strategy %s pause did NOT take effect; "
+            "rejected parameter/error=%s; retry bounded to %ss",
+            strategy_id,
+            rejected_parameter,
+            VALIDATION_ERROR_FREEZE_TTL_SECONDS,
+            extra={"correlation_id": correlation_id},
+        )
+
+    async def _send_fail_safe_pause(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        strategy_id: str,
+        correlation_id: str,
+    ) -> None:
+        """Send the fail-safe pause without blocking the NATS dispatch."""
+        response = await self.http_client.post(url, json=payload)
+        body_failed, body_error = self._response_reports_failure(response)
+        if response.status_code >= 400 or body_failed:
+            logger.error(
+                "FAILED_TO_APPLY fail-safe strategy pause for %s. Status: %s, "
+                "Body: %s, body_reported_failure=%s, body_error=%s",
+                strategy_id,
+                response.status_code,
+                response.text,
+                body_failed,
+                body_error,
+                extra={
+                    "correlation_id": correlation_id,
+                    "body_reported_failure": body_failed,
+                },
+            )
+            if response.status_code == 429:
+                await self._apply_rate_limit_freeze(
+                    strategy_id, correlation_id, response
+                )
+            elif (
+                body_failed
+                and isinstance(body_error, dict)
+                and body_error.get("code") == "VALIDATION_ERROR"
+            ):
+                await self._apply_validation_error_freeze(
+                    strategy_id, correlation_id, body_error
+                )
