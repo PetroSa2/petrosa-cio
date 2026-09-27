@@ -211,6 +211,16 @@ def test_build_resume_request_shape():
     assert payload["reason"].startswith("CIO_AUTO_RESUME: ")
 
 
+def test_build_realtime_resume_request_shape():
+    method, url, payload = build_resume_request(
+        "http://realtime", "iceberg_detector", 0, "realtime-strategies"
+    )
+    assert method == "PUT"
+    assert url.endswith("/api/v1/strategies/iceberg_detector/state")
+    assert payload["state"] == "running"
+    assert payload["changed_by"] == "petrosa-cio:lifecycle:iceberg_detector"
+
+
 @pytest.mark.asyncio
 async def test_registry_records_pause_and_counts_flap():
     clock = FakeClock()

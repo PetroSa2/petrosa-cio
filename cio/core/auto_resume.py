@@ -267,9 +267,22 @@ class LLMPauseRegistry:
 
 
 def build_resume_request(
-    base_url: str, strategy_id: str, paused_at: float
+    base_url: str, strategy_id: str, paused_at: float, service: str = "ta-bot"
 ) -> tuple[str, str, dict[str, Any]]:
     paused_at_iso = datetime.fromtimestamp(paused_at, UTC).isoformat()
+    if service == "realtime-strategies":
+        return (
+            "PUT",
+            f"{base_url}/api/v1/strategies/{strategy_id}/state",
+            {
+                "state": "running",
+                "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
+                "reason": (
+                    "CIO_AUTO_RESUME: LLM healthy again after LLM_UNAVAILABLE pause at "
+                    f"{paused_at_iso}"
+                ),
+            },
+        )
     return (
         "POST",
         f"{base_url}/api/v1/strategies/{strategy_id}/config",
@@ -434,7 +447,9 @@ class AutoResumeLoop:
             if resumed >= MAX_RESUMES_PER_TICK:
                 break
             strategy_id = entry.strategy_id
-            if await self.cache.get(FREEZE_KEY_PREFIX + strategy_id):
+            if entry.service == "ta-bot" and await self.cache.get(
+                FREEZE_KEY_PREFIX + strategy_id
+            ):
                 continue
             if not await self.cache.set_if_absent(
                 LOCK_KEY_PREFIX + strategy_id, "1", LOCK_TTL_SECONDS
@@ -453,10 +468,15 @@ class AutoResumeLoop:
             return
 
         try:
-            response = await self.http_client.get(
-                f"{base_url}/api/v1/strategies/{entry.strategy_id}/audit",
-                params={"limit": AUDIT_LIMIT},
-            )
+            if entry.service == "realtime-strategies":
+                response = await self.http_client.get(
+                    f"{base_url}/api/v1/strategies/{entry.strategy_id}/state"
+                )
+            else:
+                response = await self.http_client.get(
+                    f"{base_url}/api/v1/strategies/{entry.strategy_id}/audit",
+                    params={"limit": AUDIT_LIMIT},
+                )
             if not 200 <= response.status_code < 300:
                 raise ValueError(f"status={response.status_code}")
             body = response.json()
@@ -467,7 +487,20 @@ class AutoResumeLoop:
                 or not body["data"]
             ):
                 raise ValueError("audit response is not verifiable")
-            items = body["data"]
+            if entry.service == "realtime-strategies":
+                state = body["data"]
+                expected_changed_by = f"petrosa-cio:lifecycle:{entry.strategy_id}"
+                if (
+                    not isinstance(state, dict)
+                    or state.get("state") != "paused"
+                    or state.get("changed_by") != expected_changed_by
+                ):
+                    raise ValueError(
+                        "state does not prove CIO lifecycle pause ownership"
+                    )
+                items = []
+            else:
+                items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:
                 if not isinstance(item, dict):
@@ -492,8 +525,10 @@ class AutoResumeLoop:
                     self._metric("aborted_foreign_change")
                     await self.registry.remove(entry.strategy_id, "foreign_change")
                     return
-            if len(items) == AUDIT_LIMIT and all(
-                changed_at > entry.paused_at for _, changed_at in parsed
+            if (
+                entry.service != "realtime-strategies"
+                and len(items) == AUDIT_LIMIT
+                and all(changed_at > entry.paused_at for _, changed_at in parsed)
             ):
                 raise ValueError("audit window cannot prove pause ownership")
         except Exception as exc:
@@ -507,7 +542,7 @@ class AutoResumeLoop:
             return
 
         method, url, payload = build_resume_request(
-            base_url, entry.strategy_id, entry.paused_at
+            base_url, entry.strategy_id, entry.paused_at, entry.service
         )
         try:
             response = await self.http_client.request(method, url, json=payload)
