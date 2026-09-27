@@ -16,12 +16,9 @@ class HeartbeatResponder:
     Clients ping 'cio.heartbeat' and receive a status response.
     """
 
-    def __init__(
-        self, nats_client: NATS, redis_client: Any = None, mongo_client: Any = None
-    ):
+    def __init__(self, nats_client: NATS, redis_client: Any = None):
         self.nc = nats_client
         self.redis = redis_client
-        self.mongo = mongo_client
         self.subscription = None
 
     async def start(self, subject: str = "cio.heartbeat"):
@@ -55,12 +52,12 @@ class HeartbeatResponder:
         start_time = time.perf_counter()
 
         # 1. Dependency Health Checks (Shallow)
-        health = {"redis": True, "mongodb": True, "latency_ms": 0}
+        health = {"redis": True, "latency_ms": 0}
 
         # TODO: Add actual connectivity checks if clients are provided
 
         status = "GOVERNANCE_ACTIVE"
-        if not health["redis"] or not health["mongodb"]:
+        if not health["redis"]:
             status = "DEGRADED"
 
         latency_ms = int((time.perf_counter() - start_time) * 1000)

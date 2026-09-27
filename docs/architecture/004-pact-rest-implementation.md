@@ -39,7 +39,7 @@ sequenceDiagram
     DM-->>CIO: 200 OK (Validated)
 
     CIO->>DM: POST /api/v1/config/strategies/{id} (Apply)
-    Note right of DM: Writes to MongoDB & MySQL Audit
+    Note right of DM: Writes to MongoDB (operational); a MySQL historic copy is kept by data-manager
     DM-->>CIO: 201 Created (Audit ID: #123)
 
     CIO->>RST: POST /api/v1/strategies/{id}/cache/refresh

@@ -28,7 +28,7 @@ Initialize and build the `petrosa-cio` service to act as a sovereign gatekeeper 
 
 ### Week 2: The Signal Interceptor & ROI Engine (Story 2.1, 2.2)
 - **NATS Interception:** Implement the `intent.>` to `signals.trading` proxy loop.
-- **Shadow ROI Initialization:** Start tracking theoretical PnL of all blocked intents in MongoDB Atlas.
+- **Shadow ROI Initialization:** Start tracking theoretical PnL of all blocked intents via the data-manager API.
 - **Heartbeat & Fail-Safe:** Establish the 200ms hard-timeout governance heartbeat.
 
 ### Week 3: Semantic Guarding & Trace-Enforced Control (Story 3.1, 4.1)
@@ -59,7 +59,6 @@ petrosa-cio/
 │   │   ├── interceptor.py      # Intent-to-Signal proxy
 │   │   └── heartbeat.py        # Health handler
 │   ├── db/
-│   │   ├── mongo.py            # Audit & Config persistence
 │   │   └── redis.py            # High-speed policy cache
 │   └── telemetry.py            # Petrosa-Otel setup
 ├── canary/
@@ -86,4 +85,4 @@ petrosa-cio/
 ## 5. Rollback Plan
 - **Infrastructure:** Use `git revert` on the `petrosa-cio` repo.
 - **Interception:** If the CIO fails, strategies can be manually reverted to publish directly to `signals.trading` (bypassing the interceptor).
-- **Database:** MongoDB snapshots provide 1-click configuration rollback.
+- **Database:** The data-manager API provides persistence and 1-click configuration rollback.
