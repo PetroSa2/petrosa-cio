@@ -306,6 +306,98 @@ async def test_output_router_rest_fail_safe_identity():
 
 
 @pytest.mark.asyncio
+async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    mock_cache.get = AsyncMock(return_value="LOCKED")
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        realtime_strategies_url="http://realtime",
+        cache=mock_cache,
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "iceberg_detector"
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="pause it",
+        thought_trace="test",
+    )
+    response = MagicMock(status_code=200, text="")
+    response.json.return_value = {"success": True}
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+            put.return_value = response
+            await router.route(context, decision)
+
+    put.assert_awaited_once_with(
+        "http://realtime/api/v1/strategies/iceberg_detector/state",
+        json={
+            "state": "paused",
+            "reason": "CIO_PAUSE: pause it",
+            "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
+        },
+    )
+    mock_cache.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_realtime_fail_safe_uses_lifecycle_state_and_publishes_failure():
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+        realtime_strategies_url="http://realtime",
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "iceberg_detector"
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.FAIL_SAFE,
+        justification="critical",
+        thought_trace="test",
+    )
+    response = MagicMock(status_code=200, text="")
+    response.json.return_value = {"success": True}
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+            put.return_value = response
+            await router.route(context, decision)
+            await asyncio.sleep(0.01)
+
+    put.assert_awaited_once_with(
+        "http://realtime/api/v1/strategies/iceberg_detector/state",
+        json={
+            "state": "paused",
+            "reason": "CRITICAL_FAIL_SAFE: critical",
+            "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
+        },
+    )
+    assert any(call.args[0] == "cio.failure.iceberg_detector" for call in mock_nc.publish.call_args_list)
+
+
+@pytest.mark.asyncio
 async def test_output_router_rest_429_clamping():
     """Verifies Redis freeze TTL is clamped between 1s and 86400s."""
     mock_nc = AsyncMock()
