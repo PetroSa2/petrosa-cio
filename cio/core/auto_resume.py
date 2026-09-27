@@ -160,10 +160,8 @@ class PauseEntry:
 
 
 class LLMPauseRegistry:
-    def __init__(
-        self, cache: AsyncRedisCache, *, clock: Callable[[], float] = time.time
-    ):
-        self.cache = cache
+    def __init__(self, store: Any, *, clock: Callable[[], float] = time.time):
+        self.store = store
         self.clock = clock
 
     def _log_error(self, op: str, strategy_id: str, exc: Exception) -> None:
@@ -174,7 +172,7 @@ class LLMPauseRegistry:
 
     async def get(self, strategy_id: str) -> PauseEntry | None:
         try:
-            raw = await self.cache.hget(REGISTRY_KEY, strategy_id)
+            raw = await self.store.get(strategy_id)
             return PauseEntry.from_json(raw) if isinstance(raw, str) else None
         except Exception as exc:
             self._log_error("get", strategy_id, exc)
@@ -182,7 +180,7 @@ class LLMPauseRegistry:
 
     async def all(self) -> list[PauseEntry]:
         try:
-            values = await self.cache.hgetall(REGISTRY_KEY)
+            values = await self.store.all()
             if not isinstance(values, dict):
                 return []
             entries = []
@@ -197,15 +195,15 @@ class LLMPauseRegistry:
 
     async def put(self, entry: PauseEntry) -> None:
         try:
-            await self.cache.hset(REGISTRY_KEY, entry.strategy_id, entry.to_json())
+            await self.store.put(entry.strategy_id, entry.to_json())
         except Exception as exc:
             self._log_error("put", entry.strategy_id, exc)
 
     async def remove(self, strategy_id: str, reason: str) -> None:
         try:
-            existing = await self.cache.hget(REGISTRY_KEY, strategy_id)
+            existing = await self.store.get(strategy_id)
             if isinstance(existing, str) and PauseEntry.from_json(existing) is not None:
-                await self.cache.hdel(REGISTRY_KEY, strategy_id)
+                await self.store.delete(strategy_id)
                 logger.info(
                     f"AUTO_RESUME_CLEARED strategy_id={strategy_id} reason={reason}"
                 )
@@ -264,6 +262,25 @@ class LLMPauseRegistry:
             )
         except Exception as exc:
             self._log_error("record_pause", strategy_id, exc)
+
+
+async def migrate_redis_registry(cache: AsyncRedisCache, store: Any) -> None:
+    """Copy legacy entries without overwriting newer durable-state entries."""
+    try:
+        values = await cache.hgetall(REGISTRY_KEY)
+        if not isinstance(values, dict):
+            return
+        migrated = 0
+        for strategy_id, raw in values.items():
+            if await store.get(strategy_id) is None:
+                await store.put(strategy_id, raw)
+                migrated += 1
+        await cache.delete(REGISTRY_KEY)
+        logger.info("AUTO_RESUME_REGISTRY_MIGRATED count=%d", migrated)
+    except Exception as exc:
+        logger.error(
+            "AUTO_RESUME_REGISTRY_MIGRATION_FAILED exc_type=%s", type(exc).__name__
+        )
 
 
 def build_resume_request(

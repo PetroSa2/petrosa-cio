@@ -46,13 +46,22 @@ class FakeCache:
         return dict(self.hashes)
 
     async def get(self, key: str):
-        return self.values.get(key)
+        return self.values.get(key) or self.hashes.get(key)
 
     async def set_if_absent(self, key: str, value: str, ttl: int):
         if key in self.values:
             return False
         self.values[key] = value
         return True
+
+    async def all(self):
+        return dict(self.hashes)
+
+    async def put(self, key: str, value: str):
+        self.hashes[key] = value
+
+    async def delete(self, key: str):
+        self.hashes.pop(key, None)
 
 
 def response(status_code: int, body: dict):
@@ -164,6 +173,18 @@ async def test_registry_touches_removes_and_swallows_cache_errors():
         async def hgetall(self, *args):
             raise RuntimeError("down")
 
+        async def get(self, *args):
+            raise RuntimeError("down")
+
+        async def all(self, *args):
+            raise RuntimeError("down")
+
+        async def put(self, *args):
+            raise RuntimeError("down")
+
+        async def delete(self, *args):
+            raise RuntimeError("down")
+
     broken = LLMPauseRegistry(BrokenCache(), clock=clock)
     await broken.record_pause("doji", "ta-bot")
     await broken.touch_unavailable("doji")
@@ -192,6 +213,9 @@ async def test_registry_skips_bad_entries_and_handles_internal_errors():
 
     class ListCache(FakeCache):
         async def hgetall(self, key):
+            return []
+
+        async def all(self):
             return []
 
     assert await LLMPauseRegistry(ListCache(), clock=clock).all() == []
