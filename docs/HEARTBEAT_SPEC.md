@@ -35,6 +35,5 @@ Span attributes:
 - `service.health.status`
 - `service.health.status_code`
 - `service.health.redis`
-- `service.health.redis`
 - `service.health.response_time_ms`
 - `service.health.under_budget`
