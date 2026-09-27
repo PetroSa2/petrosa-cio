@@ -118,13 +118,13 @@ async def test_display_name_strategy_routes_to_realtime_strategies():
 
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         with patch.object(
-            router.http_client, "post", new_callable=AsyncMock
-        ) as mock_post:
-            mock_post.return_value.status_code = 200
+            router.http_client, "put", new_callable=AsyncMock
+        ) as mock_put:
+            mock_put.return_value.status_code = 200
             await router.route(context, decision)
 
-            mock_post.assert_called_once()
-            args, _ = mock_post.call_args
+            mock_put.assert_called_once()
+            args, _ = mock_put.call_args
             assert args[0].startswith("http://realtime/")
 
 
@@ -145,13 +145,13 @@ async def test_metadata_strategy_id_preferred_over_display_name():
 
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         with patch.object(
-            router.http_client, "post", new_callable=AsyncMock
-        ) as mock_post:
-            mock_post.return_value.status_code = 200
+            router.http_client, "put", new_callable=AsyncMock
+        ) as mock_put:
+            mock_put.return_value.status_code = 200
             await router.route(context, decision)
 
-            mock_post.assert_called_once()
-            args, _ = mock_post.call_args
+            mock_put.assert_called_once()
+            args, _ = mock_put.call_args
             assert args[0].startswith("http://realtime/")
 
 
