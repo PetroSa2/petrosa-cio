@@ -26,10 +26,12 @@ from cio.core.auto_resume import (
     LLMPauseRegistry,
     auto_resume_enabled,
     instrument_llm_health,
+    migrate_redis_registry,
 )
 from cio.core.cache import AsyncRedisCache
 from cio.core.context_builder import ContextBuilder
 from cio.core.decision_store import DecisionStore
+from cio.core.durable_state import DataManagerStateStore
 from cio.core.evaluator_subscriber import EvaluatorSubscriber
 from cio.core.execution_events_consumer import ExecutionEventsConsumer
 from cio.core.health_evaluator import CIOHealthEvaluator
@@ -373,12 +375,14 @@ async def main():
     redis_client = redis_asyncio.from_url(redis_url)
     cache = AsyncRedisCache(redis_client)
     logger.info(f"Connected to Redis at {redis_url}")
+    durable_state = DataManagerStateStore(data_manager_url, "cio_auto_resume")
+    await migrate_redis_registry(cache, durable_state)
 
     # Factory creates LiteLLMClient or MockLLMClient based on LLM_PROVIDER env
     llm_client = ClientFactory.create()
     llm_health_tracker = LLMHealthTracker()
     instrument_llm_health(llm_client, llm_health_tracker)
-    pause_registry = LLMPauseRegistry(cache)
+    pause_registry = LLMPauseRegistry(durable_state)
 
     # Epic 7: Vector Client for COLD Path
     vector_provider = os.getenv("VECTOR_PROVIDER", "mock").lower()
@@ -636,6 +640,7 @@ async def main():
     await listener.stop()
     await router.close()
     await builder.close()
+    await durable_state.close()
     await redis_client.close()
     await nc.close()
 
