@@ -27,6 +27,22 @@ _CLOSE_WITH_DIRECTION: dict[str, str] = {
 }
 
 
+def resolve_direction_token(token: Any) -> tuple[str, str | None] | None:
+    """Resolve a producer direction token without guessing on unknown input."""
+    token_lower = str(token).lower()
+    if token_lower in _LONG_ALIASES:
+        return "buy", None
+    if token_lower in _SHORT_ALIASES:
+        return "sell", None
+    if token_lower in _CLOSE_ALIASES:
+        return "close", None
+    if token_lower in _CLOSE_WITH_DIRECTION:
+        return "close", _CLOSE_WITH_DIRECTION[token_lower]
+    if token_lower == "hold":
+        return "non_actionable", None
+    return None
+
+
 class TradeEngineTranslator:
     """
     Translates CIO DecisionResult into the legacy Signal model
@@ -80,27 +96,21 @@ class TradeEngineTranslator:
             # petrosa_k8s#213: explicit closed mapping — never a binary
             # else. Unrecognized tokens are rejected (CONTRACT VIOLATION),
             # never silently defaulted to a directional order.
-            side_lower = str(side).lower()
-            position_side: str | None = None
-            if side_lower in _LONG_ALIASES:
-                action = "buy"
-            elif side_lower in _SHORT_ALIASES:
-                action = "sell"
-            elif side_lower in _CLOSE_ALIASES:
-                action = "close"
-            elif side_lower in _CLOSE_WITH_DIRECTION:
-                action = "close"
-                position_side = _CLOSE_WITH_DIRECTION[side_lower]
-            else:
+            resolved = resolve_direction_token(side)
+            if resolved is None:
                 logger.critical(
                     "CONTRACT VIOLATION: Unrecognized trade side/action — "
-                    "refusing to guess a direction",
-                    extra={
-                        "correlation_id": correlation_id,
-                        "side": side,
-                        "side_lower": side_lower,
-                        "payload_keys": list(context.trigger_payload.keys()),
-                    },
+                    f"refusing to guess a direction; token={side!r} "
+                    f"payload_keys={list(context.trigger_payload.keys())}",
+                    extra={"correlation_id": correlation_id},
+                )
+                return None
+            action, position_side = resolved
+            if action == "non_actionable":
+                logger.info(
+                    "NON_ACTIONABLE_INTENT: refusing to translate hold token; "
+                    f"token={side!r} payload_keys={list(context.trigger_payload.keys())}",
+                    extra={"correlation_id": correlation_id},
                 )
                 return None
 

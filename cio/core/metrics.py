@@ -20,6 +20,11 @@ DECISION_ACTIONS = meter.create_counter(
     description="Total number of final decisions by action type",
 )
 
+NON_ACTIONABLE_INTENTS = meter.create_counter(
+    "cio_non_actionable_intents_total",
+    description="Trade intents skipped before reasoning because their token is non-actionable",
+)
+
 # LLM Validation Failures
 LLM_VALIDATION_FAILURES = meter.create_counter(
     "cio_llm_validation_failures_total",
