@@ -62,6 +62,20 @@ class CorrelationIdFilter(logging.Filter):
         return True
 
 
+def create_vector_client(provider: str | None = None):
+    """Create the supported vector client without opening a direct database connection."""
+    from cio.core.vector import MockVectorClient
+
+    vector_provider = (provider or os.getenv("VECTOR_PROVIDER", "mock")).lower()
+    if vector_provider == "qdrant":
+        logger.error(
+            "VECTOR_PROVIDER=qdrant is not supported: a vector store must be reached "
+            "through petrosa-data-manager (data pillar P2); using MockVectorClient"
+        )
+    logger.info("Initializing MockVectorClient for development/testing.")
+    return MockVectorClient()
+
+
 # Ensure root logger and all sub-loggers get the filter and correct format
 handler = logging.StreamHandler(sys.stdout)
 formatter = logging.Formatter(
@@ -385,17 +399,7 @@ async def main():
     pause_registry = LLMPauseRegistry(durable_state)
 
     # Epic 7: Vector Client for COLD Path
-    vector_provider = os.getenv("VECTOR_PROVIDER", "mock").lower()
-    if vector_provider == "qdrant":
-        from cio.core.vector import QdrantVectorClient
-
-        vector_client = QdrantVectorClient()
-        logger.info("Initializing QdrantVectorClient for COLD path.")
-    else:
-        from cio.core.vector import MockVectorClient
-
-        vector_client = MockVectorClient()
-        logger.info("Initializing MockVectorClient for development/testing.")
+    vector_client = create_vector_client()
 
     builder = ContextBuilder(
         data_manager_url=data_manager_url,
