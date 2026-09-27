@@ -15,6 +15,8 @@ recognize, rather than guessing a direction.
 
 from __future__ import annotations
 
+import json
+import logging
 import sys
 from pathlib import Path
 
@@ -221,3 +223,17 @@ class TestUnrecognizedActionIsRejectedNotDefaulted:
 
         assert result is None
         assert any("CONTRACT VIOLATION" in record.message for record in caplog.records)
+
+    def test_unrecognized_side_includes_token_and_payload_keys_in_message(self, caplog):
+        ctx = _make_context(
+            trigger_payload={"action": "open_long", "symbol": "BTCUSDT"}
+        )
+        with caplog.at_level(logging.CRITICAL):
+            assert TradeEngineTranslator.to_legacy_signal(ctx, _make_decision()) is None
+
+        record = next(
+            record for record in caplog.records if record.levelno == logging.CRITICAL
+        )
+        formatted = json.dumps({"message": record.getMessage()})
+        assert "open_long" in formatted
+        assert "payload_keys" in formatted

@@ -30,6 +30,7 @@ from cio.models import (
 )
 from cio.models.decision import is_safe_default
 from cio.models.enums import RejectionSource
+from cio.output.translator import resolve_direction_token
 from cio.personas.action_classifier import ActionClassifier
 from cio.personas.regime_analyst import PROMPT_ID as REGIME_PROMPT_ID
 from cio.personas.regime_analyst import RegimeAnalyst
@@ -94,6 +95,49 @@ class Orchestrator:
         """
         start_time = time.perf_counter()
         provider_name = self.client.__class__.__name__
+
+        intent_token = (
+            context.trigger_payload.get("side")
+            or context.trigger_payload.get("action")
+            or context.trigger_payload.get("signal_type")
+        )
+        resolved_intent = (
+            resolve_direction_token(intent_token) if intent_token is not None else None
+        )
+        if resolved_intent is not None and resolved_intent[0] == "non_actionable":
+            token = str(intent_token).lower()
+            logger.info(
+                "NON_ACTIONABLE_INTENT: short-circuiting reasoning loop; "
+                f"token={intent_token!r} payload_keys={list(context.trigger_payload.keys())}",
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "strategy_id": context.strategy_id,
+                    "token": token,
+                },
+            )
+            try:
+                from cio.core.metrics import NON_ACTIONABLE_INTENTS
+
+                NON_ACTIONABLE_INTENTS.add(
+                    1, {"strategy_id": context.strategy_id, "token": token}
+                )
+            except ImportError:
+                pass
+            decision = DecisionResult(
+                hard_blocked=False,
+                ev_passes=False,
+                cost_viable=False,
+                regime_confidence=ConfidenceLevel.LOW,
+                regime_fit=RegimeFit.NEUTRAL,
+                strategy_health=HealthStatus.HEALTHY,
+                activation_recommendation=ActivationRecommendation.RUN,
+                computed_position_size_usd=0.0,
+                action=ActionType.SKIP,
+                justification="NON_ACTIONABLE_INTENT",
+                thought_trace="NON_ACTIONABLE_INTENT",
+            )
+            self._emit_decision_action(decision.action)
+            return decision
 
         logger.info(
             f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id} | Use LLM: {self.use_llm_reasoning}",
