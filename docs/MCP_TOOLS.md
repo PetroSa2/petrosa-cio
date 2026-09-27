@@ -21,14 +21,14 @@ All write tools (`set_*`) require:
 If missing or shorter than 100 chars, the call is rejected.
 
 ## Audit Link
-Every successful `set_*` call persists an audit document through `ConfigManager` including:
+Every successful `set_*` call persists an audit document through `ConfigManager` and the data-manager API, including:
 - `model`
 - `payload`
 - `thought_trace`
 - `actor`
 - `updated_at`
 
-When configured with Mongo collection, this audit document is stored for retrospective reviews.
+The CIO opens no database connection; the data-manager API stores this audit document for retrospective reviews.
 
 `rollback_to_version` also emits an audited event with:
 - `event_type: config_rollback`

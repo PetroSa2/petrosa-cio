@@ -1,3 +1,5 @@
+> Superseded (2026-09-25): all cio persistence goes through the data-manager API; direct MongoDB designs below are historical.
+
 # PETROSA AUTONOMOUS TRADING INTELLIGENCE FRAMEWORK
 
 ---

@@ -53,7 +53,8 @@ async def test_heartbeat_responder_handle_ping():
     assert response["status"] == "GOVERNANCE_ACTIVE"
     assert "health" in response
     assert response["health"]["redis"] is True
-    assert response["health"]["mongodb"] is True
+    assert "mongodb" not in response["health"]
+    assert response["status"] == "GOVERNANCE_ACTIVE"
 
 
 @pytest.mark.asyncio

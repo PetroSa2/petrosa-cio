@@ -4,7 +4,7 @@
 - `cio.heartbeat` (NATS request-reply)
 
 ## Objective
-Provide deterministic governance liveness with dependency connectivity checks so clients can decide whether governance is active.
+Provide deterministic governance liveness with a Redis dependency check so clients can decide whether governance is active.
 
 ## Response Schema
 ```json
@@ -15,14 +15,13 @@ Provide deterministic governance liveness with dependency connectivity checks so
   "version": "1.0.0",
   "dependencies": {
     "redis": "connected | disconnected",
-    "mongo": "connected | disconnected"
   },
   "response_time_ms": 1.23
 }
 ```
 
 ## Status Codes
-- `GOVERNANCE_ACTIVE`: Redis and MongoDB connectivity checks succeeded.
+- `GOVERNANCE_ACTIVE`: Redis connectivity check succeeded.
 - `DEGRADED`: At least one dependency health check failed.
 
 ## Latency Contract
@@ -36,6 +35,6 @@ Span attributes:
 - `service.health.status`
 - `service.health.status_code`
 - `service.health.redis`
-- `service.health.mongo`
+- `service.health.redis`
 - `service.health.response_time_ms`
 - `service.health.under_budget`
