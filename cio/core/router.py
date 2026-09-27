@@ -21,6 +21,8 @@ from cio.models import ActionType, DecisionResult, TriggerContext
 from cio.models.enums import RejectionSource
 from cio.output.translator import TradeEngineTranslator
 
+VALIDATION_ERROR_FREEZE_TTL_SECONDS = 300
+
 try:
     from petrosa_otel import inject_trace_context as _inject_trace_context
 
@@ -477,6 +479,14 @@ class OutputRouter:
                                 await self._apply_rate_limit_freeze(
                                     strategy_id, correlation_id, response
                                 )
+                            elif (
+                                body_failed
+                                and isinstance(body_error, dict)
+                                and body_error.get("code") == "VALIDATION_ERROR"
+                            ):
+                                await self._apply_validation_error_freeze(
+                                    strategy_id, correlation_id, body_error
+                                )
                         else:
                             # e. If response status 2xx AND the body agrees
                             # (or is silent): log SUCCESS, then set param
@@ -529,23 +539,38 @@ class OutputRouter:
             )
 
             if base_url is not None:
-                # b. Payload must be exactly:
-                payload = {
-                    "parameters": {"enabled": False},
-                    "changed_by": f"petrosa-cio:{strategy_id}",
-                    "reason": "CIO_PAUSE: "
-                    + (decision.justification or "automated pause"),
-                    "validate_only": False,
-                }
-
-                # c. Await the POST call to /api/v1/strategies/{strategy_id}/config
-                url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-                # AC4 (cio#169): Skip POST if already frozen — prevents 429 storms when LLM
-                # repeatedly decides pause_strategy for the same strategy within the freeze window.
-                _pause_freeze_key = f"cio:freeze:{strategy_id}"
-                _pause_already_frozen = bool(
-                    self.cache and await self.cache.get(_pause_freeze_key)
+                target_service = TargetServiceResolver.resolve(
+                    self._resolve_routing_strategy_id(context, strategy_id)
                 )
+                use_lifecycle_endpoint = (
+                    target_service == ServiceType.REALTIME_STRATEGIES
+                )
+                if use_lifecycle_endpoint:
+                    payload = {
+                        "state": "paused",
+                        "reason": "CIO_PAUSE: "
+                        + (decision.justification or "automated pause"),
+                        "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
+                    }
+                    url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
+                else:
+                    payload = {
+                        "parameters": {"enabled": False},
+                        "changed_by": f"petrosa-cio:{strategy_id}",
+                        "reason": "CIO_PAUSE: "
+                        + (decision.justification or "automated pause"),
+                        "validate_only": False,
+                    }
+                    url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+
+                # Tuning freezes must never suppress lifecycle pauses. The legacy
+                # TA-bot config path retains its existing deduplication behavior.
+                _pause_already_frozen = False
+                if not use_lifecycle_endpoint:
+                    _pause_freeze_key = f"cio:freeze:{strategy_id}"
+                    _pause_already_frozen = bool(
+                        self.cache and await self.cache.get(_pause_freeze_key)
+                    )
                 if _pause_already_frozen:
                     logger.info(
                         "PAUSE_SKIPPED: strategy %s already frozen — dedup active",
@@ -563,7 +588,11 @@ class OutputRouter:
                     )
                 else:
                     try:
-                        response = await self.http_client.post(url, json=payload)
+                        response = (
+                            await self.http_client.put(url, json=payload)
+                            if use_lifecycle_endpoint
+                            else await self.http_client.post(url, json=payload)
+                        )
 
                         # petrosa-cio#214 (defect 4): same body-vs-status gap
                         # as MODIFY_PARAMS — a 2xx status does not mean the
@@ -590,10 +619,23 @@ class OutputRouter:
                                 },
                             )
 
-                            # Handle 429 specifically (AC2, AC4)
-                            if response.status_code == 429:
+                            # The lifecycle endpoint owns pause throttling. Only
+                            # the legacy config path writes the tuning freeze.
+                            if (
+                                response.status_code == 429
+                                and not use_lifecycle_endpoint
+                            ):
                                 await self._apply_rate_limit_freeze(
                                     strategy_id, correlation_id, response
+                                )
+                            elif (
+                                not use_lifecycle_endpoint
+                                and body_failed
+                                and isinstance(body_error, dict)
+                                and body_error.get("code") == "VALIDATION_ERROR"
+                            ):
+                                await self._apply_validation_error_freeze(
+                                    strategy_id, correlation_id, body_error
                                 )
                         else:
                             # e. If response 2xx AND the body agrees (or is
@@ -604,7 +646,7 @@ class OutputRouter:
                                 strategy_id,
                                 extra={"correlation_id": correlation_id},
                             )
-                            if self.cache:
+                            if self.cache and not use_lifecycle_endpoint:
                                 freeze_key = f"cio:freeze:{strategy_id}"
                                 await self.cache.set(freeze_key, "LOCKED", ttl=1800)
                                 logger.info(
@@ -713,19 +755,40 @@ class OutputRouter:
                 action_name="FAIL_SAFE",
             )
             if base_url is not None:
-                url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-                payload = {
-                    "parameters": {"enabled": False},
-                    "changed_by": f"petrosa-cio:{strategy_id}",
-                    "reason": "CRITICAL_FAIL_SAFE: "
-                    + (decision.justification or "system failure"),
-                    "validate_only": False,
-                }
+                target_service = TargetServiceResolver.resolve(
+                    self._resolve_routing_strategy_id(context, strategy_id)
+                )
+                use_lifecycle_endpoint = (
+                    target_service == ServiceType.REALTIME_STRATEGIES
+                )
+                if use_lifecycle_endpoint:
+                    url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
+                    payload = {
+                        "state": "paused",
+                        "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
+                        "reason": "CRITICAL_FAIL_SAFE: "
+                        + (decision.justification or "system failure"),
+                    }
+                    method = "PUT"
+                else:
+                    url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
+                    payload = {
+                        "parameters": {"enabled": False},
+                        "changed_by": f"petrosa-cio:{strategy_id}",
+                        "reason": "CRITICAL_FAIL_SAFE: "
+                        + (decision.justification or "system failure"),
+                        "validate_only": False,
+                    }
+                    method = "POST"
                 if not is_dry_run:
+                    fail_safe_task = self._send_fail_safe_pause(
+                        url, payload, strategy_id, correlation_id, method
+                    )
                     try:
                         # We don't await here to not block the NATS publish
-                        asyncio.create_task(self.http_client.post(url, json=payload))
+                        asyncio.create_task(fail_safe_task)
                     except Exception as e:
+                        fail_safe_task.close()
                         logger.error(f"Failed to fire fail-safe REST pause: {e}")
 
         # 2b. Audit copy on cio.decision.audit.<action> — feeds the CIO
@@ -946,3 +1009,69 @@ class OutputRouter:
             retry_after,
             extra={"correlation_id": correlation_id},
         )
+
+    async def _apply_validation_error_freeze(
+        self, strategy_id: str, correlation_id: str, body_error: dict[str, Any]
+    ) -> None:
+        """Bound retries for deterministic config validation failures."""
+        if not self.cache:
+            return
+
+        rejected_parameter = body_error.get("parameter") or body_error.get(
+            "message", "unknown"
+        )
+        await self.cache.set(
+            f"cio:freeze:{strategy_id}",
+            "LOCKED",
+            ttl=VALIDATION_ERROR_FREEZE_TTL_SECONDS,
+        )
+        logger.warning(
+            "VALIDATION_ERROR_FREEZE: strategy %s pause did NOT take effect; "
+            "rejected parameter/error=%s; retry bounded to %ss",
+            strategy_id,
+            rejected_parameter,
+            VALIDATION_ERROR_FREEZE_TTL_SECONDS,
+            extra={"correlation_id": correlation_id},
+        )
+
+    async def _send_fail_safe_pause(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        strategy_id: str,
+        correlation_id: str,
+        method: str = "POST",
+    ) -> None:
+        """Send the fail-safe pause without blocking the NATS dispatch."""
+        response = (
+            await self.http_client.put(url, json=payload)
+            if method == "PUT"
+            else await self.http_client.post(url, json=payload)
+        )
+        body_failed, body_error = self._response_reports_failure(response)
+        if response.status_code >= 400 or body_failed:
+            logger.error(
+                "FAILED_TO_APPLY fail-safe strategy pause for %s. Status: %s, "
+                "Body: %s, body_reported_failure=%s, body_error=%s",
+                strategy_id,
+                response.status_code,
+                response.text,
+                body_failed,
+                body_error,
+                extra={
+                    "correlation_id": correlation_id,
+                    "body_reported_failure": body_failed,
+                },
+            )
+            if response.status_code == 429 and method != "PUT":
+                await self._apply_rate_limit_freeze(
+                    strategy_id, correlation_id, response
+                )
+            elif method != "PUT" and (
+                body_failed
+                and isinstance(body_error, dict)
+                and body_error.get("code") == "VALIDATION_ERROR"
+            ):
+                await self._apply_validation_error_freeze(
+                    strategy_id, correlation_id, body_error
+                )
