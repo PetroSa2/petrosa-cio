@@ -394,7 +394,10 @@ async def test_realtime_fail_safe_uses_lifecycle_state_and_publishes_failure():
             "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
         },
     )
-    assert any(call.args[0] == "cio.failure.iceberg_detector" for call in mock_nc.publish.call_args_list)
+    assert any(
+        call.args[0] == "cio.failure.iceberg_detector"
+        for call in mock_nc.publish.call_args_list
+    )
 
 
 @pytest.mark.asyncio

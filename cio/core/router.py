@@ -621,14 +621,16 @@ class OutputRouter:
 
                             # The lifecycle endpoint owns pause throttling. Only
                             # the legacy config path writes the tuning freeze.
-                            if response.status_code == 429 and not use_lifecycle_endpoint:
+                            if (
+                                response.status_code == 429
+                                and not use_lifecycle_endpoint
+                            ):
                                 await self._apply_rate_limit_freeze(
                                     strategy_id, correlation_id, response
                                 )
                             elif (
                                 not use_lifecycle_endpoint
-                                and
-                                body_failed
+                                and body_failed
                                 and isinstance(body_error, dict)
                                 and body_error.get("code") == "VALIDATION_ERROR"
                             ):

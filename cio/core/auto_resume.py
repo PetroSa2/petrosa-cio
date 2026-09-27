@@ -495,7 +495,9 @@ class AutoResumeLoop:
                     or state.get("state") != "paused"
                     or state.get("changed_by") != expected_changed_by
                 ):
-                    raise ValueError("state does not prove CIO lifecycle pause ownership")
+                    raise ValueError(
+                        "state does not prove CIO lifecycle pause ownership"
+                    )
                 items = []
             else:
                 items = body["data"]
@@ -523,8 +525,10 @@ class AutoResumeLoop:
                     self._metric("aborted_foreign_change")
                     await self.registry.remove(entry.strategy_id, "foreign_change")
                     return
-            if entry.service != "realtime-strategies" and len(items) == AUDIT_LIMIT and all(
-                changed_at > entry.paused_at for _, changed_at in parsed
+            if (
+                entry.service != "realtime-strategies"
+                and len(items) == AUDIT_LIMIT
+                and all(changed_at > entry.paused_at for _, changed_at in parsed)
             ):
                 raise ValueError("audit window cannot prove pause ownership")
         except Exception as exc:
