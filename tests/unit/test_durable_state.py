@@ -94,3 +94,35 @@ async def test_migration_preserves_existing_and_deletes_legacy_hash(caplog):
     assert store.puts == ["rsi"]
     assert redis.deleted is True
     assert "AUTO_RESUME_REGISTRY_MIGRATED count=1" in caplog.text
+
+
+def test_state_store_default_timeout_tolerates_data_manager_tail(monkeypatch):
+    monkeypatch.delenv("CIO_AUTO_RESUME_STORE_TIMEOUT_S", raising=False)
+    store = DataManagerStateStore("http://data-manager", "cio_auto_resume")
+    # Live data-manager p99 for the registry list was ~6.3s; 2s timed out ~13%.
+    assert store.timeout.read == 10.0
+    assert store.timeout.write == 10.0
+    assert store.timeout.connect == 2.0
+    assert store._client.timeout == store.timeout
+
+
+def test_state_store_timeout_is_configurable(monkeypatch):
+    monkeypatch.setenv("CIO_AUTO_RESUME_STORE_TIMEOUT_S", "4.5")
+    store = DataManagerStateStore("http://data-manager", "cio_auto_resume")
+    assert store.timeout.read == 4.5
+    assert store.timeout.connect == 2.0
+
+
+def test_state_store_explicit_timeout_caps_connect_timeout():
+    store = DataManagerStateStore("http://data-manager", "ns", timeout=1.0)
+    assert store.timeout.read == 1.0
+    assert store.timeout.connect == 1.0
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-3", "  "])
+def test_state_store_invalid_timeout_falls_back_to_default(monkeypatch, raw, caplog):
+    monkeypatch.setenv("CIO_AUTO_RESUME_STORE_TIMEOUT_S", raw)
+    store = DataManagerStateStore("http://data-manager", "cio_auto_resume")
+    assert store.timeout.read == 10.0
+    if raw.strip():
+        assert "Invalid CIO_AUTO_RESUME_STORE_TIMEOUT_S" in caplog.text
