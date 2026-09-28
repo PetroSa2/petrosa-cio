@@ -979,6 +979,9 @@ def test_init_warns_fallback_disabled_on_duplicate_route(caplog, monkeypatch):
         if "LLM_FALLBACK_DISABLED" in record.getMessage()
     ]
     assert len(warnings) == 1
+    # A duplicate fallback is a config problem, not a silent operating mode.
+    assert warnings[0].levelno == logging.ERROR
+    assert "LLM_FALLBACK_NOT_CONFIGURED" in warnings[0].getMessage()
 
 
 def test_init_no_fallback_disabled_warning_on_distinct_routes(caplog, monkeypatch):
@@ -1382,3 +1385,298 @@ async def test_fallback_defaults_to_primary_api_base_when_env_unset():
         "Without LLM_FALLBACK_API_BASE, all calls must use the primary api_base"
     )
     assert result.error is None
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-28 live incident: NVIDIA free-tier primary timing out (bimodal
+# 1-3s / 11-20s latency vs a 7s timeout) with LLM_FALLBACK_MODEL == LLM_MODEL,
+# so every timeout became "Fallback skipped: duplicate route" -> skip/pause.
+# ---------------------------------------------------------------------------
+
+_DISTINCT_ROUTES_ENV = {
+    "LLM_MODEL": "meta/llama-3.2-11b-vision-instruct",
+    "LLM_FALLBACK_MODEL": "nvidia/nemotron-3-super-120b-a12b",
+    "LLM_API_BASE": "https://inference.example/v1",
+}
+
+
+class _FakeOverloaded(Exception):
+    pass
+
+
+class _FakeRateLimited(Exception):
+    pass
+
+
+def _runtime_with_distinct_exceptions(side_effect):
+    fake_litellm = SimpleNamespace(
+        acompletion=AsyncMock(side_effect=side_effect),
+        get_supported_openai_params=MagicMock(return_value=[]),
+    )
+    fake_exceptions = SimpleNamespace(
+        RateLimitError=_FakeRateLimited,
+        ServiceUnavailableError=_FakeOverloaded,
+    )
+    return (
+        patch.dict(
+            sys.modules,
+            {"litellm": fake_litellm, "litellm.exceptions": fake_exceptions},
+        ),
+        fake_litellm,
+    )
+
+
+@pytest.mark.asyncio
+async def test_distinct_fallback_used_after_single_primary_timeout(monkeypatch):
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    monkeypatch.delenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raising=False)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [TimeoutError(), _mock_litellm_response('{"ok": true}', model="fb")]
+    )
+
+    with patch.dict(os.environ, _DISTINCT_ROUTES_ENV), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert result.content == '{"ok": true}'
+    models = [c.kwargs["model"] for c in fake_litellm.acompletion.await_args_list]
+    assert models == [
+        "openai/meta/llama-3.2-11b-vision-instruct",
+        "openai/nvidia/nemotron-3-super-120b-a12b",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_primary_attempts_with_fallback_is_configurable(monkeypatch):
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [TimeoutError(), TimeoutError(), _mock_litellm_response('{"ok": true}')]
+    )
+
+    env = {**_DISTINCT_ROUTES_ENV, "LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK": "2"}
+    with patch.dict(os.environ, env), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert fake_litellm.acompletion.await_count == 3
+
+
+@pytest.mark.parametrize(
+    ("raw", "distinct", "expected"),
+    [(None, True, 1), ("3", True, 3), ("0", True, 1), ("x", True, 1), ("5", False, 2)],
+)
+def test_primary_attempts_resolution(monkeypatch, raw, distinct, expected):
+    if raw is None:
+        monkeypatch.delenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raising=False)
+    else:
+        monkeypatch.setenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raw)
+    assert llm_client_module._primary_attempts(distinct) == expected
+
+
+@pytest.mark.asyncio
+async def test_fallback_extra_body_sent_only_on_fallback_leg(monkeypatch):
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [TimeoutError(), _mock_litellm_response('{"ok": true}')]
+    )
+    extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    env = {**_DISTINCT_ROUTES_ENV, "LLM_FALLBACK_EXTRA_BODY": json.dumps(extra)}
+
+    with patch.dict(os.environ, env), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    primary_call, fallback_call = fake_litellm.acompletion.await_args_list
+    assert "extra_body" not in primary_call.kwargs
+    assert fallback_call.kwargs["extra_body"] == extra
+
+
+@pytest.mark.parametrize("raw", ["not json", "[1, 2]", '"str"'])
+def test_invalid_fallback_extra_body_is_ignored(monkeypatch, caplog, raw):
+    monkeypatch.setenv("LLM_FALLBACK_EXTRA_BODY", raw)
+    assert llm_client_module._fallback_call_kwargs() == {}
+    assert "LLM_FALLBACK_EXTRA_BODY must be a JSON object" in caplog.text
+
+
+def test_blank_fallback_extra_body_is_ignored(monkeypatch):
+    monkeypatch.setenv("LLM_FALLBACK_EXTRA_BODY", "  ")
+    assert llm_client_module._fallback_call_kwargs() == {}
+
+
+@pytest.mark.asyncio
+async def test_fallback_overload_retried_once(monkeypatch):
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(llm_client_module, "FALLBACK_OVERLOAD_RETRY_DELAY_SECONDS", 0)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [
+            TimeoutError(),
+            _FakeOverloaded("Service temporarily overloaded"),
+            _mock_litellm_response('{"ok": true}'),
+        ]
+    )
+
+    with patch.dict(os.environ, _DISTINCT_ROUTES_ENV), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert fake_litellm.acompletion.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_fallback_timeout_not_retried(monkeypatch):
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [TimeoutError(), TimeoutError()]
+    )
+
+    with patch.dict(os.environ, _DISTINCT_ROUTES_ENV), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert fake_litellm.acompletion.await_count == 2
+    assert result.error == "Primary: TimeoutError | Fallback: TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_schema_fallback_skipped_on_duplicate_route(caplog):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [_mock_litellm_response('{"value": "x"}')]
+    )
+    env = {
+        **_DISTINCT_ROUTES_ENV,
+        "LLM_FALLBACK_MODEL": _DISTINCT_ROUTES_ENV["LLM_MODEL"],
+    }
+
+    with patch.dict(os.environ, env), litellm_patch:
+        result = await client._schema_fallback(
+            "PETROSA_PROMPT_ACTION_CLASSIFIER", "s", {}
+        )
+
+    assert result is None
+    fake_litellm.acompletion.assert_not_called()
+    assert "Schema fallback skipped: duplicate route" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_schema_fallback_uses_distinct_route_and_extra_body(monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [_mock_litellm_response('{"value": "x"}')]
+    )
+    env = {**_DISTINCT_ROUTES_ENV, "LLM_FALLBACK_EXTRA_BODY": '{"a": 1}'}
+
+    with patch.dict(os.environ, env), litellm_patch:
+        result = await client._schema_fallback(
+            "PETROSA_PROMPT_ACTION_CLASSIFIER", "s", {}
+        )
+
+    assert result is not None and result.error is None
+    call = fake_litellm.acompletion.await_args_list[0]
+    assert call.kwargs["model"] == "openai/nvidia/nemotron-3-super-120b-a12b"
+    assert call.kwargs["extra_body"] == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# STRATEGY_ASSESSOR validation_error, live-reproduced 2026-09-28: the primary
+# nests thought_trace inside param_change and never closes the outer object.
+# ---------------------------------------------------------------------------
+
+_TRUNCATED_ASSESSOR = (
+    '{"health": "degraded", "regime_fit": "poor", "activation_recommendation": '
+    '"reduce", "param_change": {"param": "consecutive_losses", "direction": '
+    '"increase", "reason": "consecutive losses increasing", "thought_trace": '
+    '"consecutive_losses is 4"}'
+)
+
+
+def test_recovery_repairs_live_truncated_strategy_assessor_output():
+    from cio.models import StrategyResult
+
+    result = llm_client_module._recover_validated_response(
+        _TRUNCATED_ASSESSOR, StrategyResult
+    )
+
+    assert result is not None
+    assert result.activation_recommendation.value == "reduce"
+    assert result.thought_trace == "consecutive_losses is 4"
+    assert result.param_change is not None
+    assert result.param_change.param == "consecutive_losses"
+
+
+def test_recovery_of_truncated_output_still_rejects_invalid_enum():
+    from cio.models import StrategyResult
+
+    bad = _TRUNCATED_ASSESSOR.replace('"reduce"', '"yolo"')
+    assert llm_client_module._recover_validated_response(bad, StrategyResult) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"a": {"b": 1}', '{"a": {"b": 1}}'),
+        ('{"a": [1, {"b": "}"}', '{"a": [1, {"b": "}"}]}'),
+        ('{"a": 1}', None),  # already balanced
+        ('{"a": "unterminated', None),  # ends inside a string
+        ('{"a": 1,', None),  # dangling separator
+        ('{"a":', None),
+        ('{"a": 1]', None),  # mismatched closer
+        ("no json here", None),
+        ('{"a": "x\\"y"', '{"a": "x\\"y"}'),
+    ],
+)
+def test_close_truncated_json(text, expected):
+    assert llm_client_module._close_truncated_json(text) == expected
+
+
+def test_hoist_leaves_ambiguous_or_present_thought_trace_untouched():
+    from cio.models import StrategyResult
+
+    hoist = llm_client_module._hoist_misplaced_cosmetic_fields
+    two = {"a": {"thought_trace": "x"}, "b": {"thought_trace": "y"}}
+    assert hoist(two, StrategyResult) == two
+    present = {"thought_trace": "top", "p": {"thought_trace": "nested"}}
+    assert hoist(present, StrategyResult) == present
+    assert hoist({"p": {"thought_trace": "x"}}, _FakeResponse) == {
+        "p": {"thought_trace": "x"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_validation_skip_log_carries_error_detail(caplog):
+    client = LiteLLMClient()
+    client.complete = AsyncMock(return_value=_raw('{"other": 1}', model="m1"))
+    client._schema_fallback = AsyncMock(return_value=None)
+
+    await client.complete_with_schema(
+        prompt_id="PETROSA_PROMPT_ACTION_CLASSIFIER",
+        system_prompt="sys",
+        user_context={},
+        response_model=_FakeResponse,
+    )
+
+    line = next(
+        r.getMessage()
+        for r in caplog.records
+        if "LLM_PARSE_FAILURE_SKIP" in r.getMessage()
+    )
+    assert "reason=validation_error" in line
+    assert "model=m1" in line
+    assert "detail=value:missing" in line
+
+
+def test_summarize_validation_error_for_non_pydantic_error():
+    err = json.JSONDecodeError("x", "doc", 0)
+    assert llm_client_module._summarize_validation_error(err) == "JSONDecodeError"
+
+
+def test_recovery_returns_none_when_repaired_json_still_invalid():
+    # Closing the brace cannot fix a missing ':'; recovery must not guess.
+    assert (
+        llm_client_module._recover_validated_response('{"value" "x"', _FakeResponse)
+        is None
+    )

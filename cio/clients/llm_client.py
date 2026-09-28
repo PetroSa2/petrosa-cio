@@ -30,6 +30,13 @@ LLM_CALL_TIMEOUT_SECONDS: float = (
 )
 LLM_RETRY_ATTEMPTS = 2
 LLM_RETRY_MAX_BACKOFF_SECONDS = 3.0
+# When a distinct fallback route is configured, a primary timeout moves
+# straight to the fallback instead of re-queuing on the same (slow) route.
+# Live 2026-09-28 the NVIDIA free-tier primary was bimodal (~1-3s or 11-20s),
+# so retrying the same route after a 7s timeout mostly bought a second
+# timeout; with the fallback the per-call worst case stays <= 2 x timeout.
+# Override with LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK.
+LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK_DEFAULT = 1
 
 
 async def _acompletion_with_timeout(litellm_module: Any, **kwargs: Any) -> Any:
@@ -40,6 +47,25 @@ async def _acompletion_with_timeout(litellm_module: Any, **kwargs: Any) -> Any:
         ),
         timeout=LLM_CALL_TIMEOUT_SECONDS,
     )
+
+
+# A fast "Service temporarily overloaded" (503) / 429 from the fallback is
+# worth one short retry; a timeout is not (it would double the call budget).
+FALLBACK_OVERLOAD_RETRY_DELAY_SECONDS = 0.5
+
+
+async def _fallback_completion_with_timeout(litellm_module: Any, **kwargs: Any) -> Any:
+    from litellm.exceptions import RateLimitError, ServiceUnavailableError
+
+    try:
+        return await _acompletion_with_timeout(litellm_module, **kwargs)
+    except (ServiceUnavailableError, RateLimitError) as exc:
+        logger.warning(
+            "LLM fallback overloaded; retrying once "
+            f"model={kwargs.get('model')} error={_describe_exception(exc)}"
+        )
+        await asyncio.sleep(FALLBACK_OVERLOAD_RETRY_DELAY_SECONDS)
+        return await _acompletion_with_timeout(litellm_module, **kwargs)
 
 
 def _transient_llm_exceptions() -> tuple[type[BaseException], ...]:
@@ -111,6 +137,73 @@ def _resolve_llm_routes() -> tuple[str, str, str | None, str, str, str | None]:
         routing_fallback,
         fallback_api_base,
     )
+
+
+def _has_distinct_fallback(
+    routing_primary: str,
+    api_base: str | None,
+    routing_fallback: str,
+    fallback_api_base: str | None,
+) -> bool:
+    return routing_primary != routing_fallback or api_base != fallback_api_base
+
+
+def _primary_attempts(has_distinct_fallback: bool) -> int:
+    if not has_distinct_fallback:
+        return LLM_RETRY_ATTEMPTS
+    raw = os.getenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK")
+    if raw is None:
+        return LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning(
+            f"Invalid LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK={raw!r}; using "
+            f"{LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK_DEFAULT}"
+        )
+        return LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK_DEFAULT
+
+
+def _fallback_extra_body() -> dict[str, Any] | None:
+    """Provider-specific request fields for the fallback route only.
+
+    ``LLM_FALLBACK_EXTRA_BODY`` is a JSON object forwarded to litellm as
+    ``extra_body``, e.g. ``{"chat_template_kwargs": {"enable_thinking": false}}``
+    so a reasoning-capable NVIDIA NIM fallback answers in ~1-2s instead of
+    spending 8-18s thinking (live-measured 2026-09-28). Invalid JSON is logged
+    and ignored rather than breaking the fallback.
+    """
+    raw = os.getenv("LLM_FALLBACK_EXTRA_BODY")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        value = None
+    if not isinstance(value, dict):
+        logger.error("LLM_FALLBACK_EXTRA_BODY must be a JSON object; ignoring it")
+        return None
+    return value
+
+
+def _fallback_call_kwargs() -> dict[str, Any]:
+    extra_body = _fallback_extra_body()
+    return {"extra_body": extra_body} if extra_body else {}
+
+
+def _summarize_validation_error(exc: BaseException) -> str:
+    """Compact, log-line-safe description of a schema validation failure.
+
+    The JSON log formatter drops ``extra`` fields, so the reason a response
+    failed validation has to live in the message itself to be diagnosable.
+    """
+    if isinstance(exc, ValidationError):
+        parts = []
+        for err in exc.errors()[:3]:
+            loc = ".".join(str(item) for item in err.get("loc", ())) or "<root>"
+            parts.append(f"{loc}:{err.get('type')}")
+        return ",".join(parts)[:200]
+    return type(exc).__name__
 
 
 def _supports_json_mode(litellm_module: Any, routing_model: str) -> bool:
@@ -278,14 +371,95 @@ def _recover_validated_response(
     try:
         raw = json.loads(candidate)
     except json.JSONDecodeError:
-        return None
+        repaired = _close_truncated_json(content)
+        if repaired is None:
+            return None
+        try:
+            raw = json.loads(repaired)
+        except json.JSONDecodeError:
+            return None
     if not isinstance(raw, dict):
         return None
+    raw = _hoist_misplaced_cosmetic_fields(raw, response_model)
     clamped = _clamp_string_fields_to_schema(raw, response_model)
     try:
         return response_model.model_validate(clamped)
     except ValidationError:
         return None
+
+
+# Top-level free-text fields a model sometimes emits one level too deep.
+_HOISTABLE_COSMETIC_FIELDS = ("thought_trace",)
+
+
+def _close_truncated_json(text: str) -> str | None:
+    """Append the closing brackets missing from a truncated JSON object.
+
+    Live-reproduced 2026-09-28 against meta/llama-3.2-11b-vision-instruct on
+    PETROSA_PROMPT_STRATEGY_ASSESSOR: the model nests ``thought_trace`` inside
+    ``param_change`` and then stops without closing the outer object, e.g.
+    ``{"health": "degraded", ..., "param_change": {..., "thought_trace":
+    "..."}`` -> pydantic ``json_invalid: EOF while parsing an object``.
+    Only repairs output that ends cleanly between values (not inside a string,
+    not after a dangling ``,`` or ``:``) so no value is ever invented; returns
+    ``None`` when the text is not such a truncation.
+    """
+    start = text.find("{")
+    if start == -1:
+        return None
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text[start:]:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack.pop() != ch:
+                return None
+            if not stack:
+                # Already balanced — nothing to repair here.
+                return None
+    body = text[start:].rstrip()
+    if in_string or not stack or body.endswith((",", ":", "{", "[")):
+        return None
+    return body + "".join(reversed(stack))
+
+
+def _hoist_misplaced_cosmetic_fields(
+    raw: dict[str, Any], response_model: type[BaseModel]
+) -> dict[str, Any]:
+    """Move a free-text field the model nested one level too deep back to the top.
+
+    Only touches the cosmetic ``thought_trace`` field, only when the response
+    model defines it at the top level, it is absent there, and exactly one
+    nested object carries it. Decision-critical enum/numeric fields are never
+    moved or rewritten, so an invalid decision still fails validation.
+    """
+    hoisted = dict(raw)
+    for name in _HOISTABLE_COSMETIC_FIELDS:
+        if name not in response_model.model_fields or name in hoisted:
+            continue
+        carriers = [
+            key
+            for key, value in hoisted.items()
+            if isinstance(value, dict) and isinstance(value.get(name), str)
+        ]
+        if len(carriers) != 1:
+            continue
+        nested = dict(hoisted[carriers[0]])
+        hoisted[name] = nested.pop(name)
+        hoisted[carriers[0]] = nested
+    return hoisted
 
 
 def resolve_llm_capability_profile() -> str:
@@ -581,7 +755,8 @@ class CIO_LLM_Client(ABC):
             except ImportError:
                 pass
             logger.error(
-                f"LLM_PARSE_FAILURE_SKIP prompt_id={prompt_id} reason=validation_error",
+                f"LLM_PARSE_FAILURE_SKIP prompt_id={prompt_id} reason=validation_error "
+                f"model={raw.model} detail={_summarize_validation_error(e)}",
                 extra={
                     "prompt_id": prompt_id,
                     "reason": "validation_error",
@@ -625,11 +800,17 @@ class LiteLLMClient(CIO_LLM_Client):
             routing_fallback,
             fallback_api_base,
         ) = _resolve_llm_routes()
-        if routing_primary == routing_fallback and api_base == fallback_api_base:
-            logger.warning(
-                f"LLM_FALLBACK_DISABLED primary and fallback resolve to the same "
-                f"route model={primary_model} — a primary failure is retried on the "
-                "same route only (petrosa_k8s#893)"
+        if not _has_distinct_fallback(
+            routing_primary, api_base, routing_fallback, fallback_api_base
+        ):
+            # A config problem, not an operating mode: every primary failure
+            # becomes a SAFE_DEFAULTS skip/pause. Set LLM_FALLBACK_MODEL (and/or
+            # LLM_FALLBACK_API_BASE) to a route distinct from the primary.
+            logger.error(
+                f"LLM_FALLBACK_DISABLED LLM_FALLBACK_NOT_CONFIGURED primary and "
+                f"fallback resolve to the same route model={primary_model} — a "
+                "primary failure is retried on the same route only and then "
+                "skipped; configure a distinct LLM_FALLBACK_MODEL"
             )
 
     def _response_format_for_completion(
@@ -711,6 +892,9 @@ class LiteLLMClient(CIO_LLM_Client):
         ) = _resolve_llm_routes()
 
         start_time = time.perf_counter()
+        has_distinct_fallback = _has_distinct_fallback(
+            routing_primary, api_base, routing_fallback, fallback_api_base
+        )
 
         # 2. Retry Loop for Primary Model
         # #234 AC3 — reduced from stop_after_attempt(3)/max=10 to
@@ -725,7 +909,7 @@ class LiteLLMClient(CIO_LLM_Client):
                 wait=wait_random_exponential(
                     multiplier=1, max=LLM_RETRY_MAX_BACKOFF_SECONDS
                 ),
-                stop=stop_after_attempt(LLM_RETRY_ATTEMPTS),
+                stop=stop_after_attempt(_primary_attempts(has_distinct_fallback)),
                 reraise=True,
                 before_sleep=lambda retry_state: logger.warning(
                     f"Retrying LLM call (attempt {retry_state.attempt_number})",
@@ -760,7 +944,7 @@ class LiteLLMClient(CIO_LLM_Client):
 
         except Exception as primary_error:
             # 3. Fallback Attempt
-            if routing_primary == routing_fallback and api_base == fallback_api_base:
+            if not has_distinct_fallback:
                 self._record_failure()
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
                 logger.warning(
@@ -796,7 +980,7 @@ class LiteLLMClient(CIO_LLM_Client):
             )
 
             try:
-                fallback_response = await _acompletion_with_timeout(
+                fallback_response = await _fallback_completion_with_timeout(
                     litellm,
                     model=routing_fallback,
                     api_base=fallback_api_base,
@@ -807,6 +991,7 @@ class LiteLLMClient(CIO_LLM_Client):
                     response_format=self._response_format_for_completion(
                         litellm, routing_fallback
                     ),
+                    **_fallback_call_kwargs(),
                 )
 
                 # Success on fallback
@@ -849,10 +1034,25 @@ class LiteLLMClient(CIO_LLM_Client):
         """
         import litellm
 
-        fallback_model = os.getenv("LLM_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
-        api_base = os.getenv("LLM_API_BASE")
-        fallback_api_base = os.getenv("LLM_FALLBACK_API_BASE", api_base)
-        routing_fallback = _build_routing_model(fallback_model, fallback_api_base)
+        (
+            _primary_model,
+            routing_primary,
+            api_base,
+            fallback_model,
+            routing_fallback,
+            fallback_api_base,
+        ) = _resolve_llm_routes()
+        if not _has_distinct_fallback(
+            routing_primary, api_base, routing_fallback, fallback_api_base
+        ):
+            # Re-sending the same prompt to the same model that just produced
+            # schema-invalid output only adds latency (~3.3s per
+            # STRATEGY_ASSESSOR validation_error observed on 2026-09-28).
+            logger.warning(
+                f"Schema fallback skipped: duplicate route prompt_id={prompt_id} "
+                f"model={fallback_model}"
+            )
+            return None
 
         logger.info(
             "Schema fallback: retrying with fallback model",
@@ -861,7 +1061,7 @@ class LiteLLMClient(CIO_LLM_Client):
 
         try:
             start_time = time.perf_counter()
-            response = await _acompletion_with_timeout(
+            response = await _fallback_completion_with_timeout(
                 litellm,
                 model=routing_fallback,
                 api_base=fallback_api_base,
@@ -872,6 +1072,7 @@ class LiteLLMClient(CIO_LLM_Client):
                 response_format=self._response_format_for_completion(
                     litellm, routing_fallback
                 ),
+                **_fallback_call_kwargs(),
             )
             return self._process_response(
                 prompt_id, response, int((time.perf_counter() - start_time) * 1000)
