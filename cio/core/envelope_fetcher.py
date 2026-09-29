@@ -34,6 +34,8 @@ from typing import Any
 
 import httpx
 
+from cio.core.internal_headers import internal_headers
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_TTL_SECONDS: float = 60.0
@@ -84,7 +86,9 @@ class EnvelopeFetcher:
         self._ttl = float(ttl_seconds)
         self._timeout = float(timeout_seconds)
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=self._timeout)
+        self._client = client or httpx.AsyncClient(
+            timeout=self._timeout, headers=internal_headers()
+        )
         self._cache: dict[str, _CacheEntry] = {}
         self._lock = asyncio.Lock()
 
@@ -144,7 +148,9 @@ class EnvelopeFetcher:
     async def _fetch(self, key: str) -> dict[str, Any]:
         url = self._base_url + ACTIVE_ENVELOPE_PATH + key
         try:
-            response = await self._client.get(url, timeout=self._timeout)
+            response = await self._client.get(
+                url, timeout=self._timeout, headers=internal_headers()
+            )
         except httpx.HTTPError as exc:
             logger.error(
                 "envelope_fetch_transport_error",

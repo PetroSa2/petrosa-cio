@@ -15,6 +15,7 @@ except ImportError:  # pragma: no cover — py310 compatibility
 
 import httpx
 
+from cio.core.internal_headers import internal_headers
 from cio.core.service_resolver import TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
@@ -143,13 +144,6 @@ class ContextBuilder:
         # path — the bundle is then assembled with an empty verdicts
         # dict and downstream stories (122.2) handle the fallback.
         self.evaluator_subscriber = evaluator_subscriber
-        token = os.getenv("PETROSA_INTERNAL_TOKEN", "")
-        if not token:
-            logger.warning(
-                "SECURITY_WARNING: PETROSA_INTERNAL_TOKEN is not set. "
-                "All internal HTTP requests from ContextBuilder will be unauthenticated."
-            )
-
         # #199: previously hardcoded to 30s. Three concurrent 30s
         # ReadTimeouts (market/strategy_stats/strategy_defaults, the
         # CONTEXT_FETCH_TIMEOUT_STORM pattern) burn most of the decision
@@ -160,10 +154,7 @@ class ContextBuilder:
         timeout_s = float(os.getenv("CIO_CONTEXT_FETCH_TIMEOUT_S", "10.0"))
         self.client = httpx.AsyncClient(
             timeout=timeout_s,
-            headers={
-                "X-Petrosa-Issuer": "CIO",
-                "X-Petrosa-Internal-Token": token,
-            },
+            headers=internal_headers(),
         )
 
     async def build(
