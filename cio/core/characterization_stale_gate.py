@@ -35,6 +35,8 @@ from typing import Final
 
 import httpx
 
+from cio.core.internal_headers import internal_headers
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATA_MANAGER_URL_ENV: Final[str] = "DATA_MANAGER_URL"
@@ -71,7 +73,12 @@ async def is_characterization_stale(
 
     async def _do(client_: httpx.AsyncClient) -> bool:
         try:
-            resp = await client_.get(url, params=params, timeout=timeout_s)
+            resp = await client_.get(
+                url,
+                params=params,
+                timeout=timeout_s,
+                headers=internal_headers(),
+            )
         except (httpx.RequestError, httpx.TimeoutException) as exc:
             logger.warning(
                 "stale-characterization gate: data-manager unreachable — failing open",

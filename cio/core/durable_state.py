@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from cio.core.internal_headers import internal_headers
+
 logger = logging.getLogger(__name__)
 
 # The auto-resume registry lives behind data-manager (cio#262). The original
@@ -67,7 +69,7 @@ class DataManagerStateStore:
         return json.dumps(entry)
 
     def _headers(self) -> dict[str, str]:
-        return {"X-Petrosa-Issuer": "CIO", "X-Petrosa-Namespace": self.namespace}
+        return internal_headers(namespace=self.namespace)
 
     async def get(self, key: str) -> str | None:
         response = await self._client.get(
