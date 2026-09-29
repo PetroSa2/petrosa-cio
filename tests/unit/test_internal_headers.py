@@ -55,16 +55,18 @@ async def test_data_manager_clients_attach_internal_token(monkeypatch):
 
     fetcher = EnvelopeFetcher(
         "http://dm",
-        client=httpx.AsyncClient(transport=httpx.MockTransport(
-            lambda request: httpx.Response(200, json={"value": {}})
-        )),
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"value": {}})
+            )
+        ),
     )
     await fetcher.get_active("strategy:test")
     await fetcher.aclose()
 
-    client = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda request: httpx.Response(200)
-    ))
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200))
+    )
     await is_characterization_stale(
         strategy_id="s1", strategy_revision_id="r1", client=client
     )
