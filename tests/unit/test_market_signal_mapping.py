@@ -169,6 +169,59 @@ def test_build_market_signals_derives_summary_from_metadata_reasoning():
     assert gaps == []
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected_fragment"),
+    [
+        pytest.param(
+            {
+                "source": "ta_bot",
+                "strategy_id": "ema_alignment_bullish",
+                "symbol": "BTCUSDT",
+                "action": "buy",
+                "confidence": 0.82,
+                "strength": "strong",
+                "timeframe": "15m",
+                "metadata": {"ema_fast": 65010.0, "ema_slow": 64950.0},
+            },
+            "ema alignment bullish buy signal",
+            id="bot-ta-analysis",
+        ),
+        pytest.param(
+            {
+                "source": "realtime_strategies",
+                "strategy_id": "spread_liquidity",
+                "symbol": "ETHUSDT",
+                "signal_type": "sell",
+                "confidence": 0.7,
+                "strength": "strong",
+                "timeframe": "1m",
+                "metadata": {"spread_ratio": 2.5},
+            },
+            "spread liquidity sell signal",
+            id="realtime-strategies",
+        ),
+    ],
+)
+def test_build_market_signals_derives_summary_for_producer_payloads(
+    payload, expected_fragment, caplog
+):
+    builder = _make_builder()
+    gaps = []
+
+    market_signals = builder._build_market_signals(payload, "cid-producer", gaps=gaps)
+
+    assert expected_fragment in market_signals.signal_summary
+    assert market_signals.is_placeholder is False
+    assert "signal_summary" not in market_signals.degraded_fields
+    assert not any(
+        record.levelno == logging.WARNING
+        and "MARKET_SIGNALS_PLACEHOLDER_FIELDS" in record.message
+        and "signal_summary" in record.message
+        for record in caplog.records
+    )
+    assert gaps == []
+
+
 # ---------------------------------------------------------------------------
 # AC2: placeholder fields are recorded, never silent
 # ---------------------------------------------------------------------------
