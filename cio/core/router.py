@@ -15,6 +15,7 @@ from cio.core.alerting.fr66_alerts import (
 from cio.core.cache import AsyncRedisCache
 from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.pause_payload import build_ta_bot_pause_payload
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import ActionType, DecisionResult, TriggerContext
@@ -545,6 +546,7 @@ class OutputRouter:
                 use_lifecycle_endpoint = (
                     target_service == ServiceType.REALTIME_STRATEGIES
                 )
+                use_application_config = target_service == ServiceType.TA_BOT
                 if use_lifecycle_endpoint:
                     payload = {
                         "state": "paused",
@@ -553,6 +555,40 @@ class OutputRouter:
                         "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
                     }
                     url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
+                elif use_application_config:
+                    try:
+                        application_url = f"{base_url}/api/v1/config/application"
+                        current_response = await self.http_client.get(application_url)
+                        current_failed, current_error = self._response_reports_failure(
+                            current_response
+                        )
+                        if current_response.status_code >= 400 or current_failed:
+                            raise RuntimeError(
+                                "failed to read target application config: "
+                                f"status={current_response.status_code}, "
+                                f"error={current_error}"
+                            )
+                        current_body = current_response.json()
+                        current_config = (
+                            current_body.get("data", {})
+                            if isinstance(current_body, dict)
+                            else {}
+                        )
+                        payload = build_ta_bot_pause_payload(
+                            current_config,
+                            strategy_id,
+                            "CIO_PAUSE: "
+                            + (decision.justification or "automated pause"),
+                        )
+                        url = application_url
+                    except Exception as e:
+                        logger.error(
+                            "Failed to build strategy pause payload for %s: %s",
+                            strategy_id,
+                            e,
+                            extra={"correlation_id": correlation_id},
+                        )
+                        return
                 else:
                     payload = {
                         "parameters": {"enabled": False},
@@ -607,10 +643,12 @@ class OutputRouter:
                         if response.status_code >= 400 or body_failed:
                             logger.error(
                                 "FAILED_TO_APPLY strategy pause for %s. Status: %s, "
-                                "Body: %s, body_reported_failure=%s, body_error=%s",
+                                "Body: %s, Payload: %s, body_reported_failure=%s, "
+                                "validation_detail=%s",
                                 strategy_id,
                                 response.status_code,
-                                response.text,
+                                self._bounded_text(response.text),
+                                self._bounded_text(payload),
                                 body_failed,
                                 body_error,
                                 extra={
@@ -983,6 +1021,12 @@ class OutputRouter:
         if body.get("success"):
             return False, None
         return True, body.get("error")
+
+    @staticmethod
+    def _bounded_text(value: Any, limit: int = 2000) -> str:
+        """Render diagnostic data without allowing an error response to flood logs."""
+        text = value if isinstance(value, str) else repr(value)
+        return text if len(text) <= limit else text[:limit] + "…"
 
     async def _apply_rate_limit_freeze(
         self, strategy_id: str, correlation_id: str, response: httpx.Response

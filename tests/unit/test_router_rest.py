@@ -20,6 +20,25 @@ from cio.models import (
 from cio.models.enums import RejectionSource
 
 
+@pytest.fixture(autouse=True)
+def mock_ta_bot_application_config_get():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "success": True,
+        "data": {
+            "enabled_strategies": [
+                "momentum_pulse",
+                "rsi_extreme_reversal",
+                "doji_reversal",
+                "shooting_star_reversal",
+            ]
+        },
+    }
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = response
+        yield mock_get
+
+
 @pytest.mark.asyncio
 async def test_output_router_rest_modify_params_active():
     """Verifies REST POST is called for MODIFY_PARAMS when DRY_RUN is false."""
@@ -170,6 +189,48 @@ async def test_output_router_rest_pause_strategy_freeze():
                 mock_post.call_args[1]["json"]["changed_by"]
                 == "petrosa-cio:doji_reversal"
             )
+
+
+@pytest.mark.asyncio
+async def test_output_router_rest_pause_skips_when_application_config_is_rejected(
+    mock_ta_bot_application_config_get,
+):
+    response = MagicMock(status_code=503, text="temporarily unavailable")
+    response.json.return_value = {
+        "success": False,
+        "error": {"code": "UNAVAILABLE", "message": "try later"},
+    }
+    mock_ta_bot_application_config_get.return_value = response
+    router = OutputRouter(
+        nats_client=AsyncMock(),
+        vector_client=AsyncMock(),
+        ta_bot_url="http://ta-bot",
+        cache=AsyncMock(),
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "fox_trap_reversal"
+    context.decision_id = "application-config-error"
+    context.correlation_id = "application-config-error"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            await router.route(context, decision)
+
+    mock_post.assert_not_called()
 
 
 @pytest.mark.asyncio
