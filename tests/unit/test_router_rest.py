@@ -192,6 +192,48 @@ async def test_output_router_rest_pause_strategy_freeze():
 
 
 @pytest.mark.asyncio
+async def test_output_router_rest_pause_skips_when_application_config_is_rejected(
+    mock_ta_bot_application_config_get,
+):
+    response = MagicMock(status_code=503, text="temporarily unavailable")
+    response.json.return_value = {
+        "success": False,
+        "error": {"code": "UNAVAILABLE", "message": "try later"},
+    }
+    mock_ta_bot_application_config_get.return_value = response
+    router = OutputRouter(
+        nats_client=AsyncMock(),
+        vector_client=AsyncMock(),
+        ta_bot_url="http://ta-bot",
+        cache=AsyncMock(),
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "fox_trap_reversal"
+    context.decision_id = "application-config-error"
+    context.correlation_id = "application-config-error"
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="Test",
+        thought_trace="Test",
+    )
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        with patch.object(
+            router.http_client, "post", new_callable=AsyncMock
+        ) as mock_post:
+            await router.route(context, decision)
+
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_output_router_rest_429_fallback_ttl():
     """Verifies Redis freeze uses default 3600s if json parsing fails on 429."""
     mock_nc = AsyncMock()
