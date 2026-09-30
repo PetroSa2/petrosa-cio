@@ -14,6 +14,11 @@ LLM_TOKENS = meter.create_counter(
     description="Total number of tokens used",
 )
 
+LLM_CALLS = meter.create_counter(
+    "cio_llm_calls_total",
+    description="Total number of LLM calls by route and outcome",
+)
+
 # CIO Decision Metrics
 DECISION_ACTIONS = meter.create_counter(
     "cio_decision_actions_total",

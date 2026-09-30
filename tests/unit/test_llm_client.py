@@ -370,6 +370,70 @@ async def test_primary_timeout_then_success_returns_response(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_primary_failure_followed_by_fallback_success_logs_warning_only(
+    monkeypatch, caplog
+):
+    client = LiteLLMClient()
+    mock_response = _mock_litellm_response('{"ok": true}')
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[ValueError("primary down"), mock_response]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "primary-model",
+                "LLM_FALLBACK_MODEL": "fallback-model",
+            },
+        ),
+        litellm_patch,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert "Primary LLM failed" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_primary_and_fallback_failure_logs_error(monkeypatch, caplog):
+    client = LiteLLMClient()
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[
+            ValueError("primary down"),
+            ValueError("fallback down"),
+        ]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "primary-model",
+                "LLM_FALLBACK_MODEL": "fallback-model",
+            },
+        ),
+        litellm_patch,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is not None
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+def test_litellm_debug_info_suppression_is_enabled():
+    fake_litellm = SimpleNamespace()
+    with patch.dict(sys.modules, {"litellm": fake_litellm}):
+        LiteLLMClient()
+    assert fake_litellm.suppress_debug_info is True
+
+
+@pytest.mark.asyncio
 async def test_non_transient_primary_error_not_retried(monkeypatch):
     client = LiteLLMClient()
     litellm_patch, fake_litellm = _mock_litellm_runtime(

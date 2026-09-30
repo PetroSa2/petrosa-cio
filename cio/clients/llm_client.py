@@ -99,6 +99,15 @@ def _describe_exception(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {detail}"[:300]
 
 
+def _record_llm_call(route: str, outcome: str) -> None:
+    try:
+        from cio.core.metrics import LLM_CALLS
+
+        LLM_CALLS.add(1, {"route": route, "outcome": outcome})
+    except ImportError:
+        pass
+
+
 def _env_bool(name: str, default: bool = True) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -788,6 +797,12 @@ class LiteLLMClient(CIO_LLM_Client):
 
     def __init__(self):
         super().__init__()
+        try:
+            import litellm
+
+            litellm.suppress_debug_info = True
+        except ImportError:
+            pass
         # Circuit Breaker state
         self._failure_count = 0
         self._last_failure_time = 0.0
@@ -938,6 +953,7 @@ class LiteLLMClient(CIO_LLM_Client):
 
             # Success on primary
             self._record_success()
+            _record_llm_call("primary", "success")
             return self._process_response(
                 prompt_id, response, int((time.perf_counter() - start_time) * 1000)
             )
@@ -971,7 +987,8 @@ class LiteLLMClient(CIO_LLM_Client):
                     timestamp=datetime.now(UTC),
                 )
 
-            logger.error(
+            _record_llm_call("primary", "failure")
+            logger.warning(
                 f"Primary LLM failed ({primary_model}), attempting fallback ({fallback_model})",
                 extra={
                     "prompt_id": prompt_id,
@@ -996,6 +1013,7 @@ class LiteLLMClient(CIO_LLM_Client):
 
                 # Success on fallback
                 self._record_success()
+                _record_llm_call("fallback", "success")
                 return self._process_response(
                     prompt_id,
                     fallback_response,
@@ -1005,6 +1023,7 @@ class LiteLLMClient(CIO_LLM_Client):
             except Exception as fallback_error:
                 # Total failure
                 self._record_failure()
+                _record_llm_call("fallback", "failure")
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
                 logger.error(
                     f"LLM Fallback failed for {prompt_id}: "
