@@ -31,9 +31,11 @@ def test_ta_bot_pause_payload_matches_application_config_contract(strategy_id):
 
 
 def test_ta_bot_pause_payload_rejects_invalid_target_schema():
-    with pytest.raises(ValueError, match="enabled_strategies"):
+    with pytest.raises(ValueError, match="enabled_strategies") as exc_info:
         build_ta_bot_pause_payload(
             {"enabled_strategies": "not-a-list"},
             "fox_trap_reversal",
             "CIO_PAUSE: test",
         )
+
+    assert "enabled_strategies" in str(exc_info.value)
