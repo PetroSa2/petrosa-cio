@@ -5,6 +5,7 @@ Unit tests for LiteLLMClient fixes:
 """
 
 import asyncio
+import builtins
 import json
 import logging
 import os
@@ -431,6 +432,25 @@ def test_litellm_debug_info_suppression_is_enabled():
     with patch.dict(sys.modules, {"litellm": fake_litellm}):
         LiteLLMClient()
     assert fake_litellm.suppress_debug_info is True
+
+
+def test_litellm_debug_info_suppression_tolerates_missing_dependency():
+    real_import = builtins.__import__
+
+    def import_without_litellm(name, *args, **kwargs):
+        if name == "litellm":
+            raise ImportError("litellm unavailable")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=import_without_litellm):
+        LiteLLMClient()
+    assert True
+
+
+def test_llm_call_metric_tolerates_missing_metrics_dependency():
+    with patch.dict(sys.modules, {"cio.core.metrics": SimpleNamespace()}):
+        llm_client_module._record_llm_call("primary", "failure")
+    assert True
 
 
 @pytest.mark.asyncio
