@@ -56,6 +56,40 @@ _DEFAULT_VOLATILITY_PERCENTILE = 0.5
 _DEFAULT_TREND_STRENGTH = 0.0
 _DEFAULT_PRICE_ACTION = "Neutral"
 
+
+def _derive_signal_summary(
+    payload: dict[str, Any], metadata: dict[str, Any]
+) -> str | None:
+    """Build a useful summary from the common producer contract fields.
+
+    TA-bot publishes indicator metadata without prose, while realtime-strategies
+    commonly publishes ``metadata.reasoning``.  The latter is preferred above;
+    this fallback keeps the former from becoming a placeholder when its core
+    signal fields are present.
+    """
+    strategy = (
+        payload.get("strategy_id")
+        or metadata.get("strategy_id")
+        or payload.get("strategy")
+        or payload.get("source")
+    )
+    action = payload.get("action") or payload.get("side") or payload.get("signal_type")
+    symbol = payload.get("symbol")
+    timeframe = payload.get("timeframe")
+    confidence = payload.get("confidence")
+
+    if not (strategy and action and symbol):
+        return None
+
+    details = [f"{str(strategy).replace('_', ' ')} {str(action).lower()} signal"]
+    details.append(f"on {str(symbol).upper()}")
+    if timeframe:
+        details.append(f"({timeframe})")
+    if isinstance(confidence, int | float) and not isinstance(confidence, bool):
+        details.append(f"with {float(confidence):.0%} confidence")
+    return " ".join(details)
+
+
 DM_PERFORMANCE_COMPUTED_SOURCE = "data-manager-pnl-calculator"
 
 
@@ -352,6 +386,8 @@ class ContextBuilder:
             signal_summary = metadata.get("reasoning")
         if not signal_summary:
             signal_summary = metadata.get("reason")
+        if not signal_summary:
+            signal_summary = _derive_signal_summary(payload, metadata)
         has_summary = bool(signal_summary)
         if not has_summary:
             signal_summary = _DEFAULT_SIGNAL_SUMMARY
