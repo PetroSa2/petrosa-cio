@@ -20,6 +20,25 @@ from cio.models import (
 from cio.models.enums import RejectionSource
 
 
+@pytest.fixture(autouse=True)
+def mock_ta_bot_application_config_get():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "success": True,
+        "data": {
+            "enabled_strategies": [
+                "momentum_pulse",
+                "rsi_extreme_reversal",
+                "doji_reversal",
+                "shooting_star_reversal",
+            ]
+        },
+    }
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock) as mock_get:
+        mock_get.return_value = response
+        yield mock_get
+
+
 @pytest.mark.asyncio
 async def test_output_router_rest_modify_params_active():
     """Verifies REST POST is called for MODIFY_PARAMS when DRY_RUN is false."""
