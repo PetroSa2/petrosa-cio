@@ -85,11 +85,8 @@ def _derive_signal_summary(
     details.append(f"on {str(symbol).upper()}")
     if timeframe:
         details.append(f"({timeframe})")
-    if confidence is not None:
-        try:
-            details.append(f"with {float(confidence):.0%} confidence")
-        except (TypeError, ValueError):
-            pass
+    if isinstance(confidence, int | float) and not isinstance(confidence, bool):
+        details.append(f"with {float(confidence):.0%} confidence")
     return " ".join(details)
 
 
