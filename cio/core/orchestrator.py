@@ -31,6 +31,7 @@ from cio.models import (
 from cio.models.decision import is_safe_default
 from cio.models.enums import RejectionSource
 from cio.output.translator import resolve_direction_token
+from cio.personas.action_classifier import PROMPT_ID as ACTION_PROMPT_ID
 from cio.personas.action_classifier import ActionClassifier
 from cio.personas.regime_analyst import PROMPT_ID as REGIME_PROMPT_ID
 from cio.personas.regime_analyst import RegimeAnalyst
@@ -106,7 +107,7 @@ class Orchestrator:
         )
         if resolved_intent is not None and resolved_intent[0] == "non_actionable":
             token = str(intent_token).lower()
-            logger.info(
+            logger.debug(
                 "NON_ACTIONABLE_INTENT: short-circuiting reasoning loop; "
                 f"token={intent_token!r} payload_keys={list(context.trigger_payload.keys())}",
                 extra={
@@ -118,9 +119,7 @@ class Orchestrator:
             try:
                 from cio.core.metrics import NON_ACTIONABLE_INTENTS
 
-                NON_ACTIONABLE_INTENTS.add(
-                    1, {"strategy_id": context.strategy_id, "token": token}
-                )
+                NON_ACTIONABLE_INTENTS.add(1)
             except ImportError:
                 pass
             decision = DecisionResult(
@@ -445,7 +444,16 @@ class Orchestrator:
                     "Running Regime Classifier (LLM)...",
                     extra={"correlation_id": context.correlation_id},
                 )
+                started = time.perf_counter()
                 result = await self.regime_analyst.classify(context)
+                self._observe_llm_call(
+                    "regime",
+                    provider_name,
+                    started,
+                    "fallback"
+                    if is_safe_default(REGIME_PROMPT_ID, result)
+                    else "success",
+                )
                 if self.cache and not is_safe_default(REGIME_PROMPT_ID, result):
                     await self.cache.set(
                         f"regime:{context.strategy_id}",
@@ -461,7 +469,16 @@ class Orchestrator:
                     "Running Strategy Assessor (LLM)...",
                     extra={"correlation_id": context.correlation_id},
                 )
+                started = time.perf_counter()
                 result = await self.strategy_assessor.assess(context)
+                self._observe_llm_call(
+                    "strategy",
+                    provider_name,
+                    started,
+                    "fallback"
+                    if is_safe_default(STRATEGY_PROMPT_ID, result)
+                    else "success",
+                )
                 if self.cache and not is_safe_default(STRATEGY_PROMPT_ID, result):
                     await self.cache.set(
                         f"strategy:{context.strategy_id}",
@@ -499,8 +516,17 @@ class Orchestrator:
                 "Running Final Action Classifier (LLM)...",
                 extra={"correlation_id": context.correlation_id},
             )
+            action_started = time.perf_counter()
             decision = await self.action_classifier.classify(
                 context, code_result, regime, strategy
+            )
+            self._observe_llm_call(
+                "action",
+                provider_name,
+                action_started,
+                "fallback"
+                if is_safe_default(ACTION_PROMPT_ID, decision)
+                else "success",
             )
 
             # FR63 / AC4 — ceiling check after each LLM decision cycle.
@@ -529,9 +555,41 @@ class Orchestrator:
 
     def _emit_decision_action(self, action: ActionType) -> None:
         try:
-            from cio.core.metrics import DECISION_ACTIONS
+            from cio.core.metrics import (
+                DECISION_ACTIONS,
+                PETROSA_CIO_DECISIONS_TOTAL,
+                SUMMARY,
+            )
 
             DECISION_ACTIONS.add(1, {"action": str(action)})
+            action_value = getattr(action, "value", str(action))
+            PETROSA_CIO_DECISIONS_TOTAL.add(
+                1,
+                {"action": action_value, "reason": "decision", "outcome": "completed"},
+            )
+            SUMMARY.decision(action_value, "decision", "completed")
+            SUMMARY.emit()
+        except ImportError:
+            pass
+
+    @staticmethod
+    def _observe_llm_call(
+        route: str, provider: str, started: float, outcome: str
+    ) -> None:
+        try:
+            from cio.core.metrics import (
+                PETROSA_CIO_LLM_CALLS_TOTAL,
+                PETROSA_CIO_LLM_LATENCY_SECONDS,
+                SUMMARY,
+            )
+
+            elapsed = max(0.0, time.perf_counter() - started)
+            attrs = {"route": route, "outcome": outcome, "provider": provider}
+            PETROSA_CIO_LLM_CALLS_TOTAL.add(1, attrs)
+            PETROSA_CIO_LLM_LATENCY_SECONDS.record(
+                elapsed, {"route": route, "provider": provider}
+            )
+            SUMMARY.llm_call(outcome, elapsed)
         except ImportError:
             pass
 
