@@ -5,6 +5,7 @@ Unit tests for LiteLLMClient fixes:
 """
 
 import asyncio
+import builtins
 import json
 import logging
 import os
@@ -367,6 +368,89 @@ async def test_primary_timeout_then_success_returns_response(monkeypatch):
     assert result.error is None
     assert result.content == '{"ok": true}'
     assert fake_litellm.acompletion.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_primary_failure_followed_by_fallback_success_logs_warning_only(
+    monkeypatch, caplog
+):
+    client = LiteLLMClient()
+    mock_response = _mock_litellm_response('{"ok": true}')
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[ValueError("primary down"), mock_response]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "primary-model",
+                "LLM_FALLBACK_MODEL": "fallback-model",
+            },
+        ),
+        litellm_patch,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    assert "Primary LLM failed" in caplog.text
+    assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_primary_and_fallback_failure_logs_error(monkeypatch, caplog):
+    client = LiteLLMClient()
+    litellm_patch, _fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[
+            ValueError("primary down"),
+            ValueError("fallback down"),
+        ]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "LLM_MODEL": "primary-model",
+                "LLM_FALLBACK_MODEL": "fallback-model",
+            },
+        ),
+        litellm_patch,
+        caplog.at_level(logging.WARNING),
+    ):
+        result = await client.complete("test", "system", {})
+
+    assert result.error is not None
+    assert any(record.levelno >= logging.ERROR for record in caplog.records)
+
+
+def test_litellm_debug_info_suppression_is_enabled():
+    fake_litellm = SimpleNamespace()
+    with patch.dict(sys.modules, {"litellm": fake_litellm}):
+        LiteLLMClient()
+    assert fake_litellm.suppress_debug_info is True
+
+
+def test_litellm_debug_info_suppression_tolerates_missing_dependency():
+    real_import = builtins.__import__
+
+    def import_without_litellm(name, *args, **kwargs):
+        if name == "litellm":
+            raise ImportError("litellm unavailable")
+        return real_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=import_without_litellm):
+        LiteLLMClient()
+    assert True
+
+
+def test_llm_call_metric_tolerates_missing_metrics_dependency():
+    with patch.dict(sys.modules, {"cio.core.metrics": SimpleNamespace()}):
+        llm_client_module._record_llm_call("primary", "failure")
+    assert True
 
 
 @pytest.mark.asyncio
