@@ -119,7 +119,9 @@ class Orchestrator:
             try:
                 from cio.core.metrics import NON_ACTIONABLE_INTENTS
 
-                NON_ACTIONABLE_INTENTS.add(1)
+                NON_ACTIONABLE_INTENTS.add(
+                    1, {"strategy_id": context.strategy_id, "token": token}
+                )
             except ImportError:
                 pass
             decision = DecisionResult(
