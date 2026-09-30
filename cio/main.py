@@ -628,6 +628,12 @@ async def main():
 
     # 6. Cleanup Sequence
     logger.info("Cleaning up resources...")
+    try:
+        from cio.core.metrics import SUMMARY
+
+        SUMMARY.emit(force=True)
+    except ImportError:
+        pass
     if position_review_loop is not None:
         await position_review_loop.stop()
     if auto_resume_loop is not None:
