@@ -15,13 +15,13 @@ jobs:
   instructions:
     name: Agent instructions
     # yamllint disable-line rule:line-length
-    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/agent-instructions.yml@f6a60cf427e7e99e2eb624ecfe067ce5f2602f90
+    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/agent-instructions.yml@d6bc307c31ce89b0b295b99e75b9b78755221eff
     with:
-      shared-ref: f6a60cf427e7e99e2eb624ecfe067ce5f2602f90
+      shared-ref: d6bc307c31ce89b0b295b99e75b9b78755221eff
 
   wording:
     name: External wording
     # yamllint disable-line rule:line-length
-    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/external-wording.yml@f6a60cf427e7e99e2eb624ecfe067ce5f2602f90
+    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/external-wording.yml@d6bc307c31ce89b0b295b99e75b9b78755221eff
     with:
-      shared-ref: f6a60cf427e7e99e2eb624ecfe067ce5f2602f90
+      shared-ref: d6bc307c31ce89b0b295b99e75b9b78755221eff
