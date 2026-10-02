@@ -11,7 +11,7 @@ on:
 jobs:
   pipeline:
     name: CI Pipeline
-    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/ci-pipeline.yml@7433e29160036fbc671f84e18dfba970ae9124ca  # yamllint disable-line rule:line-length
+    uses: PetroSa2/petrosa-shared-workflows/.github/workflows/ci-pipeline.yml@d6bc307c31ce89b0b295b99e75b9b78755221eff  # yamllint disable-line rule:line-length
     with:
       service-name: 'cio'
       image-name: 'yurisa2/petrosa-cio'
