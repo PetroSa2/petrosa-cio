@@ -152,3 +152,23 @@ async def test_build_normalizes_iceberg_display_name_regression():
     assert ctx.strategy_id == "iceberg_detector"
 
     await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_build_records_gap_for_empty_strategy_config():
+    builder = _make_builder()
+    builder.client.get = _default_router([])
+
+    ctx = await builder.build(
+        correlation_id="cid-293",
+        source_subject="intent.test",
+        trigger_type=TriggerType.TRADE_INTENT,
+        payload={"symbol": "BTCUSDT", "strategy_id": "iceberg_detector"},
+    )
+
+    assert any(
+        gap.surface == "strategy_defaults" and gap.reason.startswith("empty_config")
+        for gap in ctx.pre_decision_context.gaps
+    )
+    assert ctx.strategy_defaults.available is False
+    await builder.close()

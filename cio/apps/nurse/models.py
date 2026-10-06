@@ -47,6 +47,13 @@ class RiskLimits(BaseModel):
         5000.0,
         description="Hard absolute cap on any single position size in USD.",
     )
+    probe_mode: bool = Field(
+        False,
+        description=(
+            "True when tradeengine sizes every entry to the symbol's smallest valid order; "
+            "max_position_size_usd is then that probe notional. Absent (older tradeengine) means false."
+        ),
+    )
 
 
 class ExecutionPolicy(BaseModel):

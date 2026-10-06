@@ -1157,6 +1157,23 @@ class ContextBuilder:
 
             # Map Data Manager parameters to CIO StrategyDefaults
             params = data.get("parameters", {})
+            if not params:
+                if gaps is not None:
+                    gaps.append(
+                        ContextGap(
+                            surface="strategy_defaults",
+                            reason="empty_config parameters={}",
+                        )
+                    )
+                logger.warning(
+                    "Strategy defaults are unavailable because the configuration is empty",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "strategy_id": strategy_id,
+                        "surface": "strategy_defaults",
+                    },
+                )
+                return StrategyDefaults.unavailable()
             return StrategyDefaults(
                 stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
                 take_profit_pct=params.get("take_profit_pct")
@@ -1185,12 +1202,7 @@ class ContextBuilder:
                         reason=f"read_timeout endpoint={url} timeout_s={timeout_s}",
                     )
                 )
-            return StrategyDefaults(
-                stop_loss_pct=0.01,
-                take_profit_pct=0.01,
-                leverage=1.0,
-                max_hold_hours=1.0,
-            )
+            return StrategyDefaults.unavailable()
         except Exception as e:
             exc_type = type(e).__name__
             detail = str(e) or "<empty>"
@@ -1211,12 +1223,7 @@ class ContextBuilder:
                         reason=f"fetch_error exc_type={exc_type} detail={detail}",
                     )
                 )
-            return StrategyDefaults(
-                stop_loss_pct=0.01,
-                take_profit_pct=0.01,
-                leverage=1.0,
-                max_hold_hours=1.0,
-            )
+            return StrategyDefaults.unavailable()
 
     @staticmethod
     def _log_timeout_storm_if_concurrent(

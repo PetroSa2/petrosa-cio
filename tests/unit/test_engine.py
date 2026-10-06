@@ -3,6 +3,7 @@ import pytest
 from cio.core.engine import CodeEngine
 from cio.models import (
     ConfidenceLevel,
+    ContextGap,
     MarketSignals,
     MarketState,
     PnlTrend,
@@ -170,6 +171,212 @@ def test_code_engine_regime_adjustment():
 
     # EV = (0.6 * 0.052) - (0.4 * 0.024) = 0.0312 - 0.0096 = 0.0216
     assert pytest.approx(result.gross_ev, 0.0001) == 0.0216
+
+
+def test_code_engine_uses_absolute_order_payoff():
+    ctx = build_test_context(win_rate=0.4)
+    ctx.trigger_payload = {
+        "entry_price": 100.0,
+        "stop_loss": 99.78,
+        "take_profit": 100.44,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0044)
+    assert result.gross_ev == pytest.approx(0.00044)
+    assert result.kelly_fraction == pytest.approx(0.1)
+
+
+def test_carried_stop_wins_even_without_a_carried_target():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.trigger_payload = {"entry_price": 100.0, "stop_loss": 99.78}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)  # carried, not 2% x vol
+    assert result.recommended_tp_pct == pytest.approx(0.032)  # configured 4% x regime
+
+
+def test_carried_target_wins_even_without_a_carried_stop():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.trigger_payload = {"entry_price": 100.0, "take_profit": 100.44}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.024)  # configured 2% x vol
+    assert result.recommended_tp_pct == pytest.approx(
+        0.0044
+    )  # carried, no regime multiplier
+
+
+def test_a_carried_level_on_the_wrong_side_of_the_entry_is_ignored():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.trigger_payload = {
+        "side": "BUY",
+        "entry_price": 100.0,
+        "stop_loss": 100.5,  # above a long's entry
+        "take_profit": 99.0,  # below it
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.024)
+    assert result.recommended_tp_pct == pytest.approx(0.032)
+
+
+def test_the_entry_falls_back_to_the_current_price():
+    ctx = build_test_context(win_rate=0.4)  # current price 50,000
+    ctx.trigger_payload = {"stop_loss": 49890.0, "take_profit": 50110.0}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0022)
+
+
+def test_ev_and_kelly_are_derived_from_the_carried_22_basis_point_stop():
+    win_rate, stop, target = 0.5, 0.0022, 0.0033
+    ctx = build_test_context(win_rate=win_rate)
+    ctx.trigger_payload = {
+        "entry_price": 100.0,
+        "stop_loss": 100.0 * (1 - stop),
+        "take_profit": 100.0 * (1 + target),
+    }
+
+    result = CodeEngine.run(ctx)
+
+    odds = target / stop
+    assert result.gross_ev == pytest.approx(win_rate * target - (1 - win_rate) * stop)
+    assert result.kelly_fraction == pytest.approx(win_rate - (1 - win_rate) / odds)
+    # The configured 2% / 4% payoff would give a different Kelly fraction.
+    assert result.kelly_fraction != pytest.approx(win_rate - (1 - win_rate) / 2.0)
+
+
+def test_unavailable_strategy_defaults_skip_ev_and_kelly():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.strategy_defaults = StrategyDefaults.unavailable()
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is True
+    assert result.gross_ev is None
+    assert result.kelly_position_usd is None
+
+
+def test_the_unavailable_defaults_are_labelled_fallbacks():
+    from cio.models.context import (
+        FALLBACK_LEVERAGE,
+        FALLBACK_MAX_HOLD_HOURS,
+        FALLBACK_STOP_LOSS_PCT,
+        FALLBACK_TAKE_PROFIT_PCT,
+    )
+
+    defaults = StrategyDefaults.unavailable()
+
+    assert defaults.available is False
+    assert (
+        defaults.stop_loss_pct,
+        defaults.take_profit_pct,
+        defaults.leverage,
+        defaults.max_hold_hours,
+    ) == (
+        FALLBACK_STOP_LOSS_PCT,
+        FALLBACK_TAKE_PROFIT_PCT,
+        FALLBACK_LEVERAGE,
+        FALLBACK_MAX_HOLD_HOURS,
+    )
+    assert StrategyDefaults(
+        stop_loss_pct=0.02, take_profit_pct=0.04, max_hold_hours=24
+    ).available
+
+
+def test_risk_limits_without_probe_mode_means_off():
+    assert RiskLimits(max_position_size_usd=1000.0).probe_mode is False
+    assert RiskLimits(**{"max_position_size_usd": 120.0, "probe_mode": True}).probe_mode
+
+
+def _assemble(risk_limits, code_result):
+    from cio.core.assembler import DecisionAssembler
+    from cio.models import (
+        ActionType,
+        ActivationRecommendation,
+        HealthStatus,
+        RegimeFit,
+        StrategyResult,
+    )
+
+    ctx = build_test_context()
+    ctx.risk_limits = risk_limits
+    strategy_result = StrategyResult(
+        health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        regime_fit=RegimeFit.GOOD,
+        thought_trace="test",
+    )
+    return DecisionAssembler.assemble(
+        context=ctx,
+        code_result=code_result,
+        regime_result=ctx.regime,
+        strategy_result=strategy_result,
+        llm_action=ActionType.EXECUTE,
+        llm_justification="test",
+    )
+
+
+def test_without_ev_the_decision_is_sized_at_the_probe_notional_in_probe_mode():
+    from cio.models import CodeEngineResult
+
+    code_result = CodeEngineResult(
+        ev_unavailable=True, recommended_sl_pct=0.0022, recommended_tp_pct=0.0044
+    )
+
+    decision = _assemble(
+        RiskLimits(max_position_size_usd=120.0, probe_mode=True), code_result
+    )
+
+    assert decision.computed_position_size_usd == pytest.approx(120.0)
+
+
+def test_without_ev_and_without_probe_mode_the_old_fallback_size_stays():
+    from cio.models import CodeEngineResult
+
+    code_result = CodeEngineResult(
+        ev_unavailable=True, recommended_sl_pct=0.02, recommended_tp_pct=0.04
+    )
+
+    decision = _assemble(RiskLimits(max_position_size_usd=1000.0), code_result)
+
+    assert decision.computed_position_size_usd == pytest.approx(100.0)
+
+
+def test_code_engine_uses_absolute_order_payoff_for_short_signal():
+    ctx = build_test_context(win_rate=0.4)
+    ctx.trigger_payload = {
+        "side": "SELL",
+        "entry_price": 100.0,
+        "stop_loss": 100.22,
+        "take_profit": 99.56,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0044)
+
+
+def test_code_engine_suppresses_ev_for_empty_strategy_config():
+    ctx = build_test_context(win_rate=0.6, portfolio_state_available=True)
+    ctx.pre_decision_context.gaps.append(
+        ContextGap(surface="strategy_defaults", reason="empty_config parameters={}")
+    )
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is True
+    assert result.gross_ev is None
+    assert result.kelly_position_usd is None
 
 
 def test_code_engine_regime_confidence_bypass():
