@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
@@ -38,40 +39,58 @@ REGIME_HARD_BLOCKS = {
 }
 
 
-def _absolute_order_payoff(context: TriggerContext) -> tuple[float, float] | None:
+def _carried_order_distances(
+    context: TriggerContext,
+) -> tuple[float | None, float | None]:
+    """Stop and target distances (fractions of entry) of the levels the order carries.
+
+    Each is None when the order does not carry it or it is not on the right side of the entry; they are
+    independent, so a carried stop is used even when no target is carried.
+    """
     payload = context.trigger_payload
     entry = payload.get("entry_price", payload.get("price"))
-    stop = payload.get("stop_loss")
-    target = payload.get("take_profit", payload.get("target_price"))
     if entry is None:
         entry = context.market_signals.current_price
     try:
         entry_price = float(entry)
-        stop_price = float(stop)
-        target_price = float(target)
     except (TypeError, ValueError):
-        return None
-    if entry_price <= 0 or stop_price <= 0 or target_price <= 0:
-        return None
+        return None, None
+    if entry_price <= 0:
+        return None, None
     side = str(payload.get("side", "")).upper()
-    if side in {"BUY", "LONG"} and not stop_price < entry_price < target_price:
-        return None
-    if side in {"SELL", "SHORT"} and not target_price < entry_price < stop_price:
-        return None
-    stop_distance = abs(stop_price - entry_price) / entry_price
-    target_distance = abs(target_price - entry_price) / entry_price
-    if stop_distance <= 0 or target_distance <= 0:
-        return None
-    return stop_distance, target_distance
+
+    def distance(raw: Any, *, is_stop: bool) -> float | None:
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if price <= 0:
+            return None
+        below = (side in {"BUY", "LONG"}) == is_stop
+        if side in {"BUY", "LONG", "SELL", "SHORT"} and (
+            (price >= entry_price) if below else (price <= entry_price)
+        ):
+            return None
+        result = abs(price - entry_price) / entry_price
+        return result if result > 0 else None
+
+    return (
+        distance(payload.get("stop_loss"), is_stop=True),
+        distance(
+            payload.get("take_profit", payload.get("target_price")), is_stop=False
+        ),
+    )
 
 
 def _strategy_defaults_unavailable(context: TriggerContext) -> bool:
+    """True when the strategy configuration was empty or unreadable (EV and Kelly are skipped)."""
+    if not context.strategy_defaults.available:
+        return True
     pre_decision = context.pre_decision_context
     return bool(
         pre_decision
         and any(
-            gap.surface == "strategy_defaults"
-            and gap.reason.startswith("empty_config")
+            gap.surface == "strategy_defaults" and gap.reason.startswith("empty_config")
             for gap in pre_decision.gaps
         )
     )
@@ -167,20 +186,23 @@ class CodeEngine:
             return result
 
         # 3. PARAMETER GENERATION (prefer the levels carried by the order)
-        absolute_payoff = _absolute_order_payoff(context)
-        if absolute_payoff is not None:
-            result.recommended_sl_pct, result.recommended_tp_pct = absolute_payoff
+        carried_stop, carried_target = _carried_order_distances(context)
+        if carried_stop is not None:
+            result.recommended_sl_pct = carried_stop
         else:
             vol_multiplier = SL_VOL_MULTIPLIERS.get(context.volatility_level, 1.0)
             result.recommended_sl_pct = (
                 context.strategy_defaults.stop_loss_pct * vol_multiplier
             )
+        if carried_target is not None:
+            result.recommended_tp_pct = carried_target
+        else:
             result.recommended_tp_pct = context.strategy_defaults.take_profit_pct
         result.leverage = context.strategy_defaults.leverage
 
         # 4. REGIME ADJUSTMENTS (Fix 4)
-        if absolute_payoff is None:
-            # Apply TP regime multiplier
+        if carried_target is None:
+            # Apply TP regime multiplier (only to a configured take-profit, never to a carried one)
             tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
             result.recommended_tp_pct *= tp_multiplier
 

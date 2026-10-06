@@ -50,6 +50,14 @@ class PortfolioSummary(BaseModel):
     open_positions_count: int
 
 
+# Fallbacks for ``StrategyDefaults.unavailable()``: placeholders for an unreadable or empty strategy
+# configuration, never inputs to EV or sizing.
+FALLBACK_STOP_LOSS_PCT = 0.01
+FALLBACK_TAKE_PROFIT_PCT = 0.01
+FALLBACK_LEVERAGE = 1.0
+FALLBACK_MAX_HOLD_HOURS = 1.0
+
+
 class StrategyDefaults(BaseModel):
     """Default trading parameters for a strategy, sourced from strategy config."""
 
@@ -57,6 +65,23 @@ class StrategyDefaults(BaseModel):
     take_profit_pct: float
     leverage: float = 1.0
     max_hold_hours: float
+    available: bool = True
+
+    @classmethod
+    def unavailable(cls) -> "StrategyDefaults":
+        """Placeholder for a strategy whose configuration could not be read or is empty.
+
+        The values are the labelled ``FALLBACK_*`` constants below. They only fill the required fields:
+        ``available`` is False, so the engine computes no EV or Kelly size from them and the decision is
+        sized at probe size.
+        """
+        return cls(
+            stop_loss_pct=FALLBACK_STOP_LOSS_PCT,
+            take_profit_pct=FALLBACK_TAKE_PROFIT_PCT,
+            leverage=FALLBACK_LEVERAGE,
+            max_hold_hours=FALLBACK_MAX_HOLD_HOURS,
+            available=False,
+        )
 
 
 class MarketSignals(BaseModel):

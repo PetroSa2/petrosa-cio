@@ -128,8 +128,14 @@ class DecisionAssembler:
         # 3. POSITION SIZE SELECTION
         final_size_usd = code_result.kelly_position_usd
         if final_size_usd is None:
-            # Fallback for ev_unavailable
-            final_size_usd = min(500.0, context.risk_limits.max_position_size_usd * 0.1)
+            # EV unavailable: in probe mode the size is the probe notional that tradeengine reports
+            # as max_position_size_usd (the symbol's smallest valid order).
+            if context.risk_limits.probe_mode:
+                final_size_usd = context.risk_limits.max_position_size_usd
+            else:
+                final_size_usd = min(
+                    500.0, context.risk_limits.max_position_size_usd * 0.1
+                )
             logger.debug(
                 f"EV unavailable; using fallback position size: ${final_size_usd}"
             )

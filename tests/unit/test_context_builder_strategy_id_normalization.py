@@ -167,8 +167,8 @@ async def test_build_records_gap_for_empty_strategy_config():
     )
 
     assert any(
-        gap.surface == "strategy_defaults"
-        and gap.reason.startswith("empty_config")
+        gap.surface == "strategy_defaults" and gap.reason.startswith("empty_config")
         for gap in ctx.pre_decision_context.gaps
     )
+    assert ctx.strategy_defaults.available is False
     await builder.close()
