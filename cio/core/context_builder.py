@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover — py310 compatibility
 import httpx
 
 from cio.core.internal_headers import internal_headers
+from cio.core.order_levels import carried_order_distances
 from cio.core.service_resolver import TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
@@ -36,6 +37,12 @@ from cio.models import (
     TriggerContext,
     TriggerType,
     VolatilityLevel,
+)
+from cio.models.context import (
+    FALLBACK_LEVERAGE,
+    FALLBACK_MAX_HOLD_HOURS,
+    FALLBACK_STOP_LOSS_PCT,
+    FALLBACK_TAKE_PROFIT_PCT,
 )
 
 logger = logging.getLogger(__name__)
@@ -298,6 +305,14 @@ class ContextBuilder:
 
         market_signals = self._build_market_signals(payload, correlation_id, gaps=gaps)
         availability["market_signals"] = not market_signals.is_placeholder
+        self._record_level_gaps(
+            defaults,
+            payload,
+            market_signals.current_price,
+            gaps,
+            correlation_id=correlation_id,
+            strategy_id=strategy_id,
+        )
 
         # P1.4-AC1 (#131) — assemble the structured PreDecisionContext
         # bundle from the components already fetched above plus the
@@ -1135,6 +1150,90 @@ class ContextBuilder:
                 history_status="unavailable",
             )
 
+    @staticmethod
+    def _positive(*values: Any) -> float | None:
+        """The first value that is a positive number, else None."""
+        for value in values:
+            if isinstance(value, bool) or not isinstance(value, int | float):
+                continue
+            if value > 0:
+                return float(value)
+        return None
+
+    @classmethod
+    def _defaults_from_parameters(cls, params: dict[str, Any]) -> StrategyDefaults:
+        """Read each level field on its own; a missing one is the labelled FALLBACK_* value, flagged."""
+        stop = cls._positive(params.get("stop_loss_pct"), params.get("sl_pct"))
+        target = cls._positive(params.get("take_profit_pct"), params.get("tp_pct"))
+        leverage = cls._positive(params.get("leverage"))
+        max_hold = cls._positive(params.get("max_hold_hours"))
+        return StrategyDefaults(
+            stop_loss_pct=FALLBACK_STOP_LOSS_PCT if stop is None else stop,
+            take_profit_pct=FALLBACK_TAKE_PROFIT_PCT if target is None else target,
+            leverage=FALLBACK_LEVERAGE if leverage is None else leverage,
+            max_hold_hours=FALLBACK_MAX_HOLD_HOURS if max_hold is None else max_hold,
+            sl_configured=stop is not None,
+            tp_configured=target is not None,
+            leverage_configured=leverage is not None,
+            max_hold_configured=max_hold is not None,
+        )
+
+    @staticmethod
+    def _record_level_gaps(
+        defaults: StrategyDefaults,
+        payload: dict[str, Any],
+        current_price: Any,
+        gaps: list[ContextGap],
+        *,
+        correlation_id: str,
+        strategy_id: str,
+    ) -> None:
+        """Gaps for the level keys neither configured nor carried by the order, and for fallbacks."""
+        if not defaults.available:
+            return  # an empty or unreadable configuration already recorded its own gap
+        carried_stop, carried_target = carried_order_distances(payload, current_price)
+        missing = [
+            key
+            for key, configured, carried in (
+                ("stop_loss_pct", defaults.sl_configured, carried_stop),
+                ("take_profit_pct", defaults.tp_configured, carried_target),
+            )
+            if not configured and carried is None
+        ]
+        if missing:
+            gaps.append(
+                ContextGap(
+                    surface="strategy_defaults",
+                    reason=f"levels_missing keys={','.join(missing)}",
+                )
+            )
+        fallbacks = [
+            key
+            for key, configured in (
+                ("leverage", defaults.leverage_configured),
+                ("max_hold_hours", defaults.max_hold_configured),
+            )
+            if not configured
+        ]
+        if fallbacks:
+            gaps.append(
+                ContextGap(
+                    surface="strategy_defaults",
+                    reason=f"fallback_used keys={','.join(fallbacks)}",
+                )
+            )
+        if missing or fallbacks:
+            logger.warning(
+                "Strategy configuration lacks keys",
+                extra={
+                    "correlation_id": correlation_id,
+                    "strategy_id": strategy_id,
+                    "surface": "strategy_defaults",
+                    "levels_missing": missing,
+                    "fallback_used": fallbacks,
+                },
+            )
+
     async def _fetch_strategy_defaults(
         self,
         strategy_id: str,
@@ -1174,13 +1273,7 @@ class ContextBuilder:
                     },
                 )
                 return StrategyDefaults.unavailable()
-            return StrategyDefaults(
-                stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
-                take_profit_pct=params.get("take_profit_pct")
-                or params.get("tp_pct", 0.04),
-                leverage=params.get("leverage", 1.0),
-                max_hold_hours=params.get("max_hold_hours", 24.0),
-            )
+            return self._defaults_from_parameters(params)
         except httpx.ReadTimeout:
             timeout_s = self.client.timeout.read
             logger.warning(

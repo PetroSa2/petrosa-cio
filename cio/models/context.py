@@ -66,6 +66,13 @@ class StrategyDefaults(BaseModel):
     leverage: float = 1.0
     max_hold_hours: float
     available: bool = True
+    # Per field: True when the strategy configuration carries it, False when the value above is the
+    # labelled FALLBACK_* constant. EV and Kelly use the stop and target only if they are known (carried
+    # by the order or configured).
+    sl_configured: bool = True
+    tp_configured: bool = True
+    leverage_configured: bool = True
+    max_hold_configured: bool = True
 
     @classmethod
     def unavailable(cls) -> "StrategyDefaults":
@@ -81,6 +88,10 @@ class StrategyDefaults(BaseModel):
             leverage=FALLBACK_LEVERAGE,
             max_hold_hours=FALLBACK_MAX_HOLD_HOURS,
             available=False,
+            sl_configured=False,
+            tp_configured=False,
+            leverage_configured=False,
+            max_hold_configured=False,
         )
 
 
