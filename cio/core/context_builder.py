@@ -1157,6 +1157,28 @@ class ContextBuilder:
 
             # Map Data Manager parameters to CIO StrategyDefaults
             params = data.get("parameters", {})
+            if not params:
+                if gaps is not None:
+                    gaps.append(
+                        ContextGap(
+                            surface="strategy_defaults",
+                            reason="empty_config parameters={}",
+                        )
+                    )
+                logger.warning(
+                    "Strategy defaults are unavailable because the configuration is empty",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "strategy_id": strategy_id,
+                        "surface": "strategy_defaults",
+                    },
+                )
+                return StrategyDefaults(
+                    stop_loss_pct=0.01,
+                    take_profit_pct=0.01,
+                    leverage=1.0,
+                    max_hold_hours=1.0,
+                )
             return StrategyDefaults(
                 stop_loss_pct=params.get("stop_loss_pct") or params.get("sl_pct", 0.02),
                 take_profit_pct=params.get("take_profit_pct")

@@ -3,6 +3,7 @@ import pytest
 from cio.core.engine import CodeEngine
 from cio.models import (
     ConfidenceLevel,
+    ContextGap,
     MarketSignals,
     MarketState,
     PnlTrend,
@@ -170,6 +171,60 @@ def test_code_engine_regime_adjustment():
 
     # EV = (0.6 * 0.052) - (0.4 * 0.024) = 0.0312 - 0.0096 = 0.0216
     assert pytest.approx(result.gross_ev, 0.0001) == 0.0216
+
+
+def test_code_engine_uses_absolute_order_payoff():
+    ctx = build_test_context(win_rate=0.4)
+    ctx.trigger_payload = {
+        "entry_price": 100.0,
+        "stop_loss": 99.78,
+        "take_profit": 100.44,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0044)
+    assert result.gross_ev == pytest.approx(0.00044)
+    assert result.kelly_fraction == pytest.approx(0.1)
+
+
+def test_code_engine_falls_back_when_absolute_order_levels_are_incomplete():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.trigger_payload = {"entry_price": 100.0, "stop_loss": 99.78}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.024)
+    assert result.recommended_tp_pct == pytest.approx(0.032)
+
+
+def test_code_engine_uses_absolute_order_payoff_for_short_signal():
+    ctx = build_test_context(win_rate=0.4)
+    ctx.trigger_payload = {
+        "side": "SELL",
+        "entry_price": 100.0,
+        "stop_loss": 100.22,
+        "take_profit": 99.56,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0044)
+
+
+def test_code_engine_suppresses_ev_for_empty_strategy_config():
+    ctx = build_test_context(win_rate=0.6, portfolio_state_available=True)
+    ctx.pre_decision_context.gaps.append(
+        ContextGap(surface="strategy_defaults", reason="empty_config parameters={}")
+    )
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is True
+    assert result.gross_ev is None
+    assert result.kelly_position_usd is None
 
 
 def test_code_engine_regime_confidence_bypass():

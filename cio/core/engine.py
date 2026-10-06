@@ -38,6 +38,45 @@ REGIME_HARD_BLOCKS = {
 }
 
 
+def _absolute_order_payoff(context: TriggerContext) -> tuple[float, float] | None:
+    payload = context.trigger_payload
+    entry = payload.get("entry_price", payload.get("price"))
+    stop = payload.get("stop_loss")
+    target = payload.get("take_profit", payload.get("target_price"))
+    if entry is None:
+        entry = context.market_signals.current_price
+    try:
+        entry_price = float(entry)
+        stop_price = float(stop)
+        target_price = float(target)
+    except (TypeError, ValueError):
+        return None
+    if entry_price <= 0 or stop_price <= 0 or target_price <= 0:
+        return None
+    side = str(payload.get("side", "")).upper()
+    if side in {"BUY", "LONG"} and not stop_price < entry_price < target_price:
+        return None
+    if side in {"SELL", "SHORT"} and not target_price < entry_price < stop_price:
+        return None
+    stop_distance = abs(stop_price - entry_price) / entry_price
+    target_distance = abs(target_price - entry_price) / entry_price
+    if stop_distance <= 0 or target_distance <= 0:
+        return None
+    return stop_distance, target_distance
+
+
+def _strategy_defaults_unavailable(context: TriggerContext) -> bool:
+    pre_decision = context.pre_decision_context
+    return bool(
+        pre_decision
+        and any(
+            gap.surface == "strategy_defaults"
+            and gap.reason.startswith("empty_config")
+            for gap in pre_decision.gaps
+        )
+    )
+
+
 class CodeEngine:
     """
     Deterministic quantitative engine for risk, EV, and position sizing.
@@ -127,18 +166,23 @@ class CodeEngine:
             )
             return result
 
-        # 3. PARAMETER GENERATION (Initial volatility-adjusted SL/TP)
-        vol_multiplier = SL_VOL_MULTIPLIERS.get(context.volatility_level, 1.0)
-        result.recommended_sl_pct = (
-            context.strategy_defaults.stop_loss_pct * vol_multiplier
-        )
-        result.recommended_tp_pct = context.strategy_defaults.take_profit_pct
+        # 3. PARAMETER GENERATION (prefer the levels carried by the order)
+        absolute_payoff = _absolute_order_payoff(context)
+        if absolute_payoff is not None:
+            result.recommended_sl_pct, result.recommended_tp_pct = absolute_payoff
+        else:
+            vol_multiplier = SL_VOL_MULTIPLIERS.get(context.volatility_level, 1.0)
+            result.recommended_sl_pct = (
+                context.strategy_defaults.stop_loss_pct * vol_multiplier
+            )
+            result.recommended_tp_pct = context.strategy_defaults.take_profit_pct
         result.leverage = context.strategy_defaults.leverage
 
         # 4. REGIME ADJUSTMENTS (Fix 4)
-        # Apply TP regime multiplier
-        tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
-        result.recommended_tp_pct *= tp_multiplier
+        if absolute_payoff is None:
+            # Apply TP regime multiplier
+            tp_multiplier = REGIME_TP_MULTIPLIERS.get(context.regime.regime, 1.0)
+            result.recommended_tp_pct *= tp_multiplier
 
         # Apply Leverage regime cap
         lev_cap = REGIME_LEVERAGE_CAPS.get(context.regime.regime, DEFAULT_LEVERAGE_CAP)
@@ -149,7 +193,7 @@ class CodeEngine:
         win_rate = (
             None if stats.history_status == "insufficient_history" else stats.win_rate
         )
-        if win_rate is None:
+        if win_rate is None or _strategy_defaults_unavailable(context):
             result.ev_unavailable = True
         else:
             # gross_ev = (win_rate * TP) - ((1 - win_rate) * SL)
@@ -159,7 +203,11 @@ class CodeEngine:
             )
 
         # 6. POSITION SIZING (Kelly Criterion)
-        if win_rate is not None and result.recommended_sl_pct > 0:
+        if (
+            win_rate is not None
+            and not _strategy_defaults_unavailable(context)
+            and result.recommended_sl_pct > 0
+        ):
             # Kelly Fraction f* = (p/a) - (q/b) where:
             # p = probability of win (win_rate)
             # q = probability of loss (1 - win_rate)
