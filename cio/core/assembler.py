@@ -105,11 +105,11 @@ class DecisionAssembler:
             old_val = 0.0
             new_val = 0.0
 
-            if sig.param == "stop_loss_pct":
+            if sig.param == "stop_loss_pct" and sl_pct is not None:
                 old_val = sl_pct
                 sl_pct *= multiplier
                 new_val = sl_pct
-            elif sig.param == "take_profit_pct":
+            elif sig.param == "take_profit_pct" and tp_pct is not None:
                 old_val = tp_pct
                 tp_pct *= multiplier
                 new_val = tp_pct

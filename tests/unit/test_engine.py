@@ -292,12 +292,146 @@ def test_the_unavailable_defaults_are_labelled_fallbacks():
     ).available
 
 
+def _levels_not_configured(**fields):
+    """What a config of just {enabled: true} gives: every level is a labelled fallback."""
+    from cio.models.context import (
+        FALLBACK_LEVERAGE,
+        FALLBACK_MAX_HOLD_HOURS,
+        FALLBACK_STOP_LOSS_PCT,
+        FALLBACK_TAKE_PROFIT_PCT,
+    )
+
+    return StrategyDefaults(
+        stop_loss_pct=FALLBACK_STOP_LOSS_PCT,
+        take_profit_pct=FALLBACK_TAKE_PROFIT_PCT,
+        leverage=FALLBACK_LEVERAGE,
+        max_hold_hours=FALLBACK_MAX_HOLD_HOURS,
+        sl_configured=False,
+        tp_configured=False,
+        leverage_configured=False,
+        max_hold_configured=False,
+        **fields,
+    )
+
+
+def test_unconfigured_levels_without_carried_levels_give_no_ev_and_no_recommendation():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.strategy_defaults = _levels_not_configured()
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is True
+    assert result.gross_ev is None
+    assert result.kelly_position_usd is None
+    # The labelled fallback never reaches the recommended order parameters.
+    assert result.recommended_sl_pct is None
+    assert result.recommended_tp_pct is None
+    assert result.leverage <= 1.0
+
+
+def test_unconfigured_levels_with_both_levels_carried_compute_ev_from_them():
+    ctx = build_test_context(win_rate=0.4)
+    ctx.strategy_defaults = _levels_not_configured()
+    ctx.trigger_payload = {
+        "entry_price": 100.0,
+        "stop_loss": 99.78,
+        "take_profit": 100.44,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is False
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0044)
+    assert result.gross_ev == pytest.approx(0.4 * 0.0044 - 0.6 * 0.0022)
+
+
+def test_a_strategy_absent_from_the_store_with_both_levels_carried_still_gets_ev():
+    """iceberg_detector is absent from the config store: carried levels must still count."""
+    ctx = build_test_context(win_rate=0.4, portfolio_state_available=True)
+    ctx.strategy_defaults = StrategyDefaults.unavailable()
+    ctx.pre_decision_context.gaps.append(
+        ContextGap(surface="strategy_defaults", reason="empty_config parameters={}")
+    )
+    ctx.trigger_payload = {
+        "side": "BUY",
+        "entry_price": 100.0,
+        "stop_loss": 99.78,
+        "take_profit": 100.66,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is False
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0066)
+    assert result.gross_ev == pytest.approx(0.4 * 0.0066 - 0.6 * 0.0022)
+    assert result.kelly_fraction is not None
+    # The gap stays on the decision record.
+    assert any(
+        gap.reason.startswith("empty_config") for gap in ctx.pre_decision_context.gaps
+    )
+
+
+def test_unconfigured_levels_with_only_a_carried_stop_have_no_ev():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.strategy_defaults = _levels_not_configured()
+    ctx.trigger_payload = {"entry_price": 100.0, "stop_loss": 99.78}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is True
+    assert result.kelly_position_usd is None
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct is None
+
+
+def test_a_configured_target_completes_a_carried_stop():
+    ctx = build_test_context(win_rate=0.6)
+    ctx.strategy_defaults = StrategyDefaults(
+        stop_loss_pct=0.02,
+        take_profit_pct=0.04,
+        max_hold_hours=24,
+        sl_configured=False,
+        tp_configured=True,
+    )
+    ctx.trigger_payload = {"entry_price": 100.0, "stop_loss": 99.78}
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is False
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.032)  # configured 4% x regime
+
+
+def test_a_parameter_change_on_an_unknown_level_is_skipped_not_a_crash():
+    from cio.models import (
+        CodeEngineResult,
+        ParamChangeDirection,
+        ParamChangeSignal,
+    )
+
+    code_result = CodeEngineResult(ev_unavailable=True)
+    strategy_change = ParamChangeSignal(
+        param="stop_loss_pct", direction=ParamChangeDirection.INCREASE, reason="test"
+    )
+
+    decision = _assemble(
+        RiskLimits(max_position_size_usd=120.0, probe_mode=True),
+        code_result,
+        param_change=strategy_change,
+    )
+
+    assert decision.stop_loss_pct is None
+    assert decision.computed_position_size_usd == pytest.approx(120.0)
+
+
 def test_risk_limits_without_probe_mode_means_off():
     assert RiskLimits(max_position_size_usd=1000.0).probe_mode is False
     assert RiskLimits(**{"max_position_size_usd": 120.0, "probe_mode": True}).probe_mode
 
 
-def _assemble(risk_limits, code_result):
+def _assemble(risk_limits, code_result, param_change=None):
     from cio.core.assembler import DecisionAssembler
     from cio.models import (
         ActionType,
@@ -313,6 +447,7 @@ def _assemble(risk_limits, code_result):
         health=HealthStatus.HEALTHY,
         activation_recommendation=ActivationRecommendation.RUN,
         regime_fit=RegimeFit.GOOD,
+        param_change=param_change,
         thought_trace="test",
     )
     return DecisionAssembler.assemble(
@@ -368,6 +503,7 @@ def test_code_engine_uses_absolute_order_payoff_for_short_signal():
 
 def test_code_engine_suppresses_ev_for_empty_strategy_config():
     ctx = build_test_context(win_rate=0.6, portfolio_state_available=True)
+    ctx.strategy_defaults = StrategyDefaults.unavailable()
     ctx.pre_decision_context.gaps.append(
         ContextGap(surface="strategy_defaults", reason="empty_config parameters={}")
     )
