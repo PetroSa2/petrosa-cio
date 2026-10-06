@@ -346,6 +346,33 @@ def test_unconfigured_levels_with_both_levels_carried_compute_ev_from_them():
     assert result.gross_ev == pytest.approx(0.4 * 0.0044 - 0.6 * 0.0022)
 
 
+def test_a_strategy_absent_from_the_store_with_both_levels_carried_still_gets_ev():
+    """iceberg_detector is absent from the config store: carried levels must still count."""
+    ctx = build_test_context(win_rate=0.4, portfolio_state_available=True)
+    ctx.strategy_defaults = StrategyDefaults.unavailable()
+    ctx.pre_decision_context.gaps.append(
+        ContextGap(surface="strategy_defaults", reason="empty_config parameters={}")
+    )
+    ctx.trigger_payload = {
+        "side": "BUY",
+        "entry_price": 100.0,
+        "stop_loss": 99.78,
+        "take_profit": 100.66,
+    }
+
+    result = CodeEngine.run(ctx)
+
+    assert result.ev_unavailable is False
+    assert result.recommended_sl_pct == pytest.approx(0.0022)
+    assert result.recommended_tp_pct == pytest.approx(0.0066)
+    assert result.gross_ev == pytest.approx(0.4 * 0.0066 - 0.6 * 0.0022)
+    assert result.kelly_fraction is not None
+    # The gap stays on the decision record.
+    assert any(
+        gap.reason.startswith("empty_config") for gap in ctx.pre_decision_context.gaps
+    )
+
+
 def test_unconfigured_levels_with_only_a_carried_stop_have_no_ev():
     ctx = build_test_context(win_rate=0.6)
     ctx.strategy_defaults = _levels_not_configured()
