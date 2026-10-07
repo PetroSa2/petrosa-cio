@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from cio.apps.dashboard_api import router as dashboard_router
 from cio.core.decision_store import DecisionRecord, DecisionStore
+from cio.models.net_ev import DrawdownDecision, NetEvGate, SizingRecord
 
 _UTC = UTC
 
@@ -31,6 +32,36 @@ def _make_app(*, decision_store=None, evaluator_subscriber=None) -> FastAPI:
 
 
 class TestDecisionsRecent:
+    def test_returns_structured_risk_records(self):
+        store = DecisionStore()
+        store.record(
+            DecisionRecord(
+                strategy_id="s1",
+                action="execute",
+                reasoning_trace="trace",
+                confidence=0.9,
+                sizing=SizingRecord(
+                    f_q=0.25, equity_usd=1000, probe_usd=10, final_size_usd=10
+                ),
+                drawdown=DrawdownDecision(
+                    action="none",
+                    z_reduce=1.0,
+                    z_halt=2.0,
+                    reduce_threshold=0.03,
+                    halt_threshold=0.06,
+                ),
+                net_ev_gate=NetEvGate(result="pass", reason="positive edge"),
+            )
+        )
+        response = TestClient(_make_app(decision_store=store)).get(
+            "/api/dashboard/decisions/recent"
+        )
+        assert response.status_code == 200
+        decision = response.json()["decisions"][0]
+        assert decision["sizing"]["final_size_usd"] == 10.0
+        assert decision["drawdown"]["action"] == "none"
+        assert decision["net_ev_gate"]["reason"] == "positive edge"
+
     def test_returns_decisions_within_window(self):
         store = DecisionStore()
         now = datetime.now(_UTC)
@@ -131,6 +162,9 @@ class TestDecisionsRecent:
             "reasoning_trace",
             "confidence",
             "timestamp",
+            "sizing",
+            "drawdown",
+            "net_ev_gate",
         ):
             assert f in d, f"missing field: {f}"
 
