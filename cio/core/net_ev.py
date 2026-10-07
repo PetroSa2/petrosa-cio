@@ -38,7 +38,6 @@ TURBULENT_SLIPPAGE_MULTIPLIER = (
     2.0  # decision 21: twice the slippage on turbulent_illiquidity
 )
 TURBULENT_REGIME = "turbulent_illiquidity"
-FALLBACK_MIN_NET_EV_R = 0.10  # used when no posterior exists
 #: Slippage statistics from fewer fills than this are not used.
 MIN_SLIPPAGE_SAMPLES = 10
 
@@ -249,10 +248,11 @@ def evaluate(
     stop_pct: float | None,
     take_profit_pct: float | None,
     now: datetime | None = None,
+    point: Literal["engine", "assembler"] = "engine",
 ) -> NetEvGate:
     """Run the gate and the data-integrity check for the levels the order will carry."""
     now = now or datetime.now(UTC)
-    gate = _evaluate(context, stop_pct, take_profit_pct, now)
+    gate = _evaluate(context, stop_pct, take_profit_pct, now, point)
     gate.integrity = integrity_flag(context, now)
     return gate
 
@@ -262,6 +262,7 @@ def _evaluate(
     stop_pct: float | None,
     take_profit_pct: float | None,
     now: datetime,
+    point: Literal["engine", "assembler"] = "engine",
 ) -> NetEvGate:
     """Run the gate for the stop and take-profit the order will carry.
 
@@ -283,6 +284,7 @@ def _evaluate(
             stop_pct=stop_pct,
             take_profit_pct=take_profit_pct,
             alpha=alpha,
+            evaluation=point,
         )
 
     fallbacks: list[str] = []
@@ -317,22 +319,37 @@ def _evaluate(
         p_be=p_be,
         alpha=alpha,
         fallbacks=fallbacks,
+        evaluation=point,
     )
 
     stats = context.strategy_stats
     wins, losses = stats.wins, stats.losses
-    if wins is not None and losses is not None:
+    counts_known = wins is not None and losses is not None
+    if counts_known:
         gate.n = wins + losses
-    if wins is not None and losses is not None and wins + losses > 0 and p_be < 1.0:
+    if p_be >= 1.0:
+        gate.result = "fail"
+        gate.reason = "net_ev_lcb_below_zero"
+        gate.method = "posterior"
+        gate.prob_edge = 0.0
+        gate.net_ev_r = -1.0
+    else:
+        # The win rate only enters through the posterior: a Beta prior centred on p_be plus the closed
+        # rounds. Without counts (a bare point win rate from the performance route, or no win rate at all)
+        # there is no evidence: the posterior is the prior (P(win rate > p_be) = 0.5), which never clears
+        # 1 - alpha, and n is unknown, which is cold start (petrosa-cio#307; ruling on #296).
+        w, lo = (wins, losses) if counts_known else (0, 0)
+        if not counts_known:
+            gate.fallbacks.append("closed_round_counts_unknown")
         prior = context.prior_strength
         k = prior.value if prior is not None else prior_strength()
         k_source = prior.source if prior is not None else "fallback"
-        a = k * p_be + wins
-        b = k * (1.0 - p_be) + losses
+        a = k * p_be + w
+        b = k * (1.0 - p_be) + lo
         mean = a / (a + b)
         gate.posterior = NetEvPosterior(
-            wins=wins,
-            losses=losses,
+            wins=w,
+            losses=lo,
             prior_strength=k,
             k_source=k_source,
             alpha=a,
@@ -340,32 +357,14 @@ def _evaluate(
             mean=mean,
         )
         gate.method = "posterior"
-        gate.p_ref = mean
         gate.prob_edge = 1.0 - beta_cdf(p_be, a, b)
         gate.net_ev_r = mean * (reward_risk + 1.0) - 1.0 - gate.cost_share
         gate.result = "pass" if gate.prob_edge >= 1.0 - alpha else "fail"
         gate.reason = (
             "net_ev_lcb_ok" if gate.result == "pass" else "net_ev_lcb_below_zero"
         )
-    elif p_be >= 1.0:
-        gate.result = "fail"
-        gate.reason = "net_ev_lcb_below_zero"
-        gate.method = "posterior"
-        gate.prob_edge = 0.0
-        gate.net_ev_r = -1.0
-    elif stats.win_rate is not None:
-        # No posterior (the closed-round counts are missing): the labelled fallback, net EV >= +0.10R.
-        gate.fallbacks.append("posterior_fallback")
-        gate.method = "fallback_min_ev"
-        gate.min_net_ev_r = FALLBACK_MIN_NET_EV_R
-        gate.net_ev_r = stats.win_rate * (reward_risk + 1.0) - 1.0 - gate.cost_share
-        gate.result = "pass" if gate.net_ev_r >= FALLBACK_MIN_NET_EV_R else "fail"
-        gate.reason = (
-            "net_ev_fallback_ok" if gate.result == "pass" else "net_ev_lcb_below_zero"
-        )
-    else:
-        gate.reason = "no_win_rate"
-        return gate
+        if counts_known and w + lo > 0:
+            gate.p_ref = mean  # the shrunk win rate, for the cost-share pre-filter
 
     if gate.p_ref is not None:
         gate.cost_share_limit = gate.p_ref * (reward_risk + 1.0) - 1.0
@@ -496,9 +495,8 @@ def _decide_phase(context: TriggerContext, gate: NetEvGate, now: datetime) -> No
     gate.target_win_rate = target_win_rate()
     gate.n_req = required_rounds(gate.p_be, gate.alpha)
     if gate.n is None:
-        gate.phase = (
-            "enforced"  # no closed-round counts: the labelled fallback rule applies
-        )
+        # Unknown counts cannot satisfy n >= n_req: cold start (fail-safe, petrosa-cio#307)
+        gate.phase = "cold_start"
     elif gate.n_req is not None and gate.n >= gate.n_req:
         gate.phase = "enforced"
     elif _cold_start_time_is_up(context.strategy_rounds, gate, now):
@@ -566,14 +564,42 @@ def _cold_start_limits(context: TriggerContext, gate: NetEvGate) -> ColdStartLim
     return limits
 
 
+def _carried_levels(context: TriggerContext) -> str:
+    """The levels the signal actually carried, for a ``levels_unknown`` line."""
+    payload = context.trigger_payload or {}
+    names = (
+        "entry_price",
+        "price",
+        "stop_loss",
+        "stop_loss_pct",
+        "take_profit",
+        "take_profit_pct",
+        "target_price",
+    )
+    return ",".join(f"{n}={payload.get(n)!r}" for n in names if n in payload) or "none"
+
+
 def log_gate(context: TriggerContext, gate: NetEvGate) -> None:
-    """One structured line per evaluation: the gate record, with c/S on every decision."""
+    """One line per evaluation: the gate record, with c/S on every decision.
+
+    The ids are in the message text (a JSON formatter drops ``extra``). The gate is evaluated twice per
+    decision, in the code engine and in the assembler (``point=``): count baselines per ``decision_id`` on the
+    ``assembler`` lines. A ``levels_unknown`` line shows the levels the signal carried.
+    """
     import logging
 
+    payload = context.trigger_payload or {}
     logging.getLogger(__name__).info(
-        "NET_EV_GATE result=%s reason=%s method=%s s_eff=%s p_be=%s prob_edge=%s alpha=%s c=%s c_over_s=%s fallbacks=%s",
+        "NET_EV_GATE strategy=%s decision=%s symbol=%s point=%s result=%s outcome=%s reason=%s phase=%s "
+        "method=%s s_eff=%s p_be=%s prob_edge=%s alpha=%s c=%s c_over_s=%s n=%s fallbacks=%s levels=%s",
+        context.strategy_id,
+        context.decision_id,
+        payload.get("symbol", "-"),
+        gate.evaluation,
         gate.result,
+        gate.outcome,
         gate.reason,
+        gate.phase or "-",
         gate.method,
         _fmt(gate.s_eff),
         _fmt(gate.p_be),
@@ -581,10 +607,13 @@ def log_gate(context: TriggerContext, gate: NetEvGate) -> None:
         _fmt(gate.alpha),
         _fmt(gate.cost_total),
         _fmt(gate.cost_share),
+        "-" if gate.n is None else gate.n,
         ",".join(gate.fallbacks) or "-",
+        _carried_levels(context) if gate.reason == "levels_unknown" else "-",
         extra={
             "correlation_id": context.correlation_id,
             "strategy_id": context.strategy_id,
+            "decision_id": context.decision_id,
             "net_ev_gate": gate.model_dump(),
         },
     )

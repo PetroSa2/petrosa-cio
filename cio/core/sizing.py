@@ -74,6 +74,8 @@ def _size_order(context: TriggerContext, gate: NetEvGate) -> SizingRecord:
         return record
     if (
         posterior is None
+        # a prior-only posterior (no closed rounds, or counts unknown) is no evidence: the probe (#307)
+        or posterior.wins + posterior.losses == 0
         or gate.prob_edge is None
         or gate.take_profit_pct is None
         or gate.s_eff is None

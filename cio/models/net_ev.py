@@ -211,7 +211,7 @@ class NetEvGate(BaseModel):
     time_limit_source: str | None = None
     days_in_cold_start: float | None = None
     integrity: IntegrityFlag | None = None
-    method: Literal["posterior", "fallback_min_ev", "none"] = "none"
+    method: Literal["posterior", "none"] = "none"
     stop_pct: float | None = None  # carried or configured stop distance
     stop_floor_frac: float | None = (
         None  # tradeengine's floor from /state, as a fraction of the entry
@@ -233,7 +233,10 @@ class NetEvGate(BaseModel):
     net_ev_r: float | None = (
         None  # net EV in R at the posterior mean (or the point win rate)
     )
-    min_net_ev_r: float | None = None  # the floor used by the labelled fallback
+    # Where in the decision this evaluation ran: the code engine (before the LLM) or the assembler (after it,
+    # on the levels after any parameter change). The gate runs at both, so count baselines per decision_id
+    # on ``assembler`` lines (petrosa-cio#307).
+    evaluation: Literal["engine", "assembler"] = "engine"
     p_ref: float | None = None  # the strategy's shrunk win rate
     cost_share_limit: float | None = None  # p_ref * (R + 1) - 1
     cost_share_skip: bool = False  # c/S above the limit
