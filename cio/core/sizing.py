@@ -36,8 +36,24 @@ def kelly_fraction(p: float, b_net: float) -> float:
     return max(0.0, p - (1.0 - p) / b_net)
 
 
-def size_order(context: TriggerContext, gate: NetEvGate) -> SizingRecord:
-    """Size the order from the gate's posterior; the probe when there is no posterior or the data is flagged."""
+def size_order(
+    context: TriggerContext, gate: NetEvGate, drawdown_factor: float = 1.0
+) -> SizingRecord:
+    """Size the order from the gate's posterior; the probe when there is no posterior or the data is flagged.
+
+    ``drawdown_factor`` (0.5 at the drawdown reduce step) scales the result, never below the probe.
+    """
+    record = _size_order(context, gate)
+    if drawdown_factor < 1.0:
+        record.size_before_drawdown_usd = record.final_size_usd
+        record.drawdown_factor = drawdown_factor
+        record.final_size_usd = max(
+            record.probe_usd, record.final_size_usd * drawdown_factor
+        )
+    return record
+
+
+def _size_order(context: TriggerContext, gate: NetEvGate) -> SizingRecord:
     probe = probe_notional(context)
     equity = max(0.0, float(context.available_capital_usd or 0.0))
     f_q = kelly_multiplier()

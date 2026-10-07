@@ -106,8 +106,62 @@ class SizingRecord(BaseModel):
     )
     probe_usd: float
     final_size_usd: float
+    drawdown_factor: float = 1.0  # x0.5 at the drawdown reduce step (rule 5)
+    size_before_drawdown_usd: float | None = None
     binding: Literal["probe", "kelly", "max_position", "cold_start_probe"] = "probe"
     reason: str | None = None
+
+
+class DrawdownState(BaseModel):
+    """tradeengine ``/state`` ``drawdown`` (petrosa-tradeengine#736): the drawdown from the equity peak."""
+
+    from_peak: float | None = (
+        None  # a FRACTION (despite tradeengine's ``from_peak_pct`` name)
+    )
+    equity_now: float | None = None
+    equity_peak: float | None = None
+    peak_at: str | None = None
+    net_notional_ratio: float | None = None  # signed net notional / equity
+    as_of: str | None = None
+
+
+class RiskInputs(BaseModel):
+    """data-manager's ``GET /api/v1/risk/inputs`` (petrosa-data-manager#538), reduced to what rule 5 uses.
+
+    ``sigma_daily`` holds only the pairs whose daily sigma is sufficient; ``correlation`` only the pairs with a
+    sufficient correlation.
+    """
+
+    sigma_daily: dict[str, float] = Field(default_factory=dict)
+    correlation: dict[str, dict[str, float | None]] = Field(default_factory=dict)
+    equity_sigma: float | None = None
+    equity_sufficient: bool = False
+
+
+class DrawdownDecision(BaseModel):
+    """The drawdown step: sigma (each component and which won), the thresholds, the drawdown and the action."""
+
+    action: Literal["none", "reduce", "halt", "not_evaluated"]
+    reason: str | None = None
+    drawdown: float | None = None
+    net_notional_ratio: float | None = None
+    basket_sigma: float | None = None
+    basket_symbols: list[str] = Field(default_factory=list)
+    basket_source: str | None = None  # held_pairs | basket_all_traded_pairs
+    components_missing: list[str] = Field(
+        default_factory=list
+    )  # model / realized sigma left out
+    model_sigma: float | None = None
+    realized_sigma: float | None = None
+    sigma: float | None = None
+    sigma_source: Literal["model", "realized", "fallback"] = "fallback"
+    z_reduce: float
+    z_halt: float
+    reduce_threshold: float
+    halt_threshold: float
+    threshold_source: Literal["derived", "fallback"] = "fallback"
+    reduce_factor: float = 0.5
+    fallbacks: list[str] = Field(default_factory=list)
 
 
 class ColdStartLimits(BaseModel):

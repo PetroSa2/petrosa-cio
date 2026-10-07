@@ -23,6 +23,7 @@ from cio.models import (
     CharacterizationRef,
     CommissionRates,
     ContextGap,
+    DrawdownState,
     EvaluatorVerdict,
     MarketSignals,
     MarketState,
@@ -33,6 +34,7 @@ from cio.models import (
     PriorStrength,
     RegimeAPIResponse,
     RegimeResult,
+    RiskInputs,
     RiskLimits,
     SlippageEstimate,
     StrategyDefaults,
@@ -186,6 +188,8 @@ class ContextBuilder:
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
         self._slippage_cache: tuple[float, dict[str, tuple[float, int]]] | None = None
         # data-manager's round report: (expires_at, {strategy: StrategyRounds}, PriorStrength)
+        # data-manager's risk inputs: (expires_at, RiskInputs | None)
+        self._risk_inputs_cache: tuple[float, RiskInputs | None] | None = None
         self._rounds_cache: (
             tuple[float, dict[str, StrategyRounds], PriorStrength] | None
         ) = None
@@ -292,6 +296,8 @@ class ContextBuilder:
         historical_context = results[3] if vector_task else None
 
         commission = self._commission_from(env_stats.get("commission"))
+        drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
+        risk_inputs = await self._fetch_risk_inputs(correlation_id)
         slippage = await self._fetch_slippage(regime, correlation_id)
         prior_strength, strategy_rounds = await self._fetch_rounds(
             strategy_id, correlation_id
@@ -376,6 +382,8 @@ class ContextBuilder:
             commission=commission,
             slippage=slippage,
             prior_strength=prior_strength,
+            drawdown_state=drawdown_state,
+            risk_inputs=risk_inputs,
             strategy_rounds=strategy_rounds,
             historical_context=historical_context,
             pre_decision_context=pre_decision_context,
@@ -441,6 +449,71 @@ class ContextBuilder:
             pooled_median_bp=pooled_median,
             pooled_count=pooled_count,
         )
+
+    @staticmethod
+    def _drawdown_from(raw: Any) -> DrawdownState | None:
+        """tradeengine's ``/state`` drawdown block; ``from_peak_pct`` is a fraction despite its name."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return DrawdownState(
+                from_peak=raw.get("from_peak_pct"),
+                equity_now=raw.get("equity_now"),
+                equity_peak=raw.get("equity_peak"),
+                peak_at=raw.get("peak_at"),
+                net_notional_ratio=raw.get("net_notional_ratio"),
+                as_of=raw.get("as_of"),
+            )
+        except Exception:
+            return None
+
+    async def _fetch_risk_inputs(self, correlation_id: str) -> RiskInputs | None:
+        """data-manager's risk inputs (petrosa-data-manager#538), cached for an hour (a failure for a minute).
+
+        Only sufficient items are kept: a pair's daily sigma, a pair-correlation and the equity-curve sigma.
+        """
+        now = self._clock()
+        if self._risk_inputs_cache is None or now >= self._risk_inputs_cache[0]:
+            inputs: RiskInputs | None = None
+            ttl = 3600.0
+            try:
+                response = await self.client.get(
+                    f"{self.data_manager_url}/api/v1/risk/inputs"
+                )
+                response.raise_for_status()
+                body = response.json()
+                sigmas: dict[str, float] = {}
+                for symbol, item in (body.get("symbols") or {}).items():
+                    best = (item or {}).get("sigma_daily_best") or {}
+                    if best.get("sufficient") and best.get("value"):
+                        sigmas[str(symbol)] = float(best["value"])
+                corr = body.get("correlation") or {}
+                matrix = corr.get("matrix") or {}
+                ok = corr.get("sufficient") or {}
+                correlation = {
+                    a: {
+                        b: (v if (ok.get(a) or {}).get(b) else None)
+                        for b, v in (row or {}).items()
+                    }
+                    for a, row in matrix.items()
+                }
+                equity = body.get("equity") or {}
+                inputs = RiskInputs(
+                    sigma_daily=sigmas,
+                    correlation=correlation,
+                    equity_sigma=equity.get("sigma_daily"),
+                    equity_sufficient=bool(equity.get("sufficient")),
+                )
+            except Exception as exc:
+                ttl = 60.0
+                inputs = None
+                logger.warning(
+                    "RISK_INPUTS_FETCH_FAILED: %s",
+                    exc,
+                    extra={"correlation_id": correlation_id},
+                )
+            self._risk_inputs_cache = (now + ttl, inputs)
+        return self._risk_inputs_cache[1]
 
     async def _fetch_rounds(
         self, strategy_id: str, correlation_id: str
@@ -1056,6 +1129,9 @@ class ContextBuilder:
                 portfolio = PortfolioSummary(**data["portfolio"])
                 risk = RiskLimits(**data["risk_limits"])
                 env_stats = dict(data["env_stats"])
+                if data.get("drawdown") is not None:
+                    # tradeengine's drawdown from the equity peak (petrosa-cio#298)
+                    env_stats["drawdown"] = data["drawdown"]
                 if data.get("commission") is not None:
                     # tradeengine's measured commission for the symbol (the net-EV gate's input)
                     env_stats["commission"] = data["commission"]

@@ -1,5 +1,10 @@
 import logging
 
+from cio.core.drawdown import (
+    drawdown_enforced,
+    evaluate_drawdown,
+    is_closing_intent,
+)
 from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import log_gate
@@ -123,6 +128,37 @@ class CodeEngine:
             )
             return result
 
+        # 1b. DRAWDOWN STEPS (petrosa-cio#298, rule 5): reduce at z_reduce x sigma, halt new entries at
+        # z_halt x sigma of the drawdown from the equity peak. Closes and reduce-only orders pass.
+        drawdown = evaluate_drawdown(
+            context.drawdown_state,
+            context.risk_inputs,
+            context.portfolio.net_notional_by_symbol,
+        )
+        result.drawdown = drawdown
+        closing = is_closing_intent(context.trigger_payload)
+        if drawdown.action == "halt" and not closing and drawdown_enforced():
+            result.hard_blocked = True
+            result.block_reason = (
+                f"drawdown_halt: drawdown {drawdown.drawdown:.2%} from the equity peak >= "
+                f"{drawdown.halt_threshold:.2%} ({drawdown.z_halt:g} sigma, sigma "
+                f"{drawdown.sigma if drawdown.sigma is not None else 'n/a'} from {drawdown.sigma_source}, "
+                f"thresholds {drawdown.threshold_source}); new entries halted"
+            )
+            RISK_GATE_REAL_BREACH.add(1)
+            logger.warning(
+                "DRAWDOWN_HALT %s",
+                drawdown.model_dump_json(),
+                extra={"correlation_id": context.correlation_id},
+            )
+            return result
+        if drawdown.action in ("reduce", "halt"):
+            logger.warning(
+                "DRAWDOWN_STEP %s",
+                drawdown.model_dump_json(),
+                extra={"correlation_id": context.correlation_id},
+            )
+
         # 2. REGIME HARD BLOCKS (Fix 4)
         if (
             context.regime.regime in REGIME_HARD_BLOCKS
@@ -194,7 +230,12 @@ class CodeEngine:
         # x P(net EV > 0)) from the gate's posterior; the probe when there is no posterior or the data is
         # flagged. Only when the levels are known (as before).
         if levels_known and win_rate is not None and result.net_ev_gate is not None:
-            sizing = size_order(context, result.net_ev_gate)
+            factor = (
+                drawdown.reduce_factor
+                if drawdown.action == "reduce" and not closing and drawdown_enforced()
+                else 1.0
+            )
+            sizing = size_order(context, result.net_ev_gate, factor)
             result.sizing = sizing
             result.kelly_fraction = sizing.kelly_fraction
             result.kelly_position_usd = sizing.final_size_usd

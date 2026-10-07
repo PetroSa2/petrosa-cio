@@ -19,7 +19,7 @@ from cio.models import (
 )
 from cio.models.decision import LLM_UNAVAILABLE_TRACE
 from cio.models.enums import RejectionSource
-from cio.models.net_ev import SizingRecord
+from cio.models.net_ev import DrawdownDecision, SizingRecord
 
 logger = logging.getLogger(__name__)
 PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE = "PORTFOLIO_CONTEXT_UNAVAILABLE"
@@ -48,6 +48,11 @@ class DecisionAssembler:
         4. Assemble final DecisionResult.
         """
         correlation_id = context.correlation_id
+        drawdown = (
+            code_result.drawdown
+            if isinstance(code_result.drawdown, DrawdownDecision)
+            else None
+        )
 
         # 1. HARD BLOCK PASSTHROUGH
         if code_result.hard_blocked:
@@ -92,6 +97,7 @@ class DecisionAssembler:
                 activation_recommendation=strategy_result.activation_recommendation,
                 computed_position_size_usd=0.0,
                 action=ActionType.BLOCK,
+                drawdown=drawdown,
                 justification=f"Hard blocked by engine: {code_result.block_reason}",
                 thought_trace="Code Engine safety gate triggered. Bypassing all LLM logic.",
             )
@@ -201,6 +207,7 @@ class DecisionAssembler:
             net_ev_usd=code_result.gross_ev,  # Simplified mapping
             net_ev_gate=gate,
             sizing=sizing,
+            drawdown=drawdown,
             regime_confidence=regime_result.regime_confidence,
             regime_fit=strategy_result.regime_fit,
             strategy_health=strategy_result.health,
