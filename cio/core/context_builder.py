@@ -190,6 +190,8 @@ class ContextBuilder:
         # data-manager's round report: (expires_at, {strategy: StrategyRounds}, PriorStrength)
         # data-manager's risk inputs: (expires_at, RiskInputs | None)
         self._risk_inputs_cache: tuple[float, RiskInputs | None] | None = None
+        # strategy_id -> its probation loss budget in USD (the keep/kill job, petrosa-cio#299)
+        self.probation_budget_provider: Callable[[str], float | None] | None = None
         self._rounds_cache: (
             tuple[float, dict[str, StrategyRounds], PriorStrength] | None
         ) = None
@@ -383,6 +385,7 @@ class ContextBuilder:
             slippage=slippage,
             prior_strength=prior_strength,
             drawdown_state=drawdown_state,
+            probation_budget_usd=self._probation_budget(strategy_id),
             risk_inputs=risk_inputs,
             strategy_rounds=strategy_rounds,
             historical_context=historical_context,
@@ -448,6 +451,39 @@ class ContextBuilder:
             count=count,
             pooled_median_bp=pooled_median,
             pooled_count=pooled_count,
+        )
+
+    def _probation_budget(self, strategy_id: str) -> float | None:
+        """The strategy's probation loss budget (USD), when the keep/kill job has one."""
+        if self.probation_budget_provider is None:
+            return None
+        try:
+            return self.probation_budget_provider(strategy_id)
+        except Exception:
+            return None
+
+    async def risk_snapshot(
+        self, symbol: str = "BTCUSDT"
+    ) -> tuple[float | None, float | None]:
+        """(equity in USD, the drawdown reduce-step as a fraction of equity), for the keep/kill job.
+
+        The reduce-step is the one of rule 5 (``evaluate_drawdown``): derived from the portfolio's sigma, or
+        the labelled 3% fallback.
+        """
+        from cio.core.drawdown import evaluate_drawdown
+
+        portfolio, _risk, env_stats = await self._fetch_portfolio_and_risk(
+            symbol, "keep-kill"
+        )
+        equity = env_stats.get("equity") or env_stats.get("available_capital_usd")
+        decision = evaluate_drawdown(
+            self._drawdown_from(env_stats.get("drawdown")),
+            await self._fetch_risk_inputs("keep-kill"),
+            portfolio.net_notional_by_symbol,
+        )
+        return (
+            float(equity) if equity else None,
+            decision.reduce_threshold,
         )
 
     @staticmethod

@@ -36,6 +36,10 @@ from cio.core.evaluator_subscriber import EvaluatorSubscriber
 from cio.core.execution_events_consumer import ExecutionEventsConsumer
 from cio.core.health_evaluator import CIOHealthEvaluator
 from cio.core.heartbeat import HeartbeatPublisher, HeartbeatResponder
+from cio.core.keep_kill_job import (
+    DEFAULT_INTERVAL_SECONDS as DEFAULT_KEEP_KILL_INTERVAL,
+)
+from cio.core.keep_kill_job import KeepKillJob, make_pause
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
 from cio.core.orchestrator import Orchestrator
@@ -477,6 +481,20 @@ async def main():
     else:
         logger.info("Position review loop disabled (SIGNAL_ARBITRATION_ENABLED=false).")
 
+    # petrosa-cio#299 (rule 10): the daily keep/kill job. log_only by default (CIO_KEEP_KILL_MODE=enforce
+    # pauses a killed strategy through the router's pause_strategy path); its per-strategy probation budget
+    # feeds the net-EV gate's cold-start limit.
+    keep_kill_job = KeepKillJob(
+        http_client=builder.client,
+        data_manager_url=data_manager_url,
+        risk_snapshot=builder.risk_snapshot,
+        pause=make_pause(builder, router),
+        interval_seconds=float(
+            os.getenv("CIO_KEEP_KILL_INTERVAL_SECONDS", str(DEFAULT_KEEP_KILL_INTERVAL))
+        ),
+    )
+    builder.probation_budget_provider = keep_kill_job.probation_budget
+    app.state.keep_kill_job = keep_kill_job
     # petrosa_k8s#1130: closes the position lifecycle loop back into CIO.
     # The trade engine echoes position closures on execution.events.>
     # (petrosa_k8s#586); nothing consumed that subject before this, so
@@ -577,6 +595,7 @@ async def main():
             "on cadence."
         )
 
+    keep_kill_job.start()
     auto_resume_loop = None
     if not auto_resume_enabled():
         logger.info("AUTO_RESUME_DISABLED reason=env_flag")
@@ -634,6 +653,7 @@ async def main():
         SUMMARY.emit(force=True)
     except ImportError:
         pass
+    await keep_kill_job.stop()
     if position_review_loop is not None:
         await position_review_loop.stop()
     if auto_resume_loop is not None:
