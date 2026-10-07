@@ -58,6 +58,9 @@ async def test_full_nats_to_nats_loop():
     strategy_data = {
         "stats": {
             "win_rate": 0.65,
+            # the closed rounds behind the win rate: the posterior that sizes the order (petrosa-cio#297)
+            "wins": 130,
+            "losses": 70,
             "win_rate_delta": 0.05,
             "consecutive_losses": 0,
             "recent_pnl_trend": "positive",

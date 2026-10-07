@@ -149,11 +149,15 @@ def test_code_engine_ev_calculation():
 
 
 def test_code_engine_kelly_sizing():
-    ctx = build_test_context(win_rate=0.6)
+    # petrosa-cio#297: continuous posterior sizing, never below the probe, capped by the position limit
+    ctx = build_test_context(win_rate=0.7)
+    ctx.strategy_stats.wins, ctx.strategy_stats.losses = 140, 60
     result = CodeEngine.run(ctx)
-    # Kelly fraction capped at 0.25
-    assert result.kelly_fraction <= 0.25
+    assert result.sizing is not None
+    assert 0.0 <= result.kelly_fraction <= 1.0
+    assert result.kelly_position_usd >= result.sizing.probe_usd
     assert result.kelly_position_usd <= ctx.risk_limits.max_position_size_usd
+    assert result.kelly_position_usd == result.sizing.final_size_usd
 
 
 def test_code_engine_regime_adjustment():
@@ -186,7 +190,9 @@ def test_code_engine_uses_absolute_order_payoff():
     assert result.recommended_sl_pct == pytest.approx(0.0022)
     assert result.recommended_tp_pct == pytest.approx(0.0044)
     assert result.gross_ev == pytest.approx(0.00044)
-    assert result.kelly_fraction == pytest.approx(0.1)
+    # no closed-round counts: no posterior, so the probe (petrosa-cio#297)
+    assert result.sizing.reason == "no_posterior"
+    assert result.kelly_position_usd == result.sizing.probe_usd
 
 
 def test_carried_stop_wins_even_without_a_carried_target():
@@ -245,13 +251,14 @@ def test_ev_and_kelly_are_derived_from_the_carried_22_basis_point_stop():
         "take_profit": 100.0 * (1 + target),
     }
 
+    ctx.strategy_stats.wins, ctx.strategy_stats.losses = 50, 50
     result = CodeEngine.run(ctx)
 
-    odds = target / stop
     assert result.gross_ev == pytest.approx(win_rate * target - (1 - win_rate) * stop)
-    assert result.kelly_fraction == pytest.approx(win_rate - (1 - win_rate) / odds)
-    # The configured 2% / 4% payoff would give a different Kelly fraction.
-    assert result.kelly_fraction != pytest.approx(win_rate - (1 - win_rate) / 2.0)
+    # b_net uses the carried stop and the target net of the round-trip cost, not the configured 2% / 4%
+    cost = result.net_ev_gate.cost_total
+    assert result.sizing.b_net == pytest.approx((target - cost) / (stop + cost))
+    assert result.sizing.b_net != pytest.approx(2.0)
 
 
 def test_unavailable_strategy_defaults_skip_ev_and_kelly():
@@ -366,7 +373,7 @@ def test_a_strategy_absent_from_the_store_with_both_levels_carried_still_gets_ev
     assert result.recommended_sl_pct == pytest.approx(0.0022)
     assert result.recommended_tp_pct == pytest.approx(0.0066)
     assert result.gross_ev == pytest.approx(0.4 * 0.0066 - 0.6 * 0.0022)
-    assert result.kelly_fraction is not None
+    assert result.sizing is not None
     # The gap stays on the decision record.
     assert any(
         gap.reason.startswith("empty_config") for gap in ctx.pre_decision_context.gaps

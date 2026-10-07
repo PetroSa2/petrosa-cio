@@ -19,6 +19,7 @@ from cio.models import (
 )
 from cio.models.decision import LLM_UNAVAILABLE_TRACE
 from cio.models.enums import RejectionSource
+from cio.models.net_ev import SizingRecord
 
 logger = logging.getLogger(__name__)
 PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE = "PORTFOLIO_CONTEXT_UNAVAILABLE"
@@ -178,6 +179,13 @@ class DecisionAssembler:
 
         if probe_override:
             final_size_usd = probe_notional(context)
+        sizing = (
+            code_result.sizing if isinstance(code_result.sizing, SizingRecord) else None
+        )
+        if sizing is not None and probe_override:
+            sizing = sizing.model_copy(
+                update={"final_size_usd": final_size_usd, "binding": "cold_start_probe"}
+            )
 
         # 4. FINAL ASSEMBLY
         # reasoning_summary: Concatenate thought traces from regime and strategy results
@@ -192,6 +200,7 @@ class DecisionAssembler:
             cost_viable=gate.result != "fail",
             net_ev_usd=code_result.gross_ev,  # Simplified mapping
             net_ev_gate=gate,
+            sizing=sizing,
             regime_confidence=regime_result.regime_confidence,
             regime_fit=strategy_result.regime_fit,
             strategy_health=strategy_result.health,

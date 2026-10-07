@@ -4,6 +4,7 @@ from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import log_gate
 from cio.core.order_levels import carried_order_distances
+from cio.core.sizing import size_order
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
 
 logger = logging.getLogger(__name__)
@@ -189,45 +190,26 @@ class CodeEngine:
         )
         log_gate(context, result.net_ev_gate)
 
-        # 6. POSITION SIZING (Kelly Criterion)
-        if (
-            win_rate is not None
-            and levels_known
-            and result.recommended_sl_pct is not None
-            and result.recommended_tp_pct is not None
-            and result.recommended_sl_pct > 0
-        ):
-            # Kelly Fraction f* = (p/a) - (q/b) where:
-            # p = probability of win (win_rate)
-            # q = probability of loss (1 - win_rate)
-            # b = odds (TP / SL)
-            # f* = p - q/b
-            odds = result.recommended_tp_pct / result.recommended_sl_pct
-
-            if odds > 0:
-                kelly_f = win_rate - (1 - win_rate) / odds
-
-                # Cap Kelly at 0.25 (1/4 Kelly)
-                result.kelly_fraction = max(0.0, min(0.25, kelly_f))
-
-                # Multiply by available capital
-                result.kelly_position_usd = (
-                    result.kelly_fraction * context.available_capital_usd
-                )
-            else:
-                result.kelly_fraction = 0.0
-                result.kelly_position_usd = 0.0
+        # 6. POSITION SIZING (rule 2, petrosa-cio#297): size = max(probe, f_q x Kelly(p_post, b_net) x equity
+        # x P(net EV > 0)) from the gate's posterior; the probe when there is no posterior or the data is
+        # flagged. Only when the levels are known (as before).
+        if levels_known and win_rate is not None and result.net_ev_gate is not None:
+            sizing = size_order(context, result.net_ev_gate)
+            result.sizing = sizing
+            result.kelly_fraction = sizing.kelly_fraction
+            result.kelly_position_usd = sizing.final_size_usd
+            if result.net_ev_gate.integrity is not None:
+                integrity = result.net_ev_gate.integrity
                 result.risk_warnings.append(
-                    "Kelly calculation skipped: zero odds (TP=0)."
+                    "DATA_INTEGRITY: open round "
+                    f"{integrity.open_round_age_hours:.1f}h old, over 3x the median holding time "
+                    f"({integrity.median_holding_hours:.1f}h, {integrity.holding_source}); "
+                    "exits are not being attributed, sized at the probe"
                 )
-
-            # Final check: Don't exceed max position size from risk limits
-            if (
-                result.kelly_position_usd
-                and result.kelly_position_usd
-                > context.risk_limits.max_position_size_usd
-            ):
-                result.kelly_position_usd = context.risk_limits.max_position_size_usd
-                result.risk_warnings.append("Kelly size capped by risk limit.")
-
+                logger.warning(
+                    "DATA_INTEGRITY strategy=%s %s",
+                    context.strategy_id,
+                    integrity.model_dump_json(),
+                    extra={"correlation_id": context.correlation_id},
+                )
         return result

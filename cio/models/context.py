@@ -19,7 +19,12 @@ from cio.models.enums import (
     TriggerType,
     VolatilityLevel,
 )
-from cio.models.net_ev import CommissionRates, SlippageEstimate
+from cio.models.net_ev import (
+    CommissionRates,
+    PriorStrength,
+    SlippageEstimate,
+    StrategyRounds,
+)
 from cio.models.regime import RegimeResult
 
 
@@ -184,6 +189,10 @@ class TriggerContext(BaseModel):
     # (petrosa-cio#299, None until it exists) and the open cold-start notional of this strategy and of
     # all strategies, filled by the orchestrator from the portfolio tracker.
     probation_budget_usd: float | None = None
+    # The prior strength k (estimated across strategies or the fallback) and this strategy's closed-round
+    # statistics (petrosa-cio#297); None when data-manager's round report is unavailable.
+    prior_strength: PriorStrength | None = None
+    strategy_rounds: StrategyRounds | None = None
     cold_start_open_notional_usd: float = 0.0
     cold_start_total_notional_usd: float = 0.0
     slippage: SlippageEstimate | None = None

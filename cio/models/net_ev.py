@@ -1,5 +1,6 @@
 """Models of the net-EV gate: what it saw, what it decided (petrosa-cio#296)."""
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -48,9 +49,65 @@ class NetEvPosterior(BaseModel):
     wins: int
     losses: int
     prior_strength: float
+    k_source: str = "fallback"  # estimated across strategies, or the labelled fallback
     alpha: float
     beta: float
     mean: float
+
+
+class PriorStrength(BaseModel):
+    """k of the win-rate prior: estimated across strategies, or the labelled fallback (petrosa-cio#297)."""
+
+    value: float = Field(..., gt=0.0)
+    source: Literal["estimated", "fallback"]
+    strategies_used: int = 0  # strategies with enough closed rounds behind the estimate
+    reason: str | None = None
+
+
+class StrategyRounds(BaseModel):
+    """A strategy's closed-round statistics from data-manager's round report (petrosa-data-manager#537)."""
+
+    fills: int = 0
+    closed_rounds: int = 0
+    open_rounds: int = 0
+    wins: int = 0
+    losses: int = 0
+    closed_round_rate_per_day: float | None = None
+    median_holding_seconds: float | None = None
+    first_fill_at: datetime | None = None
+    last_closed_at: datetime | None = None
+    oldest_open_round_opened_at: datetime | None = None
+
+
+class IntegrityFlag(BaseModel):
+    """A strategy with an open round and no closed one within 3x its median holding time: a data-integrity
+    flag (the exits are not being attributed), not cold start."""
+
+    reason: str = "no_closed_round_within_3x_median_holding"
+    open_round_age_hours: float
+    median_holding_hours: float
+    holding_source: Literal["median_holding_time", "fallback"]
+    factor: float = 3.0
+
+
+class SizingRecord(BaseModel):
+    """How the order was sized: p_post, k and its source, P(net EV > 0), the Kelly fraction and the size."""
+
+    p_post: float | None = None
+    k: float | None = None
+    k_source: str | None = None
+    prob_net_ev_positive: float | None = None
+    b_net: float | None = None
+    kelly_fraction: float | None = None
+    f_q: float
+    equity_usd: float
+    kelly_size_usd: float | None = (
+        None  # f_q x Kelly x equity x P(net EV > 0), before the probe floor
+    )
+    probe_usd: float
+    final_size_usd: float
+    binding: Literal["probe", "kelly", "max_position", "cold_start_probe"] = "probe"
+    reason: str | None = None
 
 
 class ColdStartLimits(BaseModel):
@@ -95,6 +152,11 @@ class NetEvGate(BaseModel):
     )
     target_win_rate: float | None = None
     cold_start: ColdStartLimits | None = None
+    # Rule 7 time limit: n_req / the observed closed-round rate, 14 days when the rate is unknown
+    time_limit_days: float | None = None
+    time_limit_source: str | None = None
+    days_in_cold_start: float | None = None
+    integrity: IntegrityFlag | None = None
     method: Literal["posterior", "fallback_min_ev", "none"] = "none"
     stop_pct: float | None = None  # carried or configured stop distance
     stop_floor_frac: float | None = (
