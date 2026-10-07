@@ -108,7 +108,12 @@ class SizingRecord(BaseModel):
     final_size_usd: float
     drawdown_factor: float = 1.0  # x0.5 at the drawdown reduce step (rule 5)
     size_before_drawdown_usd: float | None = None
-    binding: Literal["probe", "kelly", "max_position", "cold_start_probe"] = "probe"
+    # Set when a low-confidence or stale regime put the order at probe size only (petrosa-cio#294)
+    regime_reason: str | None = None
+    size_before_regime_usd: float | None = None
+    binding: Literal[
+        "probe", "kelly", "max_position", "cold_start_probe", "regime_probe"
+    ] = "probe"
     reason: str | None = None
 
 
@@ -162,6 +167,18 @@ class DrawdownDecision(BaseModel):
     threshold_source: Literal["derived", "fallback", "fallback_floor"] = "fallback"
     reduce_factor: float = 0.5
     fallbacks: list[str] = Field(default_factory=list)
+
+
+class RegimeAvailability(BaseModel):
+    """Whether the regime could inform the decision: confident and fresh (petrosa-cio#294)."""
+
+    available: bool
+    reason: Literal["regime_low_confidence", "regime_stale"] | None = None
+    confidence: str | None = None
+    age_seconds: float | None = None
+    age_known: bool = False
+    stale_after_seconds: float
+    computed_at: datetime | None = None
 
 
 class ColdStartLimits(BaseModel):

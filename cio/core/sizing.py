@@ -37,13 +37,23 @@ def kelly_fraction(p: float, b_net: float) -> float:
 
 
 def size_order(
-    context: TriggerContext, gate: NetEvGate, drawdown_factor: float = 1.0
+    context: TriggerContext,
+    gate: NetEvGate,
+    drawdown_factor: float = 1.0,
+    regime_reason: str | None = None,
 ) -> SizingRecord:
     """Size the order from the gate's posterior; the probe when there is no posterior or the data is flagged.
 
     ``drawdown_factor`` (0.5 at the drawdown reduce step) scales the result, never below the probe.
     """
     record = _size_order(context, gate)
+    if regime_reason is not None:
+        # A low-confidence or stale regime is unavailable: probe size only (decisions 22 and 3)
+        record.size_before_regime_usd = record.final_size_usd
+        record.final_size_usd = record.probe_usd
+        record.binding = "regime_probe"
+        record.regime_reason = regime_reason
+        return record
     if drawdown_factor < 1.0:
         record.size_before_drawdown_usd = record.final_size_usd
         record.drawdown_factor = drawdown_factor

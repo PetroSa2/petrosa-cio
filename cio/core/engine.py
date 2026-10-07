@@ -9,6 +9,7 @@ from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import log_gate
 from cio.core.order_levels import carried_order_distances
+from cio.core.regime_policy import regime_availability
 from cio.core.sizing import size_order
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
 
@@ -41,6 +42,10 @@ REGIME_LEVERAGE_CAPS = {
 }
 DEFAULT_LEVERAGE_CAP = 1.0
 
+# CAPITULATION and CHOPPY block new entries, but only on a CONFIDENT regime: a low-confidence one is
+# unavailable (probe size only, see regime_policy.py), not blocking. data-manager reports `transitional`
+# (mapped to CHOPPY) at a constant low confidence and nothing maps to CAPITULATION yet, so these blocks only
+# fire once data-manager reports those regimes with confidence (petrosa-cio#294).
 REGIME_HARD_BLOCKS = {
     RegimeEnum.CAPITULATION: "regime_block: CAPITULATION — capital preservation mode, no new entries",
     RegimeEnum.CHOPPY: "regime_block: CHOPPY — signal quality too low, skip to avoid noise trades",
@@ -235,7 +240,20 @@ class CodeEngine:
                 if drawdown.action == "reduce" and not closing and drawdown_enforced()
                 else 1.0
             )
-            sizing = size_order(context, result.net_ev_gate, factor)
+            regime_state = regime_availability(context.regime)
+            if not regime_state.available:
+                logger.info(
+                    "REGIME_UNAVAILABLE %s: probe size only",
+                    regime_state.reason,
+                    extra={
+                        "correlation_id": context.correlation_id,
+                        "regime": str(context.regime.regime),
+                        "age_seconds": regime_state.age_seconds,
+                    },
+                )
+            sizing = size_order(
+                context, result.net_ev_gate, factor, regime_state.reason
+            )
             result.sizing = sizing
             result.kelly_fraction = sizing.kelly_fraction
             result.kelly_position_usd = sizing.final_size_usd

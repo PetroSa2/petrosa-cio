@@ -38,6 +38,9 @@ TURBULENT_SLIPPAGE_MULTIPLIER = (
     2.0  # decision 21: twice the slippage on turbulent_illiquidity
 )
 TURBULENT_REGIME = "turbulent_illiquidity"
+TURBULENT_EV_UPLIFT_R = (
+    0.05  # decision 21, a fallback until the regime's slippage is measured
+)
 #: Slippage statistics from fewer fills than this are not used.
 MIN_SLIPPAGE_SAMPLES = 10
 
@@ -300,7 +303,20 @@ def _evaluate(
     regime_key = context.regime.data_manager_regime
     slippage, slippage_fallbacks = slippage_component(context.slippage, regime_key)
     fallbacks += commission_fallbacks + slippage_fallbacks
-    cost = commission.value + slippage.value
+    costs = [commission, slippage]
+    if regime_key == TURBULENT_REGIME and slippage.source == "fallback":
+        # Decision 21: until the regime's slippage is measured (data-manager#535), twice the slippage (above)
+        # and +0.05R on the required EV: a cost of 0.05 x the stop. Measured slippage already is the uplift.
+        costs.append(
+            CostComponent(
+                name="turbulent_ev_uplift",
+                value=TURBULENT_EV_UPLIFT_R * s_eff,
+                source="fallback",
+                detail=f"+{TURBULENT_EV_UPLIFT_R}R on the required EV (turbulent_illiquidity, slippage unmeasured)",
+            )
+        )
+        fallbacks.append("turbulent_ev_uplift")
+    cost = sum(c.value for c in costs)
 
     p_be = (s_eff + cost) / (s_eff + take_profit_pct)
     gate = NetEvGate(
@@ -313,7 +329,7 @@ def _evaluate(
         s_eff=s_eff,
         take_profit_pct=take_profit_pct,
         reward_risk=reward_risk,
-        costs=[commission, slippage],
+        costs=costs,
         cost_total=cost,
         cost_share=cost / s_eff,
         p_be=p_be,

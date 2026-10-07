@@ -307,6 +307,7 @@ class ContextBuilder:
         results = await asyncio.gather(*fetch_tasks)
 
         regime = results[0]
+        self._note_regime_unavailable(regime, gaps)
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
@@ -528,6 +529,25 @@ class ContextBuilder:
             pooled_median_bp=pooled_median,
             pooled_count=pooled_count,
         )
+
+    @staticmethod
+    def _note_regime_unavailable(regime: RegimeResult, gaps: list[ContextGap]) -> None:
+        """A low-confidence or stale regime is unavailable (decisions 22 and 3 of petrosa_k8s#1239): record why.
+
+        A gap with a reason, not a failed surface: the regime data exists, the policy does not trust it, so the
+        order goes at probe size only (petrosa-cio#294).
+        """
+        from cio.core.regime_policy import regime_availability
+
+        state = regime_availability(regime)
+        if not state.available and state.reason is not None:
+            gaps.append(
+                ContextGap(
+                    surface="market",
+                    reason=f"{state.reason}: confidence={state.confidence} "
+                    f"age_s={state.age_seconds} stale_after_s={state.stale_after_seconds:.0f}",
+                )
+            )
 
     def _probation_budget(self, strategy_id: str) -> float | None:
         """The strategy's probation loss budget (USD), when the keep/kill job has one."""

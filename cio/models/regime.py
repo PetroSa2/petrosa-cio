@@ -74,6 +74,9 @@ class RegimeResult(BaseModel):
     # The data-manager regime name this result was mapped from (None when the regime did not come from
     # data-manager); slippage is measured per data-manager regime.
     data_manager_regime: str | None = None
+    # When data-manager computed the regime (its metadata timestamp); None when unknown. A regime older
+    # than max(3 x the analyzer interval, 1 h) is stale (petrosa-cio#294).
+    computed_at: datetime | None = None
     primary_signal: str = Field(
         ..., description="The main data point that drove this classification"
     )
@@ -134,6 +137,7 @@ class RegimeResult(BaseModel):
             volatility_level=api_data.volatility_level,
             primary_signal=f"{api_regime.value}_conf_{conf_float}",
             data_manager_regime=api_regime.value,
+            computed_at=response.metadata.timestamp if response.metadata else None,
             thought_trace=(
                 f"Mapped {api_regime} (conf={conf_float}) to {internal_regime}/{confidence.value}."
             ),
