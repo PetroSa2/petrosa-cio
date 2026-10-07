@@ -76,7 +76,7 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     assert decision.action == ActionType.RETRY_SAFE
     assert inner_timeout_completed.is_set()
     await asyncio.sleep(0)
-    assert outer_timeout_alert.await_count == 0
+    outer_timeout_alert.assert_not_awaited()
     # Default routes are distinct (haiku primary, gpt-4o-mini fallback), so a
     # primary timeout goes straight to the fallback after one attempt.
     assert inner_timeout.await_count == llm_client_module._primary_attempts(True) + 1
