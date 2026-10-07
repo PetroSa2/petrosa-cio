@@ -47,12 +47,14 @@ def test_final_decision_logs_structured_sizing_and_drawdown(caplog):
     sizing = next(message for message in messages if message.startswith("SIZING "))
     drawdown = next(message for message in messages if message.startswith("DRAWDOWN "))
     gate = next(message for message in messages if message.startswith("NET_EV_GATE "))
-    keep_kill = next(message for message in messages if message.startswith("KEEP_KILL "))
-    assert "strategy=\"strategy-a\"" in sizing
-    assert "decision=\"decision-a\"" in sizing
-    assert "symbol=\"BTCUSDT\"" in sizing
+    keep_kill = next(
+        message for message in messages if message.startswith("KEEP_KILL ")
+    )
+    assert 'strategy="strategy-a"' in sizing
+    assert 'decision="decision-a"' in sizing
+    assert 'symbol="BTCUSDT"' in sizing
     assert "final_size_usd=10.0" in sizing
-    assert "components_missing=[\"equity_sigma\"]" in drawdown
-    assert "action=\"reduce\"" in drawdown
-    assert "result=\"pass\"" in gate
-    assert "action=\"execute\"" in keep_kill
+    assert 'components_missing=["equity_sigma"]' in drawdown
+    assert 'action="reduce"' in drawdown
+    assert 'result="pass"' in gate
+    assert 'action="execute"' in keep_kill

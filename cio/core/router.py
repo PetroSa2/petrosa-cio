@@ -125,6 +125,7 @@ def _log_final_decision_observability(
             _log_value(gate.get("prob_edge")),
         )
 
+
 if TYPE_CHECKING:
     from cio.core.auto_resume import LLMPauseRegistry
 
@@ -1046,9 +1047,15 @@ class OutputRouter:
                     strategy_revision_id=getattr(context, "strategy_revision_id", None),
                     pre_decision_context=getattr(context, "pre_decision_context", None),
                     decided_leverage=leverage_decision.decided_leverage,
-                    sizing=decision.sizing if isinstance(decision.sizing, BaseModel) else None,
-                    drawdown=decision.drawdown if isinstance(decision.drawdown, BaseModel) else None,
-                    net_ev_gate=decision.net_ev_gate if isinstance(decision.net_ev_gate, BaseModel) else None,
+                    sizing=decision.sizing
+                    if isinstance(decision.sizing, BaseModel)
+                    else None,
+                    drawdown=decision.drawdown
+                    if isinstance(decision.drawdown, BaseModel)
+                    else None,
+                    net_ev_gate=decision.net_ev_gate
+                    if isinstance(decision.net_ev_gate, BaseModel)
+                    else None,
                 )
             )
 

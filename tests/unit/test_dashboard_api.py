@@ -40,9 +40,15 @@ class TestDecisionsRecent:
                 action="execute",
                 reasoning_trace="trace",
                 confidence=0.9,
-                sizing=SizingRecord(f_q=0.25, equity_usd=1000, probe_usd=10, final_size_usd=10),
+                sizing=SizingRecord(
+                    f_q=0.25, equity_usd=1000, probe_usd=10, final_size_usd=10
+                ),
                 drawdown=DrawdownDecision(
-                    action="none", z_reduce=1.0, z_halt=2.0, reduce_threshold=0.03, halt_threshold=0.06
+                    action="none",
+                    z_reduce=1.0,
+                    z_halt=2.0,
+                    reduce_threshold=0.03,
+                    halt_threshold=0.06,
                 ),
                 net_ev_gate=NetEvGate(result="pass", reason="positive edge"),
             )
