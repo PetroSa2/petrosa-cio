@@ -45,16 +45,10 @@ def test_llm_budget_fits_inside_audit_umbrella():
 async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     monkeypatch.setattr(enforcer_module, "AUDIT_TIMEOUT_SECONDS", 0.5)
     monkeypatch.delenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raising=False)
-    monkeypatch.setattr(llm_client_module, "LLM_CALL_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0.01)
-
-    async def slow_completion(**kwargs):
-        await asyncio.sleep(kwargs["timeout"] * 10)
-
-    import litellm
-
-    completion = AsyncMock(side_effect=slow_completion)
-    monkeypatch.setattr(litellm, "acompletion", completion)
+    inner_timeout = AsyncMock(side_effect=asyncio.TimeoutError)
+    monkeypatch.setattr(
+        llm_client_module, "_acompletion_with_timeout", inner_timeout
+    )
     inner_timeout_completed = asyncio.Event()
     outer_timeout_reached = asyncio.Event()
 
@@ -90,5 +84,5 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     assert not outer_timeout_reached.is_set()
     # Default routes are distinct (haiku primary, gpt-4o-mini fallback), so a
     # primary timeout goes straight to the fallback after one attempt.
-    assert completion.await_count == llm_client_module._primary_attempts(True) + 1
-    assert completion.await_count == 2
+    assert inner_timeout.await_count == llm_client_module._primary_attempts(True) + 1
+    assert inner_timeout.await_count == 2
