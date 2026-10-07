@@ -43,10 +43,13 @@ from cio.models.enums import VolatilityLevel as VolatilityLevel
 from cio.models.llm import RawLLMResponse as RawLLMResponse
 from cio.models.net_ev import CommissionRates as CommissionRates
 from cio.models.net_ev import CostComponent as CostComponent
+from cio.models.net_ev import DrawdownDecision as DrawdownDecision
+from cio.models.net_ev import DrawdownState as DrawdownState
 from cio.models.net_ev import IntegrityFlag as IntegrityFlag
 from cio.models.net_ev import NetEvGate as NetEvGate
 from cio.models.net_ev import NetEvPosterior as NetEvPosterior
 from cio.models.net_ev import PriorStrength as PriorStrength
+from cio.models.net_ev import RiskInputs as RiskInputs
 from cio.models.net_ev import SizingRecord as SizingRecord
 from cio.models.net_ev import SlippageEstimate as SlippageEstimate
 from cio.models.net_ev import StrategyRounds as StrategyRounds

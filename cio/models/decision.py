@@ -11,7 +11,7 @@ from cio.models.enums import (
     RejectionSource,
     VolatilityLevel,
 )
-from cio.models.net_ev import NetEvGate, SizingRecord
+from cio.models.net_ev import DrawdownDecision, NetEvGate, SizingRecord
 from cio.models.regime import RegimeResult
 from cio.models.strategy import AppliedParamChange, StrategyResult
 
@@ -47,6 +47,8 @@ class DecisionResult(BaseModel):
     net_ev_gate: NetEvGate | None = None
     # How the order was sized (p_post, k and its source, P(net EV > 0), Kelly fraction, final size)
     sizing: SizingRecord | None = None
+    # The drawdown step in force: sigma and its components, the thresholds, the drawdown and the action
+    drawdown: DrawdownDecision | None = None
     total_cost_usd: float | None = None
 
     # 3. LLM Classification Results

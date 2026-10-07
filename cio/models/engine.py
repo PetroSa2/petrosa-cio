@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from cio.models.net_ev import NetEvGate, SizingRecord
+from cio.models.net_ev import DrawdownDecision, NetEvGate, SizingRecord
 
 
 class CodeEngineResult(BaseModel):
@@ -36,6 +36,7 @@ class CodeEngineResult(BaseModel):
     # Net-EV gate and cost-share pre-filter record (petrosa-cio#296).
     net_ev_gate: NetEvGate | None = None
     sizing: SizingRecord | None = None
+    drawdown: DrawdownDecision | None = None
 
     # 3. Position Sizing
     kelly_fraction: float | None = None

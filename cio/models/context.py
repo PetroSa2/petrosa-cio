@@ -21,7 +21,9 @@ from cio.models.enums import (
 )
 from cio.models.net_ev import (
     CommissionRates,
+    DrawdownState,
     PriorStrength,
+    RiskInputs,
     SlippageEstimate,
     StrategyRounds,
 )
@@ -192,6 +194,10 @@ class TriggerContext(BaseModel):
     # The prior strength k (estimated across strategies or the fallback) and this strategy's closed-round
     # statistics (petrosa-cio#297); None when data-manager's round report is unavailable.
     prior_strength: PriorStrength | None = None
+    # The drawdown from the equity peak (tradeengine /state) and data-manager's risk inputs, for the
+    # drawdown steps at z sigma (petrosa-cio#298); None when unavailable.
+    drawdown_state: DrawdownState | None = None
+    risk_inputs: RiskInputs | None = None
     strategy_rounds: StrategyRounds | None = None
     cold_start_open_notional_usd: float = 0.0
     cold_start_total_notional_usd: float = 0.0
