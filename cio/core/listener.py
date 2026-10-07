@@ -6,6 +6,7 @@ from typing import Protocol
 from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 
+from cio.core import stage_timing
 from cio.core.arbiter import SignalArbiter
 from cio.core.context_builder import ContextBuilder
 from cio.core.router import OutputRouter
@@ -118,6 +119,7 @@ class NATSListener:
                 return
 
         # 4. Assemble Context
+        stage_timing.begin()
         decision_id = uuid.uuid4().hex
         # petrosa_k8s#1127: generate a synthetic position_id at admission
         # time so every position gets a unique identifier. The trade engine
@@ -126,13 +128,14 @@ class NATSListener:
         position_id = uuid.uuid4().hex[:16]
         try:
             # For trade.intent.*, we assume TriggerType.TRADE_INTENT
-            context = await self.context_builder.build(
-                correlation_id=correlation_id,
-                decision_id=decision_id,
-                source_subject=msg.subject,
-                trigger_type=TriggerType.TRADE_INTENT,
-                payload=payload,
-            )
+            with stage_timing.stage("context"):
+                context = await self.context_builder.build(
+                    correlation_id=correlation_id,
+                    decision_id=decision_id,
+                    source_subject=msg.subject,
+                    trigger_type=TriggerType.TRADE_INTENT,
+                    payload=payload,
+                )
             # Attach the position_id to the assembled context
             context.position_id = position_id
         except Exception as e:
@@ -144,7 +147,8 @@ class NATSListener:
 
         # 5. Run NurseEnforcer (with Timeout Guard)
         try:
-            decision = await self.enforcer.audit(context)
+            with stage_timing.stage("decision"):
+                decision = await self.enforcer.audit(context)
         except Exception as e:
             logger.error(
                 f"Enforcer critical failure: {e}",
@@ -154,7 +158,16 @@ class NATSListener:
 
         # 6. Route Output
         try:
-            await self.router.route(context, decision)
+            with stage_timing.stage("route"):
+                await self.router.route(context, decision)
+            logger.info(
+                "DECISION_TIMING strategy=%s decision=%s symbol=%s stages=%s",
+                context.strategy_id,
+                context.decision_id,
+                payload.get("symbol", "-"),
+                stage_timing.summary(),
+                extra={"correlation_id": correlation_id},
+            )
         except Exception as e:
             logger.error(
                 f"OutputRouter critical failure: {e}",
