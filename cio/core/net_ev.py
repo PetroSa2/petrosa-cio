@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import os
+from datetime import UTC, datetime
 from statistics import NormalDist
 from typing import Literal
 
@@ -21,9 +22,12 @@ from cio.models.net_ev import (
     ColdStartLimits,
     CommissionRates,
     CostComponent,
+    IntegrityFlag,
     NetEvGate,
     NetEvPosterior,
+    PriorStrength,
     SlippageEstimate,
+    StrategyRounds,
 )
 
 #: Labelled fallbacks (each is logged with ``source: fallback``).
@@ -39,6 +43,15 @@ FALLBACK_MIN_NET_EV_R = 0.10  # used when no posterior exists
 MIN_SLIPPAGE_SAMPLES = 10
 
 DEFAULT_ALPHA = 0.20
+#: The holding time used when the strategy has no closed round to measure it from (the stop-floor H)
+DEFAULT_HOLDING_FALLBACK_HOURS = 4.0
+#: Rule 7 fallbacks: the time limit when the closed-round rate is unknown, and the integrity-flag factor
+FALLBACK_COLD_START_DAYS = 14.0
+INTEGRITY_HOLDING_FACTOR = 3.0
+#: k is estimated across strategies once this many have at least MIN_ROUNDS_FOR_PRIOR closed rounds
+MIN_STRATEGIES_FOR_PRIOR = 10
+MIN_ROUNDS_FOR_PRIOR = 10
+MAX_PRIOR_STRENGTH = 1000.0
 DEFAULT_TARGET_WIN_RATE = (
     0.50  # rule 7: the win rate a cold-start strategy has to prove
 )
@@ -235,6 +248,20 @@ def evaluate(
     context: TriggerContext,
     stop_pct: float | None,
     take_profit_pct: float | None,
+    now: datetime | None = None,
+) -> NetEvGate:
+    """Run the gate and the data-integrity check for the levels the order will carry."""
+    now = now or datetime.now(UTC)
+    gate = _evaluate(context, stop_pct, take_profit_pct, now)
+    gate.integrity = integrity_flag(context, now)
+    return gate
+
+
+def _evaluate(
+    context: TriggerContext,
+    stop_pct: float | None,
+    take_profit_pct: float | None,
+    now: datetime,
 ) -> NetEvGate:
     """Run the gate for the stop and take-profit the order will carry.
 
@@ -297,12 +324,20 @@ def evaluate(
     if wins is not None and losses is not None:
         gate.n = wins + losses
     if wins is not None and losses is not None and wins + losses > 0 and p_be < 1.0:
-        k = prior_strength()
+        prior = context.prior_strength
+        k = prior.value if prior is not None else prior_strength()
+        k_source = prior.source if prior is not None else "fallback"
         a = k * p_be + wins
         b = k * (1.0 - p_be) + losses
         mean = a / (a + b)
         gate.posterior = NetEvPosterior(
-            wins=wins, losses=losses, prior_strength=k, alpha=a, beta=b, mean=mean
+            wins=wins,
+            losses=losses,
+            prior_strength=k,
+            k_source=k_source,
+            alpha=a,
+            beta=b,
+            mean=mean,
         )
         gate.method = "posterior"
         gate.p_ref = mean
@@ -335,7 +370,7 @@ def evaluate(
     if gate.p_ref is not None:
         gate.cost_share_limit = gate.p_ref * (reward_risk + 1.0) - 1.0
         gate.cost_share_skip = gate.cost_share > gate.cost_share_limit
-    _decide_phase(context, gate)
+    _decide_phase(context, gate, now)
     return gate
 
 
@@ -352,6 +387,99 @@ def required_rounds(p_be: float, alpha: float) -> float | None:
     return z * z * target * (1.0 - target) / (delta * delta)
 
 
+def _cold_start_time_is_up(
+    rounds: StrategyRounds | None, gate: NetEvGate, now: datetime
+) -> bool:
+    """Rule 7's time limit: n_req / the observed closed-round rate, 14 days while the rate is unknown.
+
+    A strategy that has been in cold start for longer than that leaves it even if it has not reached n_req
+    (its closed rounds are accruing slower than the limit assumed). Without the strategy's first fill the
+    limit cannot be applied and only n_req ends cold start.
+    """
+    if rounds is None or rounds.first_fill_at is None:
+        return False
+    started = rounds.first_fill_at
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    gate.days_in_cold_start = (now - started).total_seconds() / 86_400.0
+    rate = rounds.closed_round_rate_per_day
+    if gate.n_req is not None and rate is not None and rate > 0:
+        gate.time_limit_days = gate.n_req / rate
+        gate.time_limit_source = "observed_rate"
+    else:
+        gate.time_limit_days = FALLBACK_COLD_START_DAYS
+        gate.time_limit_source = "fallback"
+    return gate.days_in_cold_start >= gate.time_limit_days
+
+
+def integrity_flag(context: TriggerContext, now: datetime) -> IntegrityFlag | None:
+    """An open round older than 3x the strategy's median holding time: the exits are not being attributed.
+
+    The median holding time comes from the round report; the labelled fallback is the stop-floor horizon
+    (4 h). This is a data-integrity flag, not cold start: the order goes at probe size and carries a warning.
+    """
+    rounds = context.strategy_rounds
+    if rounds is None or rounds.oldest_open_round_opened_at is None:
+        return None
+    opened = rounds.oldest_open_round_opened_at
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=UTC)
+    age_h = (now - opened).total_seconds() / 3600.0
+    if rounds.median_holding_seconds and rounds.median_holding_seconds > 0:
+        median_h, source = rounds.median_holding_seconds / 3600.0, "median_holding_time"
+    else:
+        median_h, source = DEFAULT_HOLDING_FALLBACK_HOURS, "fallback"
+    if age_h <= INTEGRITY_HOLDING_FACTOR * median_h:
+        return None
+    return IntegrityFlag(
+        open_round_age_hours=age_h,
+        median_holding_hours=median_h,
+        holding_source=source,
+    )
+
+
+def estimate_prior_strength(
+    strategies: list[tuple[int, int]],
+) -> PriorStrength:
+    """k of the Beta prior by the beta-binomial method of moments over per-strategy (wins, closed rounds).
+
+    Needs at least ``MIN_STRATEGIES_FOR_PRIOR`` strategies with at least ``MIN_ROUNDS_FOR_PRIOR`` rounds each;
+    until then the labelled fallback k = 30. With p_i = w_i / n_i, m the pooled rate and S = sum n_i (p_i - m)^2,
+    the overdispersion rho = 1 / (k + 1) solves S / (m (1 - m)) = A + rho B with A = sum (1 - n_i / N) and
+    B = sum (1 - n_i / N)(n_i - 1); k = 1 / rho - 1, kept within (1, MAX_PRIOR_STRENGTH]. No overdispersion
+    (rho <= 0) means the strategies look alike: the strongest shrinkage.
+    """
+    usable = [(w, n) for w, n in strategies if n >= MIN_ROUNDS_FOR_PRIOR]
+    if len(usable) < MIN_STRATEGIES_FOR_PRIOR:
+        return PriorStrength(
+            value=DEFAULT_PRIOR_STRENGTH,
+            source="fallback",
+            strategies_used=len(usable),
+            reason=(
+                f"{len(usable)} of {MIN_STRATEGIES_FOR_PRIOR} strategies have "
+                f"{MIN_ROUNDS_FOR_PRIOR}+ closed rounds"
+            ),
+        )
+    total_n = sum(n for _, n in usable)
+    m = sum(w for w, _ in usable) / total_n
+    if m <= 0.0 or m >= 1.0:
+        return PriorStrength(
+            value=DEFAULT_PRIOR_STRENGTH,
+            source="fallback",
+            strategies_used=len(usable),
+            reason="pooled win rate is 0 or 1",
+        )
+    s = sum(n * (w / n - m) ** 2 for w, n in usable)
+    a = sum(1.0 - n / total_n for _, n in usable)
+    b = sum((1.0 - n / total_n) * (n - 1) for _, n in usable)
+    rho = (s / (m * (1.0 - m)) - a) / b
+    if rho <= 1.0 / (MAX_PRIOR_STRENGTH + 1.0):
+        k = MAX_PRIOR_STRENGTH
+    else:
+        k = max(1.0, min(MAX_PRIOR_STRENGTH, 1.0 / rho - 1.0))
+    return PriorStrength(value=k, source="estimated", strategies_used=len(usable))
+
+
 def probe_notional(context: TriggerContext) -> float:
     """The probe size: tradeengine's smallest valid order when it sizes in probe mode, else the
     existing labelled fallback of the assembler (10% of the position cap, at most 500)."""
@@ -361,7 +489,7 @@ def probe_notional(context: TriggerContext) -> float:
     return min(500.0, limits.max_position_size_usd * 0.1)
 
 
-def _decide_phase(context: TriggerContext, gate: NetEvGate) -> None:
+def _decide_phase(context: TriggerContext, gate: NetEvGate, now: datetime) -> None:
     """Rule 7 on the gate: enforced only after cold start; a failing cold-start order is sized at the
     probe notional while the limits hold, else vetoed (operator ruling on petrosa-cio#296)."""
     assert gate.p_be is not None and gate.alpha is not None
@@ -372,6 +500,8 @@ def _decide_phase(context: TriggerContext, gate: NetEvGate) -> None:
             "enforced"  # no closed-round counts: the labelled fallback rule applies
         )
     elif gate.n_req is not None and gate.n >= gate.n_req:
+        gate.phase = "enforced"
+    elif _cold_start_time_is_up(context.strategy_rounds, gate, now):
         gate.phase = "enforced"
     else:
         gate.phase = "cold_start"

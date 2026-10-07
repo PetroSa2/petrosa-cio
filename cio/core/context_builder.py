@@ -30,11 +30,13 @@ from cio.models import (
     PortfolioState,
     PortfolioSummary,
     PreDecisionContext,
+    PriorStrength,
     RegimeAPIResponse,
     RegimeResult,
     RiskLimits,
     SlippageEstimate,
     StrategyDefaults,
+    StrategyRounds,
     StrategyStats,
     TriggerContext,
     TriggerType,
@@ -183,6 +185,10 @@ class ContextBuilder:
         self._clock = clock or time.monotonic
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
         self._slippage_cache: tuple[float, dict[str, tuple[float, int]]] | None = None
+        # data-manager's round report: (expires_at, {strategy: StrategyRounds}, PriorStrength)
+        self._rounds_cache: (
+            tuple[float, dict[str, StrategyRounds], PriorStrength] | None
+        ) = None
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
         ] = {}
@@ -287,6 +293,9 @@ class ContextBuilder:
 
         commission = self._commission_from(env_stats.get("commission"))
         slippage = await self._fetch_slippage(regime, correlation_id)
+        prior_strength, strategy_rounds = await self._fetch_rounds(
+            strategy_id, correlation_id
+        )
 
         # AC2 (#197): a single upstream outage (data-manager unreachable/slow)
         # commonly times out regime + strategy_stats + strategy_defaults
@@ -366,6 +375,8 @@ class ContextBuilder:
             risk_limits=risk,
             commission=commission,
             slippage=slippage,
+            prior_strength=prior_strength,
+            strategy_rounds=strategy_rounds,
             historical_context=historical_context,
             pre_decision_context=pre_decision_context,
         )
@@ -430,6 +441,61 @@ class ContextBuilder:
             pooled_median_bp=pooled_median,
             pooled_count=pooled_count,
         )
+
+    async def _fetch_rounds(
+        self, strategy_id: str, correlation_id: str
+    ) -> tuple[PriorStrength | None, StrategyRounds | None]:
+        """The prior strength k and this strategy's closed-round statistics, from data-manager's round
+        report (petrosa-data-manager#537), cached for an hour (a failed read for a minute).
+
+        k is estimated across all strategies once enough of them have closed rounds, else the labelled
+        fallback of 30. Both are None when the report cannot be read: the gate then uses its own fallbacks.
+        """
+        now = self._clock()
+        if self._rounds_cache is None or now >= self._rounds_cache[0]:
+            table: dict[str, StrategyRounds] = {}
+            prior: PriorStrength | None = None
+            ttl = 3600.0
+            try:
+                response = await self.client.get(
+                    f"{self.data_manager_url}/analysis/rounds?window_days=30"
+                )
+                response.raise_for_status()
+                body = response.json()
+                for name, stats in (body.get("strategies") or {}).items():
+                    table[str(name)] = StrategyRounds(
+                        fills=int(stats.get("fills") or 0),
+                        closed_rounds=int(stats.get("closed_rounds") or 0),
+                        open_rounds=int(stats.get("open_rounds") or 0),
+                        wins=int(stats.get("wins") or 0),
+                        losses=int(stats.get("losses") or 0),
+                        closed_round_rate_per_day=stats.get(
+                            "closed_round_rate_per_day"
+                        ),
+                        median_holding_seconds=stats.get("median_holding_seconds"),
+                        first_fill_at=stats.get("first_fill_at"),
+                        last_closed_at=stats.get("last_closed_at"),
+                        oldest_open_round_opened_at=stats.get(
+                            "oldest_open_round_opened_at"
+                        ),
+                    )
+                from cio.core.net_ev import estimate_prior_strength
+
+                prior = estimate_prior_strength(
+                    [(r.wins, r.wins + r.losses) for r in table.values()]
+                )
+            except Exception as exc:
+                ttl = 60.0
+                table = {}
+                prior = None
+                logger.warning(
+                    "ROUNDS_FETCH_FAILED: %s",
+                    exc,
+                    extra={"correlation_id": correlation_id},
+                )
+            self._rounds_cache = (now + ttl, table, prior)  # type: ignore[assignment]
+        _, table, prior = self._rounds_cache
+        return prior, table.get(strategy_id)
 
     def _build_market_signals(
         self,
