@@ -1,5 +1,7 @@
 from pydantic import BaseModel, Field
 
+from cio.models.net_ev import NetEvGate
+
 
 class CodeEngineResult(BaseModel):
     """
@@ -30,6 +32,9 @@ class CodeEngineResult(BaseModel):
     ev_unavailable: bool = Field(
         False, description="True if required stats (win_rate) are missing"
     )
+
+    # Net-EV gate and cost-share pre-filter record (petrosa-cio#296).
+    net_ev_gate: NetEvGate | None = None
 
     # 3. Position Sizing
     kelly_fraction: float | None = None

@@ -1,6 +1,8 @@
 import logging
 
 from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
+from cio.core.net_ev import evaluate as evaluate_net_ev
+from cio.core.net_ev import log_gate
 from cio.core.order_levels import carried_order_distances
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
 
@@ -179,6 +181,13 @@ class CodeEngine:
             result.gross_ev = (win_rate * result.recommended_tp_pct) - (
                 (1 - win_rate) * result.recommended_sl_pct
             )
+
+        # 5b. NET-EV GATE RECORD (petrosa-cio#296): p_be, costs and the posterior at the order's levels;
+        # the cost share c/S is logged on every decision.
+        result.net_ev_gate = evaluate_net_ev(
+            context, result.recommended_sl_pct, result.recommended_tp_pct
+        )
+        log_gate(context, result.net_ev_gate)
 
         # 6. POSITION SIZING (Kelly Criterion)
         if (

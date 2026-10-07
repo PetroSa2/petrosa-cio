@@ -71,6 +71,9 @@ class RegimeResult(BaseModel):
     regime: RegimeEnum
     regime_confidence: ConfidenceLevel
     volatility_level: VolatilityLevel
+    # The data-manager regime name this result was mapped from (None when the regime did not come from
+    # data-manager); slippage is measured per data-manager regime.
+    data_manager_regime: str | None = None
     primary_signal: str = Field(
         ..., description="The main data point that drove this classification"
     )
@@ -130,6 +133,7 @@ class RegimeResult(BaseModel):
             regime_confidence=confidence,
             volatility_level=api_data.volatility_level,
             primary_signal=f"{api_regime.value}_conf_{conf_float}",
+            data_manager_regime=api_regime.value,
             thought_trace=(
                 f"Mapped {api_regime} (conf={conf_float}) to {internal_regime}/{confidence.value}."
             ),

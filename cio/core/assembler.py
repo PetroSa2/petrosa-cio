@@ -1,6 +1,8 @@
 import logging
 from datetime import UTC, datetime
 
+from cio.core.net_ev import evaluate as evaluate_net_ev
+from cio.core.net_ev import gate_enforced, log_gate, probe_notional
 from cio.models import (
     ActionType,
     ActivationRecommendation,
@@ -125,6 +127,40 @@ class DecisionAssembler:
                     reason=sig.reason,
                 )
 
+        # 2b. NET-EV GATE (petrosa-cio#296, rule 1): deterministic, after the LLM, on the levels the
+        # order will really carry (after any parameter change). The LLM may only downgrade a decision:
+        # an execute or modify_params that fails the gate becomes a skip. The position size always comes
+        # from the code (below), so a modify_params never carries more than the computed size.
+        action = llm_action or ActionType.SKIP
+        justification = llm_justification or "Assembled without explicit LLM action."
+        gate = evaluate_net_ev(context, sl_pct, tp_pct)
+        log_gate(context, gate)
+        probe_override = False
+        if gate_enforced() and action in (
+            ActionType.EXECUTE,
+            ActionType.MODIFY_PARAMS,
+        ):
+            if gate.outcome == "veto":
+                justification = (
+                    f"{gate.reason}: LLM {action.value} vetoed by the net-EV gate "
+                    f"(phase={gate.phase}, p_be={gate.p_be:.3f}, "
+                    + (
+                        f"P(win rate > p_be)={gate.prob_edge:.3f} < {1 - (gate.alpha or 0):.2f}, "
+                        if gate.prob_edge is not None
+                        else ""
+                    )
+                    + f"n={gate.n}, n_req={gate.n_req}, S_eff={gate.s_eff:.4f}, "
+                    f"c={gate.cost_total:.5f})"
+                )
+                action = ActionType.SKIP
+            elif gate.outcome == "probe":
+                # Cold start: a failing order is not vetoed; it goes at the probe notional.
+                probe_override = True
+                justification = (
+                    f"{justification} [net-EV gate failed during cold start (n={gate.n}, "
+                    f"n_req={gate.n_req:.0f}): sized at the probe notional]"
+                )
+
         # 3. POSITION SIZE SELECTION
         final_size_usd = code_result.kelly_position_usd
         if final_size_usd is None:
@@ -140,6 +176,9 @@ class DecisionAssembler:
                 f"EV unavailable; using fallback position size: ${final_size_usd}"
             )
 
+        if probe_override:
+            final_size_usd = probe_notional(context)
+
         # 4. FINAL ASSEMBLY
         # reasoning_summary: Concatenate thought traces from regime and strategy results
         reasoning_summary = (
@@ -150,8 +189,9 @@ class DecisionAssembler:
         decision = DecisionResult(
             hard_blocked=False,
             ev_passes=code_result.ev_unavailable is False,
-            cost_viable=True,  # Simplified for S3
+            cost_viable=gate.result != "fail",
             net_ev_usd=code_result.gross_ev,  # Simplified mapping
+            net_ev_gate=gate,
             regime_confidence=regime_result.regime_confidence,
             regime_fit=strategy_result.regime_fit,
             strategy_health=strategy_result.health,
@@ -162,8 +202,8 @@ class DecisionAssembler:
             take_profit_pct=tp_pct,
             leverage=code_result.leverage,
             risk_warnings=code_result.risk_warnings,
-            action=llm_action or ActionType.SKIP,
-            justification=llm_justification or "Assembled without explicit LLM action.",
+            action=action,
+            justification=justification,
             thought_trace=reasoning_summary,
         )
 
