@@ -17,6 +17,17 @@ def setup_test_env():
     yield
 
 
+@pytest.fixture(autouse=True)
+def reset_shared_portfolio_tracker():
+    """The orchestrator records admissions (and cold-start notional) in a process-wide tracker; a test must not
+    see another test's positions in its context."""
+    from cio.core.portfolio_tracker import portfolio_tracker
+
+    portfolio_tracker._positions.clear()
+    yield
+    portfolio_tracker._positions.clear()
+
+
 @pytest.fixture
 def mock_nats_client():
     """Mock for nats.aio.client.Client."""

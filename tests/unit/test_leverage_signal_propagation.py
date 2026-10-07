@@ -329,6 +329,9 @@ class TestRouterRegimeLeverageCap:
 
         monkeypatch.setenv("CIO_DEFAULT_MAX_LEVERAGE", "10")
         monkeypatch.setenv("DRY_RUN", "false")
+        # This test is about the leverage routing, not the net-EV gate (petrosa-cio#307: a strategy with no closed
+        # rounds is a cold-start probe, and with no capital in the context a veto)
+        monkeypatch.setenv("CIO_NET_EV_GATE_MODE", "log_only")
 
         ctx = _make_context()
         code_result = CodeEngineResult(
