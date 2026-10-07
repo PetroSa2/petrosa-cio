@@ -37,6 +37,8 @@ class StrategyStats(BaseModel):
     # does not report them.
     wins: int | None = None
     losses: int | None = None
+    # Cumulative realized P&L of the strategy (a negative value is the loss the probation budget bounds)
+    realized_pnl: float | None = None
     avg_win_usd: float | None = None
     avg_loss_usd: float | None = None
     win_rate_delta: float | None = None
@@ -178,6 +180,12 @@ class TriggerContext(BaseModel):
     # Market Constants for calculations
     # Measured costs for the net-EV gate (petrosa-cio#296); None means unavailable (labelled fallbacks).
     commission: CommissionRates | None = None
+    # Cold-start limits (operator ruling on petrosa-cio#296): the strategy's probation loss budget
+    # (petrosa-cio#299, None until it exists) and the open cold-start notional of this strategy and of
+    # all strategies, filled by the orchestrator from the portfolio tracker.
+    probation_budget_usd: float | None = None
+    cold_start_open_notional_usd: float = 0.0
+    cold_start_total_notional_usd: float = 0.0
     slippage: SlippageEstimate | None = None
 
     maker_fee: float = 0.0002

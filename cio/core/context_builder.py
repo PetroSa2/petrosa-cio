@@ -49,6 +49,9 @@ from cio.models.context import (
 
 logger = logging.getLogger(__name__)
 
+# Key of the pooled all-regime entry in the slippage cache
+_POOLED_KEY = "*"
+
 # Categorize triggers into reasoning paths
 COLD_TRIGGERS = {
     TriggerType.SCHEDULED_REVIEW,
@@ -380,10 +383,11 @@ class ContextBuilder:
     async def _fetch_slippage(
         self, regime: RegimeResult, correlation_id: str
     ) -> SlippageEstimate | None:
-        """Measured slippage (bp per fill) of the regime in force, from data-manager (#535).
+        """Measured slippage (bp per fill) from data-manager (#535): the regime in force and the pooled
+        all-regime median, the first two steps of the fallback chain.
 
         The report is cached for an hour (a failed read for a minute); None when the regime is not a
-        data-manager one or the report has no fills for it, which selects the labelled fallback.
+        data-manager one or the report could not be read.
         """
         key = regime.data_manager_regime
         if not key:
@@ -397,8 +401,15 @@ class ContextBuilder:
                     f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30"
                 )
                 response.raise_for_status()
-                for name, stats in (response.json().get("by_regime") or {}).items():
+                body = response.json()
+                for name, stats in (body.get("by_regime") or {}).items():
                     table[str(name)] = (float(stats["median_bp"]), int(stats["count"]))
+                overall = body.get("overall")
+                if isinstance(overall, dict):
+                    table[_POOLED_KEY] = (
+                        float(overall["median_bp"]),
+                        int(overall["count"]),
+                    )
             except Exception as exc:
                 ttl = 60.0
                 logger.warning(
@@ -407,10 +418,18 @@ class ContextBuilder:
                     extra={"correlation_id": correlation_id},
                 )
             self._slippage_cache = (now + ttl, table)
-        entry = self._slippage_cache[1].get(key)
-        if entry is None:
+        table = self._slippage_cache[1]
+        if not table:
             return None
-        return SlippageEstimate(regime=key, median_bp=entry[0], count=entry[1])
+        median, count = table.get(key, (None, 0))
+        pooled_median, pooled_count = table.get(_POOLED_KEY, (None, 0))
+        return SlippageEstimate(
+            regime=key,
+            median_bp=median,
+            count=count,
+            pooled_median_bp=pooled_median,
+            pooled_count=pooled_count,
+        )
 
     def _build_market_signals(
         self,

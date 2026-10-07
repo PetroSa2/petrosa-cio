@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import math
 import os
+from statistics import NormalDist
 from typing import Literal
 
 from cio.models.context import TriggerContext
 from cio.models.net_ev import (
+    ColdStartLimits,
     CommissionRates,
     CostComponent,
     NetEvGate,
@@ -37,6 +39,12 @@ FALLBACK_MIN_NET_EV_R = 0.10  # used when no posterior exists
 MIN_SLIPPAGE_SAMPLES = 10
 
 DEFAULT_ALPHA = 0.20
+DEFAULT_TARGET_WIN_RATE = (
+    0.50  # rule 7: the win rate a cold-start strategy has to prove
+)
+#: Until the per-strategy probation budgets exist (petrosa-cio#299): total cold-start notional across
+#: all strategies, as a fraction of equity (labelled fallback of rule 7).
+FALLBACK_COLD_START_CAP_FRACTION = 0.10
 DEFAULT_PRIOR_STRENGTH = 30.0
 
 PrefilterMode = Literal["off", "log_only", "enforce"]
@@ -45,6 +53,11 @@ PrefilterMode = Literal["off", "log_only", "enforce"]
 def net_ev_alpha() -> float:
     """alpha: the operator's confidence input (default 0.20, ``CIO_NET_EV_ALPHA``)."""
     return _env_float("CIO_NET_EV_ALPHA", DEFAULT_ALPHA, 0.0, 1.0)
+
+
+def target_win_rate() -> float:
+    """The target win rate of rule 7 (default 0.50, ``CIO_NET_EV_TARGET_WIN_RATE``)."""
+    return _env_float("CIO_NET_EV_TARGET_WIN_RATE", DEFAULT_TARGET_WIN_RATE, 0.01, 0.99)
 
 
 def prior_strength() -> float:
@@ -150,14 +163,18 @@ def commission_components(
 def slippage_component(
     slippage: SlippageEstimate | None, regime: str | None
 ) -> tuple[CostComponent, list[str]]:
-    """Round-trip slippage: the measured per-fill median of the regime in force, on entry and on exit.
+    """Round-trip slippage, on entry and on exit, from the first step of the chain that has data.
 
-    A median below zero (favourable) counts as zero. Without enough measured fills the labelled
-    fallback applies, doubled on ``turbulent_illiquidity`` (decision 21).
+    1. the measured per-fill median of the regime in force, once it has ``MIN_SLIPPAGE_SAMPLES`` fills;
+    2. the pooled all-regime median, once it has that many;
+    3. the labelled fallback, doubled on ``turbulent_illiquidity`` (decision 21).
+
+    A median below zero (favourable) counts as zero. Each step records its source and n.
     """
     if (
         slippage is not None
         and slippage.source == "measured"
+        and slippage.median_bp is not None
         and slippage.count >= MIN_SLIPPAGE_SAMPLES
     ):
         return (
@@ -165,9 +182,25 @@ def slippage_component(
                 name="slippage",
                 value=2.0 * max(0.0, slippage.median_bp) / 10_000.0,
                 source="measured",
+                n=slippage.count,
+                detail=f"median {slippage.median_bp:.2f} bp x2, regime {slippage.regime}",
+            ),
+            [],
+        )
+    if (
+        slippage is not None
+        and slippage.pooled_median_bp is not None
+        and slippage.pooled_count >= MIN_SLIPPAGE_SAMPLES
+    ):
+        return (
+            CostComponent(
+                name="slippage",
+                value=2.0 * max(0.0, slippage.pooled_median_bp) / 10_000.0,
+                source="measured_pooled",
+                n=slippage.pooled_count,
                 detail=(
-                    f"median {slippage.median_bp:.2f} bp x2, regime {slippage.regime}, "
-                    f"n={slippage.count}"
+                    f"pooled all-regime median {slippage.pooled_median_bp:.2f} bp x2 "
+                    f"(regime {slippage.regime} has n={slippage.count})"
                 ),
             ),
             [],
@@ -177,13 +210,14 @@ def slippage_component(
     reason = (
         "slippage_fallback"
         if slippage is None
-        else f"slippage_fallback_n={slippage.count}"
+        else f"slippage_fallback_n={slippage.count}_pooled_n={slippage.pooled_count}"
     )
     return (
         CostComponent(
             name="slippage",
             value=2.0 * per_fill_bp / 10_000.0,
             source="fallback",
+            n=0 if slippage is None else slippage.pooled_count,
             detail=f"{per_fill_bp:.2f} bp per fill x2, regime {regime or 'unknown'}",
         ),
         [reason],
@@ -257,6 +291,8 @@ def evaluate(
 
     stats = context.strategy_stats
     wins, losses = stats.wins, stats.losses
+    if wins is not None and losses is not None:
+        gate.n = wins + losses
     if wins is not None and losses is not None and wins + losses > 0 and p_be < 1.0:
         k = prior_strength()
         a = k * p_be + wins
@@ -296,7 +332,105 @@ def evaluate(
     if gate.p_ref is not None:
         gate.cost_share_limit = gate.p_ref * (reward_risk + 1.0) - 1.0
         gate.cost_share_skip = gate.cost_share > gate.cost_share_limit
+    _decide_phase(context, gate)
     return gate
+
+
+def required_rounds(p_be: float, alpha: float) -> float | None:
+    """n_req = z^2 p (1 - p) / delta^2 with p the target win rate and delta = target - p_be (rule 7).
+
+    None when delta <= 0: at the target win rate the setup can never prove an edge.
+    """
+    target = target_win_rate()
+    delta = target - p_be
+    if delta <= 0:
+        return None
+    z = NormalDist().inv_cdf(1.0 - min(max(alpha, 1e-6), 0.5))
+    return z * z * target * (1.0 - target) / (delta * delta)
+
+
+def probe_notional(context: TriggerContext) -> float:
+    """The probe size: tradeengine's smallest valid order when it sizes in probe mode, else the
+    existing labelled fallback of the assembler (10% of the position cap, at most 500)."""
+    limits = context.risk_limits
+    if limits.probe_mode:
+        return limits.max_position_size_usd
+    return min(500.0, limits.max_position_size_usd * 0.1)
+
+
+def _decide_phase(context: TriggerContext, gate: NetEvGate) -> None:
+    """Rule 7 on the gate: enforced only after cold start; a failing cold-start order is sized at the
+    probe notional while the limits hold, else vetoed (operator ruling on petrosa-cio#296)."""
+    assert gate.p_be is not None and gate.alpha is not None
+    gate.target_win_rate = target_win_rate()
+    gate.n_req = required_rounds(gate.p_be, gate.alpha)
+    if gate.n is None:
+        gate.phase = (
+            "enforced"  # no closed-round counts: the labelled fallback rule applies
+        )
+    elif gate.n_req is not None and gate.n >= gate.n_req:
+        gate.phase = "enforced"
+    else:
+        gate.phase = "cold_start"
+
+    if gate.result == "pass":
+        gate.outcome = "pass"
+        return
+    if gate.phase == "enforced":
+        gate.outcome = "veto"
+        return  # reason stays net_ev_lcb_below_zero
+    if gate.n_req is None:
+        # p_be at or above the target win rate: delta <= 0, n_req is undefined
+        gate.outcome = "veto"
+        gate.reason = "net_ev_unreachable_payoff"
+        return
+    limits = _cold_start_limits(context, gate)
+    gate.cold_start = limits
+    if limits.binding == "none":
+        gate.outcome = "probe"
+        gate.reason = "cold_start_probe"
+    else:
+        gate.outcome = "veto"
+        gate.reason = f"cold_start_limit_{limits.binding}"
+
+
+def _cold_start_limits(context: TriggerContext, gate: NetEvGate) -> ColdStartLimits:
+    """The probation limits on a cold-start strategy's probe-size order.
+
+    With a per-strategy probation budget (a loss budget, petrosa-cio#299): (a) the strategy's
+    cumulative net loss must not exceed it and (b) its open cold-start notional plus this probe must
+    stay within budget / S_eff. Without one, the labelled fallback caps the total cold-start notional
+    across all strategies at a fraction of equity.
+    """
+    probe = probe_notional(context)
+    pnl = context.strategy_stats.realized_pnl
+    loss = None if pnl is None else max(0.0, -pnl)
+    budget = context.probation_budget_usd
+    limits = ColdStartLimits(
+        probe_notional_usd=probe,
+        budget_usd=budget,
+        budget_source="probation_budget" if budget is not None else "unavailable",
+        loss_so_far_usd=loss,
+        open_notional_usd=context.cold_start_open_notional_usd,
+        total_notional_usd=context.cold_start_total_notional_usd,
+    )
+    if budget is not None:
+        assert gate.s_eff is not None
+        limits.open_notional_limit_usd = budget / gate.s_eff
+        if loss is not None and loss > budget:
+            limits.binding = "loss_budget"
+        elif (
+            context.cold_start_open_notional_usd + probe
+            > limits.open_notional_limit_usd
+        ):
+            limits.binding = "open_notional"
+        return limits
+    limits.total_cap_usd = FALLBACK_COLD_START_CAP_FRACTION * max(
+        0.0, context.available_capital_usd
+    )
+    if context.cold_start_total_notional_usd + probe > limits.total_cap_usd:
+        limits.binding = "total_notional_cap"
+    return limits
 
 
 def log_gate(context: TriggerContext, gate: NetEvGate) -> None:

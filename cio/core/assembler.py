@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from cio.core.net_ev import evaluate as evaluate_net_ev
-from cio.core.net_ev import gate_enforced, log_gate
+from cio.core.net_ev import gate_enforced, log_gate, probe_notional
 from cio.models import (
     ActionType,
     ActivationRecommendation,
@@ -135,21 +135,31 @@ class DecisionAssembler:
         justification = llm_justification or "Assembled without explicit LLM action."
         gate = evaluate_net_ev(context, sl_pct, tp_pct)
         log_gate(context, gate)
-        if (
-            gate.result == "fail"
-            and gate_enforced()
-            and action in (ActionType.EXECUTE, ActionType.MODIFY_PARAMS)
+        probe_override = False
+        if gate_enforced() and action in (
+            ActionType.EXECUTE,
+            ActionType.MODIFY_PARAMS,
         ):
-            justification = (
-                f"{gate.reason}: LLM {action.value} vetoed by the net-EV gate "
-                + (
-                    f"(P(win rate > p_be={gate.p_be:.3f})={gate.prob_edge:.3f} "
-                    f"< {1 - (gate.alpha or 0):.2f}, S_eff={gate.s_eff:.4f}, c={gate.cost_total:.5f})"
-                    if gate.method == "posterior" and gate.prob_edge is not None
-                    else f"(net EV {gate.net_ev_r:.3f}R < +{gate.min_net_ev_r:.2f}R, fallback)"
+            if gate.outcome == "veto":
+                justification = (
+                    f"{gate.reason}: LLM {action.value} vetoed by the net-EV gate "
+                    f"(phase={gate.phase}, p_be={gate.p_be:.3f}, "
+                    + (
+                        f"P(win rate > p_be)={gate.prob_edge:.3f} < {1 - (gate.alpha or 0):.2f}, "
+                        if gate.prob_edge is not None
+                        else ""
+                    )
+                    + f"n={gate.n}, n_req={gate.n_req}, S_eff={gate.s_eff:.4f}, "
+                    f"c={gate.cost_total:.5f})"
                 )
-            )
-            action = ActionType.SKIP
+                action = ActionType.SKIP
+            elif gate.outcome == "probe":
+                # Cold start: a failing order is not vetoed; it goes at the probe notional.
+                probe_override = True
+                justification = (
+                    f"{justification} [net-EV gate failed during cold start (n={gate.n}, "
+                    f"n_req={gate.n_req:.0f}): sized at the probe notional]"
+                )
 
         # 3. POSITION SIZE SELECTION
         final_size_usd = code_result.kelly_position_usd
@@ -165,6 +175,9 @@ class DecisionAssembler:
             logger.debug(
                 f"EV unavailable; using fallback position size: ${final_size_usd}"
             )
+
+        if probe_override:
+            final_size_usd = probe_notional(context)
 
         # 4. FINAL ASSEMBLY
         # reasoning_summary: Concatenate thought traces from regime and strategy results

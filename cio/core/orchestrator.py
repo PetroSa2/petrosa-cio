@@ -10,7 +10,7 @@ from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
-from cio.core.net_ev import prefilter_mode
+from cio.core.net_ev import gate_enforced, prefilter_mode
 from cio.core.portfolio_tracker import PortfolioTracker
 from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
 from cio.core.spend_tracker import LlmSpendTracker
@@ -237,6 +237,19 @@ class Orchestrator:
                 thought_trace="DETERMINISTIC_BYPASS",
             )
 
+            # The open cold-start notional the net-EV gate's probation limits need (petrosa-cio#296)
+            try:
+                own_cold, total_cold = await self.portfolio_tracker.cold_start_notional(
+                    context.strategy_id
+                )
+                context = context.model_copy(
+                    update={
+                        "cold_start_open_notional_usd": float(own_cold),
+                        "cold_start_total_notional_usd": float(total_cold),
+                    }
+                )
+            except Exception as exc:
+                logger.warning("COLD_START_NOTIONAL_UNAVAILABLE: %s", exc)
             # 1. CODE ENGINE: Hard Limits (S2)
             # In bypass mode, substitute bypass_regime so that policy-based regime hard
             # blocks (CHOPPY / CAPITULATION) do not fire. Risk-gate hard limits (drawdown,
@@ -440,6 +453,7 @@ class Orchestrator:
                     bypass_strategy,
                     bypass_mode=True,
                 )
+                await self._record_cold_start(context, _bypass_decision)
                 self._emit_decision_action(_bypass_decision.action)
                 return _bypass_decision
 
@@ -575,6 +589,7 @@ class Orchestrator:
             # FR63 / AC4 — ceiling check after each LLM decision cycle.
             await self._check_spend_ceiling(context.correlation_id)
 
+            await self._record_cold_start(context, decision)
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             logger.info(
                 f"✅ REASONING LOOP COMPLETE | Action: {decision.action} | Latency: {latency_ms}ms",
@@ -595,6 +610,29 @@ class Orchestrator:
             )
             self._emit_decision_action(SAFE_DECISION_RESULT.action)
             return SAFE_DECISION_RESULT
+
+    async def _record_cold_start(
+        self, context: TriggerContext, decision: DecisionResult
+    ) -> None:
+        """Mark the strategy's open position as cold-start notional when the net-EV gate let a failing
+        order through at probe size (petrosa-cio#296)."""
+        gate = decision.net_ev_gate
+        if (
+            gate is None
+            or gate.outcome != "probe"
+            or not gate_enforced()
+            or decision.action not in (ActionType.EXECUTE, ActionType.MODIFY_PARAMS)
+        ):
+            return
+        try:
+            await self.portfolio_tracker.record_admit(
+                strategy_id=context.strategy_id,
+                position_size_usd=float(decision.computed_position_size_usd or 0.0),
+                leverage=float(decision.leverage or 1.0),
+                cold_start=True,
+            )
+        except Exception as exc:
+            logger.warning("COLD_START_RECORD_FAILED: %s", exc)
 
     def _emit_decision_action(self, action: ActionType) -> None:
         try:

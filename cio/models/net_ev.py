@@ -22,8 +22,11 @@ class SlippageEstimate(BaseModel):
     """
 
     regime: str
-    median_bp: float
-    count: int = Field(..., ge=0)
+    median_bp: float | None = None  # the regime's median; None when it has no fills
+    count: int = Field(0, ge=0)
+    # The pooled all-regime median, the second step of the fallback chain
+    pooled_median_bp: float | None = None
+    pooled_count: int = Field(0, ge=0)
     source: str = "measured"
 
 
@@ -32,7 +35,10 @@ class CostComponent(BaseModel):
 
     name: str
     value: float
-    source: Literal["exchange", "measured", "fallback", "unavailable"]
+    source: Literal[
+        "exchange", "measured", "measured_pooled", "fallback", "unavailable"
+    ]
+    n: int | None = None  # fills behind a measured value
     detail: str | None = None
 
 
@@ -47,6 +53,29 @@ class NetEvPosterior(BaseModel):
     mean: float
 
 
+class ColdStartLimits(BaseModel):
+    """What bounds a failing order's probe-size trade during cold start (operator ruling on #296).
+
+    The probation budget is a loss budget (reduce-step x equity / strategies on probation); until
+    petrosa-cio#299 supplies it per strategy only the total cold-start notional cap (a labelled
+    fraction of equity) applies. ``binding`` names the limit that refused the order, ``none`` when
+    none did.
+    """
+
+    probe_notional_usd: float
+    budget_usd: float | None = None
+    budget_source: str = "unavailable"
+    loss_so_far_usd: float | None = (
+        None  # the strategy's cumulative net loss, as a positive number
+    )
+    open_notional_usd: float = 0.0  # the strategy's open cold-start notional
+    open_notional_limit_usd: float | None = None  # budget / S_eff
+    total_notional_usd: float = 0.0  # all strategies' open cold-start notional
+    total_cap_usd: float | None = None
+    total_cap_source: str = "fallback"
+    binding: str = "none"
+
+
 class NetEvGate(BaseModel):
     """Decision record of the net-EV gate and the cost-share pre-filter (rules 1, 19, 23).
 
@@ -56,6 +85,16 @@ class NetEvGate(BaseModel):
 
     result: Literal["pass", "fail", "not_evaluated"]
     reason: str
+    # What follows from the result: ``veto`` (downgrade an execute), ``probe`` (a cold-start strategy's
+    # failing order goes at probe size), or none of them.
+    outcome: Literal["pass", "veto", "probe", "not_evaluated"] = "not_evaluated"
+    phase: Literal["cold_start", "enforced"] | None = None
+    n: int | None = None  # closed rounds
+    n_req: float | None = (
+        None  # rounds needed to decide (rule 7); None when the payoff is unreachable
+    )
+    target_win_rate: float | None = None
+    cold_start: ColdStartLimits | None = None
     method: Literal["posterior", "fallback_min_ev", "none"] = "none"
     stop_pct: float | None = None  # carried or configured stop distance
     stop_floor_pct: float | None = None  # tradeengine's floor from /state

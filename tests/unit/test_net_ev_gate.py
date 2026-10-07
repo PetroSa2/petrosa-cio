@@ -1,6 +1,5 @@
 """Net-EV lower-confidence-bound gate and cost-share pre-filter (petrosa-cio#296, rules 1, 19, 23)."""
 
-import math
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -51,6 +50,10 @@ def _context(
     commission="exchange",
     slippage="measured",
     dm_regime="balanced_market",
+    realized_pnl=None,
+    budget=None,
+    open_notional=0.0,
+    total_notional=0.0,
 ) -> TriggerContext:
     if commission == "exchange":
         commission = CommissionRates(
@@ -84,6 +87,7 @@ def _context(
             win_rate=win_rate,
             wins=wins,
             losses=losses,
+            realized_pnl=realized_pnl,
             recent_pnl_trend=PnlTrend.NEUTRAL,
         ),
         strategy_defaults=StrategyDefaults(
@@ -106,6 +110,9 @@ def _context(
         ),
         commission=commission,
         slippage=slippage,
+        probation_budget_usd=budget,
+        cold_start_open_notional_usd=open_notional,
+        cold_start_total_notional_usd=total_notional,
     )
 
 
@@ -192,8 +199,12 @@ def test_gate_fails_with_a_thin_posterior():
     gate = evaluate(_context(wins=6, losses=4, win_rate=0.6), 0.03, 0.04)
     assert gate.method == "posterior"
     assert gate.result == "fail"
-    assert gate.reason == "net_ev_lcb_below_zero"
     assert gate.prob_edge < 0.8
+    # p_be is above the 0.50 target at the 6% floor: no n_req, so cold start cannot end
+    assert gate.phase == "cold_start"
+    assert gate.n_req is None
+    assert gate.outcome == "veto"
+    assert gate.reason == "net_ev_unreachable_payoff"
 
 
 def test_gate_fails_when_costs_cannot_be_paid():
@@ -288,8 +299,17 @@ def test_llm_execute_failing_the_gate_becomes_skip_with_the_reason():
     ctx = _context(wins=6, losses=4, win_rate=0.6)
     decision, _ = _assemble(ctx, ActionType.EXECUTE)
     assert decision.action == ActionType.SKIP
-    assert "net_ev_lcb_below_zero" in decision.justification
+    assert "net_ev_unreachable_payoff" in decision.justification
     assert decision.cost_viable is False
+
+
+def test_llm_execute_failing_the_enforced_gate_is_vetoed_with_lcb_reason():
+    # past cold start (n >= n_req) the gate is enforced
+    ctx = _context(floor=None, wins=40, losses=70, win_rate=40 / 110)
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    assert decision.net_ev_gate.phase == "enforced"
+    assert decision.action == ActionType.SKIP
+    assert "net_ev_lcb_below_zero" in decision.justification
 
 
 def test_llm_modify_params_failing_the_gate_becomes_skip():
@@ -297,7 +317,7 @@ def test_llm_modify_params_failing_the_gate_becomes_skip():
         _context(wins=6, losses=4, win_rate=0.6), ActionType.MODIFY_PARAMS
     )
     assert decision.action == ActionType.SKIP
-    assert "net_ev_lcb_below_zero" in decision.justification
+    assert "net_ev_unreachable_payoff" in decision.justification
 
 
 def test_decision_record_carries_the_gate_inputs_and_result():
@@ -476,13 +496,13 @@ async def test_state_commission_and_stop_floor_reach_the_context():
 
 @pytest.mark.asyncio
 async def test_slippage_is_read_per_regime_cached_and_failures_give_none():
-    now = [0.0]
-    builder = _builder(clock=lambda: now[0])
+    builder = _builder(clock=lambda: 0.0)
     report = {
+        "overall": {"count": 90, "median_bp": 2.0},
         "by_regime": {
             "balanced_market": {"count": 40, "median_bp": 1.5},
             "turbulent_illiquidity": {"count": 12, "median_bp": 4.0},
-        }
+        },
     }
     builder.client = MagicMock()
     builder.client.get = AsyncMock(
@@ -502,10 +522,14 @@ async def test_slippage_is_read_per_regime_cached_and_failures_give_none():
         4.0,
         12,
     )
+    assert (estimate.pooled_median_bp, estimate.pooled_count) == (2.0, 90)
     await builder._fetch_slippage(regime, "cid")
     assert builder.client.get.await_count == 1  # cached
+    # a regime with no fills still carries the pooled median
     other = regime.model_copy(update={"data_manager_regime": "consolidation"})
-    assert await builder._fetch_slippage(other, "cid") is None  # no fills for it
+    estimate = await builder._fetch_slippage(other, "cid")
+    assert estimate.median_bp is None and estimate.count == 0
+    assert estimate.pooled_count == 90
     unmapped = regime.model_copy(update={"data_manager_regime": None})
     assert await builder._fetch_slippage(unmapped, "cid") is None
 
@@ -513,4 +537,171 @@ async def test_slippage_is_read_per_regime_cached_and_failures_give_none():
     failing.client = MagicMock()
     failing.client.get = AsyncMock(side_effect=RuntimeError("down"))
     assert await failing._fetch_slippage(regime, "cid") is None
-    assert math.isfinite(1.0)
+
+
+# --- slippage fallback chain (operator ruling on #296) -------------------------------------------
+
+
+def _slippage_part(slippage, dm_regime="balanced_market"):
+    gate = evaluate(_context(slippage=slippage, dm_regime=dm_regime), 0.03, 0.04)
+    return next(c for c in gate.costs if c.name == "slippage")
+
+
+def test_slippage_chain_prefers_the_regime_median_with_enough_fills():
+    part = _slippage_part(
+        SlippageEstimate(
+            regime="balanced_market",
+            median_bp=3.0,
+            count=10,
+            pooled_median_bp=9.0,
+            pooled_count=500,
+        )
+    )
+    assert part.source == "measured"
+    assert part.n == 10
+    assert part.value == pytest.approx(2 * 3.0 / 10_000)
+
+
+def test_slippage_chain_uses_the_pooled_median_when_the_regime_has_too_few_fills():
+    part = _slippage_part(
+        SlippageEstimate(
+            regime="balanced_market",
+            median_bp=3.0,
+            count=9,
+            pooled_median_bp=2.5,
+            pooled_count=80,
+        )
+    )
+    assert part.source == "measured_pooled"
+    assert part.n == 80
+    assert part.value == pytest.approx(2 * 2.5 / 10_000)
+
+
+def test_slippage_chain_falls_back_when_neither_has_enough_fills():
+    part = _slippage_part(
+        SlippageEstimate(
+            regime="turbulent_illiquidity",
+            median_bp=3.0,
+            count=9,
+            pooled_median_bp=2.5,
+            pooled_count=9,
+        ),
+        dm_regime="turbulent_illiquidity",
+    )
+    assert part.source == "fallback"
+    # 2 bp per fill, doubled on turbulent_illiquidity, on entry and on exit
+    assert part.value == pytest.approx(2 * 2.0 * 2.0 / 10_000)
+
+
+# --- cold start (operator ruling on #296) ---------------------------------------------------------
+
+
+def test_n_req_follows_rule_7():
+    gate = evaluate(_context(floor=None, wins=6, losses=4, win_rate=0.6), 0.03, 0.04)
+    delta = 0.5 - gate.p_be
+    z = 0.8416212335729143  # inverse normal CDF at 1 - alpha, alpha = 0.20
+    assert gate.n_req == pytest.approx(z * z * 0.25 / (delta * delta))
+    assert gate.n == 10
+    assert gate.target_win_rate == 0.5
+
+
+def test_failing_cold_start_order_goes_at_probe_size_not_vetoed():
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6)
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    gate = decision.net_ev_gate
+    assert gate.result == "fail"
+    assert (gate.phase, gate.outcome, gate.reason) == (
+        "cold_start",
+        "probe",
+        "cold_start_probe",
+    )
+    assert decision.action == ActionType.EXECUTE
+    assert decision.computed_position_size_usd == gate.cold_start.probe_notional_usd
+    assert gate.cold_start.binding == "none"
+    assert gate.cold_start.total_cap_usd == pytest.approx(1000.0)  # 10% of equity
+
+
+def test_cold_start_probe_uses_the_tradeengine_probe_notional():
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6)
+    ctx.risk_limits.probe_mode = True
+    ctx.risk_limits.max_position_size_usd = 7.5
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    assert decision.computed_position_size_usd == 7.5
+
+
+def test_total_cold_start_notional_cap_binds_without_a_probation_budget():
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6, total_notional=950.0)
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    gate = decision.net_ev_gate
+    assert decision.action == ActionType.SKIP
+    assert gate.outcome == "veto"
+    assert gate.cold_start.binding == "total_notional_cap"
+    assert gate.reason == "cold_start_limit_total_notional_cap"
+    assert gate.cold_start.total_notional_usd == 950.0
+
+
+def test_probation_budget_limits_are_loss_then_open_notional():
+    base = {"floor": None, "wins": 6, "losses": 4, "win_rate": 0.6, "budget": 23.0}
+    ok = evaluate(_context(**base), 0.03, 0.04)
+    assert ok.outcome == "probe"
+    assert ok.cold_start.open_notional_limit_usd == pytest.approx(23.0 / 0.03)
+    assert ok.cold_start.budget_usd == 23.0
+
+    lost = evaluate(_context(**base, realized_pnl=-30.0), 0.03, 0.04)
+    assert lost.outcome == "veto"
+    assert lost.cold_start.binding == "loss_budget"
+    assert lost.cold_start.loss_so_far_usd == 30.0
+
+    full = evaluate(_context(**base, open_notional=700.0), 0.03, 0.04)
+    assert full.outcome == "veto"
+    assert full.cold_start.binding == "open_notional"
+    assert full.cold_start.open_notional_usd == 700.0
+    # with a budget the total-notional fallback is not the limit
+    assert full.cold_start.total_cap_usd is None
+
+
+def test_cold_start_probe_is_not_applied_in_log_only_mode(monkeypatch):
+    monkeypatch.setenv("CIO_NET_EV_GATE_MODE", "log_only")
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6)
+    decision, code = _assemble(ctx, ActionType.EXECUTE)
+    assert decision.action == ActionType.EXECUTE
+    assert decision.computed_position_size_usd == code.kelly_position_usd
+
+
+@pytest.mark.asyncio
+async def test_tracker_records_cold_start_notional_and_keeps_the_mark():
+    from cio.core.portfolio_tracker import PortfolioTracker
+
+    tracker = PortfolioTracker()
+    await tracker.record_admit(
+        strategy_id="a", position_size_usd=100.0, leverage=1.0, cold_start=True
+    )
+    await tracker.record_admit(
+        strategy_id="b", position_size_usd=400.0, leverage=1.0, cold_start=False
+    )
+    assert await tracker.cold_start_notional("a") == (100.0, 100.0)
+    assert await tracker.cold_start_notional("b") == (0.0, 100.0)
+    # a later admission without the argument keeps the mark
+    await tracker.record_admit(strategy_id="a", position_size_usd=60.0, leverage=1.0)
+    assert await tracker.cold_start_notional("a") == (60.0, 60.0)
+    await tracker.record_exit(strategy_id="a")
+    assert await tracker.cold_start_notional("a") == (0.0, 0.0)
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_marks_a_probe_decision_as_cold_start_notional():
+    from cio.core.orchestrator import Orchestrator
+    from cio.core.portfolio_tracker import PortfolioTracker
+
+    tracker = PortfolioTracker()
+    orchestrator = Orchestrator(portfolio_tracker=tracker)
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6)
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    await orchestrator._record_cold_start(ctx, decision)
+    size = decision.computed_position_size_usd
+    assert await tracker.cold_start_notional("s1") == (size, size)
+    skipped, _ = _assemble(ctx, ActionType.SKIP)
+    other = PortfolioTracker()
+    orchestrator.portfolio_tracker = other
+    await orchestrator._record_cold_start(ctx, skipped)
+    assert await other.cold_start_notional("s1") == (0.0, 0.0)

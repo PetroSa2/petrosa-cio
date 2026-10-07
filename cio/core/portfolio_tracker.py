@@ -79,6 +79,7 @@ class _Position:
 
     position_size_usd: float
     leverage: float
+    cold_start: bool = False
 
 
 class PortfolioTracker:
@@ -108,17 +109,26 @@ class PortfolioTracker:
         strategy_id: str,
         position_size_usd: float,
         leverage: float,
+        cold_start: bool | None = None,
     ) -> None:
-        """Record (or replace) the strategy's currently-admitted position."""
+        """Record (or replace) the strategy's currently-admitted position.
+
+        ``cold_start`` marks a probe-size order of a cold-start strategy (petrosa-cio#296); left None, the
+        strategy keeps the mark it had.
+        """
         if not strategy_id:
             logger.warning("PortfolioTracker.record_admit refused empty strategy_id")
             return
         size = max(0.0, float(position_size_usd))
         lev = max(0.0, float(leverage))
         async with self._lock:
+            previous = self._positions.get(strategy_id)
+            if cold_start is None:
+                cold_start = previous.cold_start if previous else False
             self._positions[strategy_id] = _Position(
                 position_size_usd=size,
                 leverage=lev,
+                cold_start=cold_start,
             )
 
     async def record_exit(self, *, strategy_id: str) -> None:
@@ -128,6 +138,16 @@ class PortfolioTracker:
 
     # ------------------------------------------------------------------
     # Readers
+
+    async def cold_start_notional(self, strategy_id: str) -> tuple[float, float]:
+        """The open cold-start notional of one strategy and of all strategies."""
+        async with self._lock:
+            own = self._positions.get(strategy_id)
+            total = sum(
+                p.position_size_usd for p in self._positions.values() if p.cold_start
+            )
+            mine = own.position_size_usd if own is not None and own.cold_start else 0.0
+            return mine, total
 
     async def compute_aggregate(self, *, equity: float) -> float:
         """Return Σ(size × leverage) / equity across tracked positions.
