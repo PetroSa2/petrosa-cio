@@ -62,6 +62,9 @@ class PortfolioSummary(BaseModel):
     gross_exposure: float  # 0.0 - 1.0
     same_asset_pct: float  # 0.0 - 1.0
     open_positions_count: int
+    # Signed net and gross USD notional per held symbol (tradeengine /state, petrosa-tradeengine#731)
+    net_notional_by_symbol: dict[str, float] | None = None
+    gross_notional_by_symbol: dict[str, float] | None = None
 
 
 # Fallbacks for ``StrategyDefaults.unavailable()``: placeholders for an unreadable or empty strategy

@@ -64,27 +64,63 @@ def is_closing_intent(payload: dict[str, Any]) -> bool:
     return False
 
 
-def basket_sigma(inputs: RiskInputs) -> tuple[float | None, list[str], str | None]:
-    """Sigma of the equal-weight basket of the pairs with a sufficient daily sigma, from the measured
-    correlations: sqrt(sum_ij rho_ij s_i s_j) / N. None when any pair of them has no sufficient correlation."""
-    symbols = sorted(inputs.sigma_daily)
-    if not symbols:
-        return None, [], "no_pair_has_a_sufficient_daily_sigma"
-    total = 0.0
-    for i, a in enumerate(symbols):
-        for j, b in enumerate(symbols):
-            if i == j:
+BASKET_HELD = "held_pairs"
+BASKET_ALL = "basket_all_traded_pairs"
+
+
+def basket_sigma(
+    inputs: RiskInputs, held: dict[str, float] | None = None
+) -> tuple[float | None, list[str], str | None, str]:
+    """Sigma of the basket of the held pairs, weighted by their |net notional|, from the measured correlations:
+    sqrt(sum_ij w_i w_j rho_ij s_i s_j) with w_i = |net_i| / sum |net|.
+
+    Until tradeengine reports the per-symbol net notional (``held`` is None) the basket is every traded pair
+    with a sufficient sigma at equal weight, labelled ``basket_all_traded_pairs``: its lower sigma brings the
+    steps earlier, which is conservative for a drawdown (the opposite direction holds for exposure caps).
+    Returns (sigma, symbols, why-not, basket label).
+    """
+    if held is None:
+        symbols = sorted(inputs.sigma_daily)
+        weights = {s: 1.0 / len(symbols) for s in symbols} if symbols else {}
+        label = BASKET_ALL
+    else:
+        symbols = sorted(s for s, n in held.items() if abs(n) > 0)
+        total = sum(abs(held[s]) for s in symbols)
+        weights = {s: abs(held[s]) / total for s in symbols} if total > 0 else {}
+        label = BASKET_HELD
+        missing = [s for s in symbols if s not in inputs.sigma_daily]
+        if missing:
+            return None, symbols, f"no_sufficient_sigma_{'_'.join(missing)}", label
+    if not symbols or not weights:
+        return (
+            None,
+            [],
+            "no_pair_has_a_sufficient_daily_sigma" if held is None else "no_held_pairs",
+            label,
+        )
+    total_var = 0.0
+    for a in symbols:
+        for b in symbols:
+            if a == b:
                 rho = 1.0
             else:
                 rho = (inputs.correlation.get(a) or {}).get(b)
                 if rho is None:
-                    return None, symbols, f"no_sufficient_correlation_{a}_{b}"
-            total += rho * inputs.sigma_daily[a] * inputs.sigma_daily[b]
-    return math.sqrt(max(total, 0.0)) / len(symbols), symbols, None
+                    return None, symbols, f"no_sufficient_correlation_{a}_{b}", label
+            total_var += (
+                weights[a]
+                * weights[b]
+                * rho
+                * inputs.sigma_daily[a]
+                * inputs.sigma_daily[b]
+            )
+    return math.sqrt(max(total_var, 0.0)), symbols, None, label
 
 
 def evaluate_drawdown(
-    drawdown: DrawdownState | None, inputs: RiskInputs | None
+    drawdown: DrawdownState | None,
+    inputs: RiskInputs | None,
+    held: dict[str, float] | None = None,
 ) -> DrawdownDecision:
     """The drawdown step in force: ``none``, ``reduce`` or ``halt`` (``not_evaluated`` without a drawdown)."""
     zr, zh = z_reduce(), z_halt()
@@ -107,9 +143,10 @@ def evaluate_drawdown(
     model = realized = None
     if inputs is not None:
         if drawdown.net_notional_ratio is not None:
-            basket, symbols, why = basket_sigma(inputs)
+            basket, symbols, why, label = basket_sigma(inputs, held)
             decision.basket_sigma = basket
             decision.basket_symbols = symbols
+            decision.basket_source = label
             if basket is not None:
                 model = abs(drawdown.net_notional_ratio) * basket
             else:
@@ -123,6 +160,9 @@ def evaluate_drawdown(
     else:
         decision.fallbacks.append("risk_inputs_unavailable")
     decision.model_sigma, decision.realized_sigma = model, realized
+    decision.components_missing = [
+        name for name, v in (("model", model), ("realized", realized)) if not v
+    ]
 
     usable = [(v, name) for v, name in ((model, "model"), (realized, "realized")) if v]
     if usable:

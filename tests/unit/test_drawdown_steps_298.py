@@ -473,3 +473,106 @@ async def test_builder_gives_none_when_the_risk_inputs_cannot_be_read():
     builder = _builder()
     builder.client.get = AsyncMock(side_effect=RuntimeError("down"))
     assert await builder._fetch_risk_inputs("cid") is None
+
+
+# --- the basket of the held pairs (operator ruling on cio#298) -----------------------------------
+
+
+def test_the_basket_is_weighted_by_the_held_pairs_net_notional():
+    inputs = RiskInputs(
+        sigma_daily={"AAA": 0.02, "BBB": 0.04, "CCC": 0.05},
+        correlation={
+            "AAA": {"AAA": 1.0, "BBB": 0.5, "CCC": 0.1},
+            "BBB": {"AAA": 0.5, "BBB": 1.0, "CCC": 0.2},
+            "CCC": {"AAA": 0.1, "BBB": 0.2, "CCC": 1.0},
+        },
+    )
+    held = {"AAA": 3000.0, "BBB": -1000.0}  # a short counts by its |net notional|
+    sigma, symbols, why, label = basket_sigma(inputs, held)
+    w_a, w_b = 0.75, 0.25
+    expected = (
+        w_a**2 * 0.02**2 + w_b**2 * 0.04**2 + 2 * w_a * w_b * 0.5 * 0.02 * 0.04
+    ) ** 0.5
+    assert sigma == pytest.approx(expected)
+    assert (symbols, why, label) == (["AAA", "BBB"], None, "held_pairs")
+    # CCC is not held, so it does not enter, unlike the all-pairs fallback
+    all_pairs = basket_sigma(inputs)
+    assert all_pairs[3] == "basket_all_traded_pairs"
+    assert all_pairs[1] == ["AAA", "BBB", "CCC"]
+
+
+def test_all_pairs_basket_is_the_labelled_fallback_until_state_reports_the_held_pairs():
+    decision = evaluate_drawdown(_dd(0.0), _inputs(), held=None)
+    assert decision.basket_source == "basket_all_traded_pairs"
+    held = {"BTCUSDT": 5000.0, "ETHUSDT": 5000.0}
+    decision = evaluate_drawdown(_dd(0.0), _inputs(), held=held)
+    assert decision.basket_source == "held_pairs"
+    assert decision.basket_symbols == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_a_held_pair_without_a_sufficient_sigma_leaves_the_model_out():
+    inputs = _inputs(pairs=["BTCUSDT", "ETHUSDT"])
+    decision = evaluate_drawdown(
+        _dd(0.0), inputs, held={"BTCUSDT": 100.0, "XRPUSDT": 50.0}
+    )
+    assert decision.model_sigma is None
+    assert "model_sigma_no_sufficient_sigma_XRPUSDT" in decision.fallbacks
+    assert "model" in decision.components_missing
+
+
+def test_no_held_pairs_leaves_the_model_out():
+    decision = evaluate_drawdown(_dd(0.0, net=0.0), _inputs(), held={})
+    assert decision.model_sigma is None
+    assert "model_sigma_no_held_pairs" in decision.fallbacks
+
+
+def test_the_missing_components_are_recorded():
+    both = evaluate_drawdown(_dd(0.0), _inputs(equity_sigma=0.02, equity_ok=True))
+    assert both.components_missing == []
+    only_model = evaluate_drawdown(_dd(0.0), _inputs())
+    assert only_model.components_missing == ["realized"]
+    only_realized = evaluate_drawdown(
+        _dd(0.0), RiskInputs(equity_sigma=0.02, equity_sufficient=True)
+    )
+    assert only_realized.components_missing == ["model"]
+    assert evaluate_drawdown(_dd(0.0), None).components_missing == ["model", "realized"]
+
+
+def test_the_engine_weights_the_basket_by_the_states_net_notional():
+    ctx = _context(drawdown=_dd(0.0), inputs=_inputs())
+    ctx.portfolio = PortfolioSummary(
+        gross_exposure=0.1,
+        same_asset_pct=0.0,
+        open_positions_count=2,
+        net_notional_by_symbol={"BTCUSDT": 3000.0, "ETHUSDT": -1000.0},
+    )
+    result = CodeEngine.run(ctx)
+    assert result.drawdown.basket_source == "held_pairs"
+    assert result.drawdown.basket_symbols == ["BTCUSDT", "ETHUSDT"]
+
+
+@pytest.mark.asyncio
+async def test_the_per_symbol_net_notional_reaches_the_portfolio_summary():
+    payload = {
+        "portfolio": {
+            "gross_exposure": 0.2,
+            "same_asset_pct": 0.1,
+            "open_positions_count": 2,
+            "net_notional_by_symbol": {"BTCUSDT": 750.0, "ETHUSDT": -3000.0},
+            "gross_notional_by_symbol": {"BTCUSDT": 1250.0, "ETHUSDT": 3000.0},
+        },
+        "risk_limits": {
+            "max_drawdown_pct": 0.1,
+            "max_orders_global": 50,
+            "max_orders_per_symbol": 5,
+            "max_position_size_usd": 1000.0,
+        },
+        "env_stats": {"available_capital_usd": 5000.0},
+    }
+    builder = _builder()
+    builder.client.get = AsyncMock(
+        return_value=MagicMock(raise_for_status=lambda: None, json=lambda: payload)
+    )
+    portfolio, _, _ = await builder._fetch_portfolio_and_risk("BTCUSDT", "cid")
+    assert portfolio.net_notional_by_symbol == {"BTCUSDT": 750.0, "ETHUSDT": -3000.0}
+    assert portfolio.gross_notional_by_symbol["ETHUSDT"] == 3000.0

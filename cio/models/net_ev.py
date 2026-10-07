@@ -147,6 +147,10 @@ class DrawdownDecision(BaseModel):
     net_notional_ratio: float | None = None
     basket_sigma: float | None = None
     basket_symbols: list[str] = Field(default_factory=list)
+    basket_source: str | None = None  # held_pairs | basket_all_traded_pairs
+    components_missing: list[str] = Field(
+        default_factory=list
+    )  # model / realized sigma left out
     model_sigma: float | None = None
     realized_sigma: float | None = None
     sigma: float | None = None

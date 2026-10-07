@@ -130,7 +130,11 @@ class CodeEngine:
 
         # 1b. DRAWDOWN STEPS (petrosa-cio#298, rule 5): reduce at z_reduce x sigma, halt new entries at
         # z_halt x sigma of the drawdown from the equity peak. Closes and reduce-only orders pass.
-        drawdown = evaluate_drawdown(context.drawdown_state, context.risk_inputs)
+        drawdown = evaluate_drawdown(
+            context.drawdown_state,
+            context.risk_inputs,
+            context.portfolio.net_notional_by_symbol,
+        )
         result.drawdown = drawdown
         closing = is_closing_intent(context.trigger_payload)
         if drawdown.action == "halt" and not closing and drawdown_enforced():
