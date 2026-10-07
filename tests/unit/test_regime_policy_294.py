@@ -29,6 +29,7 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.regime import _map_confidence, regime_min_confidence
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 PAYLOAD = {
@@ -277,3 +278,100 @@ def test_the_pooled_median_also_replaces_the_fixed_uplift():
         next(c for c in gate.costs if c.name == "slippage").source == "measured_pooled"
     )
     assert "turbulent_ev_uplift" not in {c.name for c in gate.costs}
+
+
+# --- what "low confidence" means is an explicit, labelled input ----------------------------------
+
+
+def _api(confidence, regime="transitional"):
+    return RegimeAPIResponse.model_validate(
+        {
+            "pair": "BTCUSDT",
+            "metric": "regime",
+            "data": {
+                "regime": regime,
+                "volatility_level": "medium",
+                "volume_level": "normal",
+                "trend_direction": "neutral",
+                "confidence": confidence,
+            },
+            "metadata": {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "collection": "analytics_BTCUSDT_regime",
+            },
+        }
+    )
+
+
+def test_the_minimum_confidence_is_a_labelled_fallback_of_0_70(monkeypatch):
+    monkeypatch.delenv("CIO_REGIME_MIN_CONFIDENCE", raising=False)
+    assert regime_min_confidence() == (0.70, "fallback")
+    assert _map_confidence(0.69) == ConfidenceLevel.LOW
+    assert _map_confidence(0.70) == ConfidenceLevel.MEDIUM
+    assert _map_confidence(0.80) == ConfidenceLevel.HIGH
+
+
+def test_the_minimum_confidence_can_be_set_and_moves_the_low_cut(monkeypatch):
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", "0.75")
+    assert regime_min_confidence() == (0.75, "env")
+    assert _map_confidence(0.72) == ConfidenceLevel.LOW  # was MEDIUM at 0.70
+    assert _map_confidence(0.75) == ConfidenceLevel.MEDIUM
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", "0.5")
+    assert _map_confidence(0.55) == ConfidenceLevel.MEDIUM  # was LOW at 0.70
+    assert _map_confidence(0.85) == ConfidenceLevel.HIGH
+
+
+def test_a_minimum_above_the_high_cut_still_orders_the_levels(monkeypatch):
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", "0.9")
+    assert _map_confidence(0.85) == ConfidenceLevel.LOW
+    assert _map_confidence(0.9) == ConfidenceLevel.HIGH
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-0.2", "1.5", "nan"])
+def test_an_unreadable_or_out_of_range_minimum_is_the_fallback(monkeypatch, bad):
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", bad)
+    assert regime_min_confidence() == (0.70, "fallback")
+
+
+def test_the_regime_keeps_the_numeric_confidence_it_was_given():
+    assert RegimeResult.from_api_response(_api("0.74")).confidence_value == 0.74
+
+
+def test_availability_reports_the_confidence_seen_and_the_minimum_applied(monkeypatch):
+    monkeypatch.delenv("CIO_REGIME_MIN_CONFIDENCE", raising=False)
+    low = RegimeResult.from_api_response(_api("0.6"))
+    state = regime_availability(low)
+    assert state.available is False and state.reason == "regime_low_confidence"
+    assert (state.confidence_value, state.min_confidence) == (0.6, 0.70)
+    assert state.min_confidence_source == "fallback"
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", "0.55")
+    state = regime_availability(RegimeResult.from_api_response(_api("0.6")))
+    assert state.available is True and state.min_confidence_source == "env"
+
+
+def test_the_sizing_record_carries_the_minimum_with_the_regime_reason(monkeypatch):
+    monkeypatch.delenv("CIO_REGIME_MIN_CONFIDENCE", raising=False)
+    regime = RegimeResult.from_api_response(_api("0.6"))
+    regime.computed_at = datetime.now(UTC) - timedelta(minutes=5)
+    sizing = CodeEngine.run(_context(regime)).sizing
+    assert sizing.binding == "regime_probe"
+    assert sizing.regime_reason == "regime_low_confidence"
+    assert sizing.regime_confidence_value == 0.6
+    assert sizing.regime_min_confidence == 0.70
+    assert sizing.regime_min_confidence_source == "fallback"
+
+
+def test_a_confident_regime_leaves_the_sizing_record_without_a_regime_minimum():
+    sizing = CodeEngine.run(_context()).sizing
+    assert sizing.regime_reason is None
+    assert sizing.regime_min_confidence is None
+
+
+def test_the_context_gap_names_the_minimum_and_its_source(monkeypatch):
+    monkeypatch.setenv("CIO_REGIME_MIN_CONFIDENCE", "0.8")
+    gaps: list[ContextGap] = []
+    ContextBuilder._note_regime_unavailable(
+        RegimeResult.from_api_response(_api("0.75")), gaps
+    )
+    assert "min_confidence=0.8(env)" in gaps[0].reason
+    assert "value=0.75" in gaps[0].reason

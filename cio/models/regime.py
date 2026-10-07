@@ -1,3 +1,4 @@
+import os
 from datetime import datetime
 
 from pydantic import BaseModel, Field
@@ -26,12 +27,29 @@ CONFIDENCE_THRESHOLDS = {
     "medium": 0.70,
 }
 
+#: The regime confidence below which a regime counts as LOW (unavailable: probe size only, no hard block).
+#: A labelled fallback, overridable with ``CIO_REGIME_MIN_CONFIDENCE`` (petrosa-cio#294, operator ruling on #309).
+DEFAULT_REGIME_MIN_CONFIDENCE = CONFIDENCE_THRESHOLDS["medium"]
+
+
+def regime_min_confidence() -> tuple[float, str]:
+    """(value, source): the minimum regime confidence, from ``CIO_REGIME_MIN_CONFIDENCE`` (source ``env``),
+    else the 0.70 fallback (source ``fallback``). An unreadable or out-of-range value is the fallback."""
+    try:
+        value = float(os.environ["CIO_REGIME_MIN_CONFIDENCE"])
+    except (KeyError, ValueError):
+        return DEFAULT_REGIME_MIN_CONFIDENCE, "fallback"
+    if 0.0 < value <= 1.0:
+        return value, "env"
+    return DEFAULT_REGIME_MIN_CONFIDENCE, "fallback"
+
 
 def _map_confidence(conf_float: float) -> ConfidenceLevel:
     """Helper to convert API confidence float to internal enum based on business rules."""
-    if conf_float >= CONFIDENCE_THRESHOLDS["high"]:
+    minimum = regime_min_confidence()[0]
+    if conf_float >= max(CONFIDENCE_THRESHOLDS["high"], minimum):
         return ConfidenceLevel.HIGH
-    if conf_float >= CONFIDENCE_THRESHOLDS["medium"]:
+    if conf_float >= minimum:
         return ConfidenceLevel.MEDIUM
     return ConfidenceLevel.LOW
 
@@ -77,6 +95,8 @@ class RegimeResult(BaseModel):
     # When data-manager computed the regime (its metadata timestamp); None when unknown. A regime older
     # than max(3 x the analyzer interval, 1 h) is stale (petrosa-cio#294).
     computed_at: datetime | None = None
+    # The numeric confidence data-manager reported (None when it did not come from data-manager).
+    confidence_value: float | None = None
     primary_signal: str = Field(
         ..., description="The main data point that drove this classification"
     )
@@ -137,6 +157,7 @@ class RegimeResult(BaseModel):
             volatility_level=api_data.volatility_level,
             primary_signal=f"{api_regime.value}_conf_{conf_float}",
             data_manager_regime=api_regime.value,
+            confidence_value=conf_float,
             computed_at=response.metadata.timestamp if response.metadata else None,
             thought_trace=(
                 f"Mapped {api_regime} (conf={conf_float}) to {internal_regime}/{confidence.value}."

@@ -15,7 +15,7 @@ import os
 
 from cio.core.net_ev import probe_notional
 from cio.models.context import TriggerContext
-from cio.models.net_ev import NetEvGate, SizingRecord
+from cio.models.net_ev import NetEvGate, RegimeAvailability, SizingRecord
 
 DEFAULT_KELLY_FRACTION = 0.25  # f_q: the operator's input, confirmed 0.25
 
@@ -41,6 +41,7 @@ def size_order(
     gate: NetEvGate,
     drawdown_factor: float = 1.0,
     regime_reason: str | None = None,
+    regime_state: RegimeAvailability | None = None,
 ) -> SizingRecord:
     """Size the order from the gate's posterior; the probe when there is no posterior or the data is flagged.
 
@@ -53,6 +54,10 @@ def size_order(
         record.final_size_usd = record.probe_usd
         record.binding = "regime_probe"
         record.regime_reason = regime_reason
+        if regime_state is not None:
+            record.regime_confidence_value = regime_state.confidence_value
+            record.regime_min_confidence = regime_state.min_confidence
+            record.regime_min_confidence_source = regime_state.min_confidence_source
         return record
     if drawdown_factor < 1.0:
         record.size_before_drawdown_usd = record.final_size_usd

@@ -110,6 +110,10 @@ class SizingRecord(BaseModel):
     size_before_drawdown_usd: float | None = None
     # Set when a low-confidence or stale regime put the order at probe size only (petrosa-cio#294)
     regime_reason: str | None = None
+    # What "low confidence" meant for this order: the confidence seen, the minimum applied and where it came from
+    regime_confidence_value: float | None = None
+    regime_min_confidence: float | None = None
+    regime_min_confidence_source: Literal["env", "fallback"] | None = None
     size_before_regime_usd: float | None = None
     binding: Literal[
         "probe", "kelly", "max_position", "cold_start_probe", "regime_probe"
@@ -175,6 +179,9 @@ class RegimeAvailability(BaseModel):
     available: bool
     reason: Literal["regime_low_confidence", "regime_stale"] | None = None
     confidence: str | None = None
+    confidence_value: float | None = None
+    min_confidence: float | None = None
+    min_confidence_source: Literal["env", "fallback"] | None = None
     age_seconds: float | None = None
     age_known: bool = False
     stale_after_seconds: float

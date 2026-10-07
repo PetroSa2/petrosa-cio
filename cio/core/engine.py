@@ -252,7 +252,11 @@ class CodeEngine:
                     },
                 )
             sizing = size_order(
-                context, result.net_ev_gate, factor, regime_state.reason
+                context,
+                result.net_ev_gate,
+                factor,
+                regime_state.reason,
+                regime_state,
             )
             result.sizing = sizing
             result.kelly_fraction = sizing.kelly_fraction
