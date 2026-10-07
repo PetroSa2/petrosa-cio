@@ -159,7 +159,7 @@ class DrawdownDecision(BaseModel):
     z_halt: float
     reduce_threshold: float
     halt_threshold: float
-    threshold_source: Literal["derived", "fallback"] = "fallback"
+    threshold_source: Literal["derived", "fallback", "fallback_floor"] = "fallback"
     reduce_factor: float = 0.5
     fallbacks: list[str] = Field(default_factory=list)
 

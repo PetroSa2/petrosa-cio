@@ -8,8 +8,13 @@ are halted at z_halt x sigma (z = 2 and 3, confirmed), where
     model sigma = |net notional / equity| x sigma of the equal-weight basket of the traded pairs, from their
     realized daily sigmas and measured correlations (data-manager's risk inputs).
 
-A component with insufficient inputs is left out; with none, the labelled fallback applies: reduce at 3%, halt at
-6%. Closes and reduce-only orders are never blocked. The daily realized-loss stop stays a separate backstop.
+A component with insufficient inputs is left out, with one rule on top (petrosa-cio#313): while the **realized**
+equity-curve sigma is insufficient the model sigma alone would scale with *current* exposure, while a drawdown
+accrues under whatever exposure the book had, so the thresholds are max(derived, fallback): reduce at
+max(z_reduce x model sigma, 3%), halt at max(z_halt x model sigma, 6%), source ``fallback_floor``. Once the
+realized sigma is sufficient the thresholds are z x max(model, realized) as recorded, with no floor. With no
+usable component at all the labelled fallback applies: reduce at 3%, halt at 6%. Closes and reduce-only orders
+are never blocked. The daily realized-loss stop stays a separate backstop.
 """
 
 from __future__ import annotations
@@ -171,6 +176,12 @@ def evaluate_drawdown(
         decision.reduce_threshold = zr * sigma
         decision.halt_threshold = zh * sigma
         decision.threshold_source = "derived"
+        if not realized:
+            # No equity history to confirm the model sigma: never tighter than the fixed steps (#313)
+            decision.reduce_threshold = max(decision.reduce_threshold, FALLBACK_REDUCE)
+            decision.halt_threshold = max(decision.halt_threshold, FALLBACK_HALT)
+            decision.threshold_source = "fallback_floor"
+            decision.fallbacks.append("thresholds_fallback_floor")
     else:
         decision.fallbacks.append("thresholds_fallback")
     if drawdown.from_peak >= decision.halt_threshold:
