@@ -167,6 +167,15 @@ _SIGNAL_ACTION_TO_PRICE_ACTION = {
 }
 
 
+def _report_budget_s() -> float:
+    """The longest a decision waits for a cold data-manager report (``CIO_REPORT_FETCH_BUDGET_S``, default 2 s)."""
+    try:
+        value = float(os.environ["CIO_REPORT_FETCH_BUDGET_S"])
+    except (KeyError, ValueError):
+        return 2.0
+    return value if value > 0 else 2.0
+
+
 class ContextBuilder:
     """
     Assembles the complete TriggerContext for a reasoning loop iteration.
@@ -193,6 +202,11 @@ class ContextBuilder:
         self._rounds_cache: (
             tuple[float, dict[str, StrategyRounds], PriorStrength] | None
         ) = None
+        # The report refreshes in flight, by name (petrosa-cio#312): a decision never waits for a data-manager
+        # report longer than the budget, and one refresh serves every decision that needs it.
+        self._refresh_tasks: dict[str, asyncio.Future[None]] = {}
+        self._budget_missed: set[str] = set()
+        self._report_budget_s = _report_budget_s()
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
         ] = {}
@@ -297,10 +311,10 @@ class ContextBuilder:
 
         commission = self._commission_from(env_stats.get("commission"))
         drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
-        risk_inputs = await self._fetch_risk_inputs(correlation_id)
-        slippage = await self._fetch_slippage(regime, correlation_id)
-        prior_strength, strategy_rounds = await self._fetch_rounds(
-            strategy_id, correlation_id
+        slippage, (prior_strength, strategy_rounds), risk_inputs = await asyncio.gather(
+            self._fetch_slippage(regime, correlation_id),
+            self._fetch_rounds(strategy_id, correlation_id),
+            self._fetch_risk_inputs(correlation_id),
         )
 
         # AC2 (#197): a single upstream outage (data-manager unreachable/slow)
@@ -399,6 +413,91 @@ class ContextBuilder:
         except Exception:
             return None
 
+    async def _ensure_report(
+        self, name: str, refresh: Any, correlation_id: str
+    ) -> None:
+        """Make sure the ``name`` report is cached, without ever holding a decision for long (#312).
+
+        Fresh: nothing to do. Stale: serve it and refresh in the background. Cold: start (or join) the one
+        refresh in flight and wait for it at most the budget; past it the decision goes on with the labelled
+        fallbacks (the cache fills when the refresh ends). A budget already missed with the refresh still in
+        flight is not waited for again.
+        """
+        cache = getattr(self, f"_{name}_cache")
+        if cache is not None and self._clock() < cache[0]:
+            return
+        task = self._refresh_tasks.get(name)
+        if task is None or task.done():
+            task = asyncio.ensure_future(refresh(correlation_id))
+            self._refresh_tasks[name] = task
+            self._budget_missed.discard(name)
+
+            def _done(finished: asyncio.Future[None], key: str = name) -> None:
+                self._budget_missed.discard(key)
+                if not finished.cancelled() and finished.exception() is not None:
+                    logger.warning(
+                        "REPORT_REFRESH_FAILED report=%s: %s", key, finished.exception()
+                    )
+
+            task.add_done_callback(_done)
+        if cache is not None or name in self._budget_missed:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=self._report_budget_s)
+        except TimeoutError:
+            self._budget_missed.add(name)
+            logger.warning(
+                "REPORT_FETCH_BUDGET_EXCEEDED report=%s budget_s=%.1f: the decision goes on with the "
+                "labelled fallbacks",
+                name,
+                self._report_budget_s,
+                extra={"correlation_id": correlation_id},
+            )
+        except (
+            Exception
+        ):  # the refresh logs its own failure and caches the empty result
+            pass
+
+    def warm_reports(self) -> None:
+        """Start the report refreshes now (at startup), so the first decision finds them cached or in flight.
+        Needs the running loop; never waits."""
+        for name, refresh in (
+            ("slippage", self._refresh_slippage),
+            ("rounds", self._refresh_rounds),
+            ("risk_inputs", self._refresh_risk_inputs),
+        ):
+            task = self._refresh_tasks.get(name)
+            if task is None or task.done():
+                self._refresh_tasks[name] = asyncio.ensure_future(refresh("startup"))
+
+    async def _refresh_slippage(self, correlation_id: str) -> None:
+        """Read the slippage report and cache it for an hour (a failed read for a minute)."""
+        now = self._clock()
+        table: dict[str, tuple[float, int]] = {}
+        ttl = 3600.0
+        try:
+            response = await self.client.get(
+                f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30"
+            )
+            response.raise_for_status()
+            body = response.json()
+            for name, stats in (body.get("by_regime") or {}).items():
+                table[str(name)] = (float(stats["median_bp"]), int(stats["count"]))
+            overall = body.get("overall")
+            if isinstance(overall, dict):
+                table[_POOLED_KEY] = (
+                    float(overall["median_bp"]),
+                    int(overall["count"]),
+                )
+        except Exception as exc:
+            ttl = 60.0
+            logger.warning(
+                "SLIPPAGE_FETCH_FAILED: %s",
+                exc,
+                extra={"correlation_id": correlation_id},
+            )
+        self._slippage_cache = (now + ttl, table)
+
     async def _fetch_slippage(
         self, regime: RegimeResult, correlation_id: str
     ) -> SlippageEstimate | None:
@@ -411,32 +510,9 @@ class ContextBuilder:
         key = regime.data_manager_regime
         if not key:
             return None
-        now = self._clock()
-        if self._slippage_cache is None or now >= self._slippage_cache[0]:
-            table: dict[str, tuple[float, int]] = {}
-            ttl = 3600.0
-            try:
-                response = await self.client.get(
-                    f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30"
-                )
-                response.raise_for_status()
-                body = response.json()
-                for name, stats in (body.get("by_regime") or {}).items():
-                    table[str(name)] = (float(stats["median_bp"]), int(stats["count"]))
-                overall = body.get("overall")
-                if isinstance(overall, dict):
-                    table[_POOLED_KEY] = (
-                        float(overall["median_bp"]),
-                        int(overall["count"]),
-                    )
-            except Exception as exc:
-                ttl = 60.0
-                logger.warning(
-                    "SLIPPAGE_FETCH_FAILED: %s",
-                    exc,
-                    extra={"correlation_id": correlation_id},
-                )
-            self._slippage_cache = (now + ttl, table)
+        await self._ensure_report("slippage", self._refresh_slippage, correlation_id)
+        if self._slippage_cache is None:
+            return None
         table = self._slippage_cache[1]
         if not table:
             return None
@@ -472,48 +548,98 @@ class ContextBuilder:
 
         Only sufficient items are kept: a pair's daily sigma, a pair-correlation and the equity-curve sigma.
         """
-        now = self._clock()
-        if self._risk_inputs_cache is None or now >= self._risk_inputs_cache[0]:
-            inputs: RiskInputs | None = None
-            ttl = 3600.0
-            try:
-                response = await self.client.get(
-                    f"{self.data_manager_url}/api/v1/risk/inputs"
-                )
-                response.raise_for_status()
-                body = response.json()
-                sigmas: dict[str, float] = {}
-                for symbol, item in (body.get("symbols") or {}).items():
-                    best = (item or {}).get("sigma_daily_best") or {}
-                    if best.get("sufficient") and best.get("value"):
-                        sigmas[str(symbol)] = float(best["value"])
-                corr = body.get("correlation") or {}
-                matrix = corr.get("matrix") or {}
-                ok = corr.get("sufficient") or {}
-                correlation = {
-                    a: {
-                        b: (v if (ok.get(a) or {}).get(b) else None)
-                        for b, v in (row or {}).items()
-                    }
-                    for a, row in matrix.items()
-                }
-                equity = body.get("equity") or {}
-                inputs = RiskInputs(
-                    sigma_daily=sigmas,
-                    correlation=correlation,
-                    equity_sigma=equity.get("sigma_daily"),
-                    equity_sufficient=bool(equity.get("sufficient")),
-                )
-            except Exception as exc:
-                ttl = 60.0
-                inputs = None
-                logger.warning(
-                    "RISK_INPUTS_FETCH_FAILED: %s",
-                    exc,
-                    extra={"correlation_id": correlation_id},
-                )
-            self._risk_inputs_cache = (now + ttl, inputs)
+        await self._ensure_report(
+            "risk_inputs", self._refresh_risk_inputs, correlation_id
+        )
+        if self._risk_inputs_cache is None:
+            return None
         return self._risk_inputs_cache[1]
+
+    async def _refresh_risk_inputs(self, correlation_id: str) -> None:
+        """Read the risk inputs and cache them for an hour (a failure for a minute)."""
+        now = self._clock()
+        inputs: RiskInputs | None = None
+        ttl = 3600.0
+        try:
+            response = await self.client.get(
+                f"{self.data_manager_url}/api/v1/risk/inputs"
+            )
+            response.raise_for_status()
+            body = response.json()
+            sigmas: dict[str, float] = {}
+            for symbol, item in (body.get("symbols") or {}).items():
+                best = (item or {}).get("sigma_daily_best") or {}
+                if best.get("sufficient") and best.get("value"):
+                    sigmas[str(symbol)] = float(best["value"])
+            corr = body.get("correlation") or {}
+            matrix = corr.get("matrix") or {}
+            ok = corr.get("sufficient") or {}
+            correlation = {
+                a: {
+                    b: (v if (ok.get(a) or {}).get(b) else None)
+                    for b, v in (row or {}).items()
+                }
+                for a, row in matrix.items()
+            }
+            equity = body.get("equity") or {}
+            inputs = RiskInputs(
+                sigma_daily=sigmas,
+                correlation=correlation,
+                equity_sigma=equity.get("sigma_daily"),
+                equity_sufficient=bool(equity.get("sufficient")),
+            )
+        except Exception as exc:
+            ttl = 60.0
+            inputs = None
+            logger.warning(
+                "RISK_INPUTS_FETCH_FAILED: %s",
+                exc,
+                extra={"correlation_id": correlation_id},
+            )
+        self._risk_inputs_cache = (now + ttl, inputs)
+
+    async def _refresh_rounds(self, correlation_id: str) -> None:
+        """Read the round report and cache it for an hour (a failed read for a minute)."""
+        now = self._clock()
+        table: dict[str, StrategyRounds] = {}
+        prior: PriorStrength | None = None
+        ttl = 3600.0
+        try:
+            response = await self.client.get(
+                f"{self.data_manager_url}/analysis/rounds?window_days=30"
+            )
+            response.raise_for_status()
+            body = response.json()
+            for name, stats in (body.get("strategies") or {}).items():
+                table[str(name)] = StrategyRounds(
+                    fills=int(stats.get("fills") or 0),
+                    closed_rounds=int(stats.get("closed_rounds") or 0),
+                    open_rounds=int(stats.get("open_rounds") or 0),
+                    wins=int(stats.get("wins") or 0),
+                    losses=int(stats.get("losses") or 0),
+                    closed_round_rate_per_day=stats.get("closed_round_rate_per_day"),
+                    median_holding_seconds=stats.get("median_holding_seconds"),
+                    first_fill_at=stats.get("first_fill_at"),
+                    last_closed_at=stats.get("last_closed_at"),
+                    oldest_open_round_opened_at=stats.get(
+                        "oldest_open_round_opened_at"
+                    ),
+                )
+            from cio.core.net_ev import estimate_prior_strength
+
+            prior = estimate_prior_strength(
+                [(r.wins, r.wins + r.losses) for r in table.values()]
+            )
+        except Exception as exc:
+            ttl = 60.0
+            table = {}
+            prior = None
+            logger.warning(
+                "ROUNDS_FETCH_FAILED: %s",
+                exc,
+                extra={"correlation_id": correlation_id},
+            )
+        self._rounds_cache = (now + ttl, table, prior)  # type: ignore[assignment]
 
     async def _fetch_rounds(
         self, strategy_id: str, correlation_id: str
@@ -524,49 +650,9 @@ class ContextBuilder:
         k is estimated across all strategies once enough of them have closed rounds, else the labelled
         fallback of 30. Both are None when the report cannot be read: the gate then uses its own fallbacks.
         """
-        now = self._clock()
-        if self._rounds_cache is None or now >= self._rounds_cache[0]:
-            table: dict[str, StrategyRounds] = {}
-            prior: PriorStrength | None = None
-            ttl = 3600.0
-            try:
-                response = await self.client.get(
-                    f"{self.data_manager_url}/analysis/rounds?window_days=30"
-                )
-                response.raise_for_status()
-                body = response.json()
-                for name, stats in (body.get("strategies") or {}).items():
-                    table[str(name)] = StrategyRounds(
-                        fills=int(stats.get("fills") or 0),
-                        closed_rounds=int(stats.get("closed_rounds") or 0),
-                        open_rounds=int(stats.get("open_rounds") or 0),
-                        wins=int(stats.get("wins") or 0),
-                        losses=int(stats.get("losses") or 0),
-                        closed_round_rate_per_day=stats.get(
-                            "closed_round_rate_per_day"
-                        ),
-                        median_holding_seconds=stats.get("median_holding_seconds"),
-                        first_fill_at=stats.get("first_fill_at"),
-                        last_closed_at=stats.get("last_closed_at"),
-                        oldest_open_round_opened_at=stats.get(
-                            "oldest_open_round_opened_at"
-                        ),
-                    )
-                from cio.core.net_ev import estimate_prior_strength
-
-                prior = estimate_prior_strength(
-                    [(r.wins, r.wins + r.losses) for r in table.values()]
-                )
-            except Exception as exc:
-                ttl = 60.0
-                table = {}
-                prior = None
-                logger.warning(
-                    "ROUNDS_FETCH_FAILED: %s",
-                    exc,
-                    extra={"correlation_id": correlation_id},
-                )
-            self._rounds_cache = (now + ttl, table, prior)  # type: ignore[assignment]
+        await self._ensure_report("rounds", self._refresh_rounds, correlation_id)
+        if self._rounds_cache is None:
+            return None, None
         _, table, prior = self._rounds_cache
         return prior, table.get(strategy_id)
 
