@@ -1,5 +1,4 @@
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -56,6 +55,17 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
 
     completion = AsyncMock(side_effect=slow_completion)
     monkeypatch.setattr(litellm, "acompletion", completion)
+    inner_timeout_completed = asyncio.Event()
+    outer_timeout_reached = asyncio.Event()
+
+    async def dispatch_outer_timeout(*_args, **_kwargs):
+        outer_timeout_reached.set()
+
+    monkeypatch.setattr(
+        enforcer_module.AlertManager,
+        "dispatch_critical_alert",
+        dispatch_outer_timeout,
+    )
 
     client = LiteLLMClient()
     orchestrator = MagicMock()
@@ -63,6 +73,7 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     async def run(_context):
         response = await client.complete("test", "system", {})
         assert response.error
+        inner_timeout_completed.set()
         return TIMEOUT_RETRY_RESULT
 
     orchestrator.run = run
@@ -71,12 +82,12 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     context.strategy_id = "test-strategy"
     context.trigger_payload = {}
 
-    started = time.perf_counter()
     decision = await NurseEnforcer(orchestrator).audit(context)
-    elapsed = time.perf_counter() - started
 
     assert decision.action == ActionType.RETRY_SAFE
-    assert elapsed < enforcer_module.AUDIT_TIMEOUT_SECONDS
+    assert inner_timeout_completed.is_set()
+    await asyncio.sleep(0)
+    assert not outer_timeout_reached.is_set()
     # Default routes are distinct (haiku primary, gpt-4o-mini fallback), so a
     # primary timeout goes straight to the fallback after one attempt.
     assert completion.await_count == llm_client_module._primary_attempts(True) + 1
