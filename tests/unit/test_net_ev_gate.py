@@ -1,6 +1,7 @@
 """Net-EV lower-confidence-bound gate and cost-share pre-filter (petrosa-cio#296, rules 1, 19, 23)."""
 
-from unittest.mock import AsyncMock, MagicMock
+import os
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -14,13 +15,16 @@ from cio.core.net_ev import (
     gate_enforced,
     prefilter_mode,
 )
+from cio.core.orchestrator import Orchestrator
 from cio.models import (
     ActionType,
     ActivationRecommendation,
+    CodeEngineResult,
     CommissionRates,
     ConfidenceLevel,
     HealthStatus,
     MarketSignals,
+    NetEvGate,
     PnlTrend,
     PortfolioSummary,
     RegimeEnum,
@@ -815,3 +819,66 @@ def test_the_entry_distance_sibling_is_not_read_as_the_stop_floor():
 def test_a_state_without_the_floor_leaves_it_unknown():
     risk = RiskLimits(max_orders_global=1, max_orders_per_symbol=1)
     assert risk.min_sl_distance_pct is None and risk.min_sl_distance_frac is None
+
+
+# --- the cost-share pre-filter in the reasoning loop (rule 19): before any LLM call ------------------
+
+
+def _code_result(skip: bool) -> CodeEngineResult:
+    return CodeEngineResult(
+        recommended_sl_pct=0.06,
+        recommended_tp_pct=0.04,
+        net_ev_gate=NetEvGate(
+            result="fail",
+            reason="net_ev_lcb_below_zero",
+            method="posterior",
+            s_eff=0.06,
+            take_profit_pct=0.04,
+            cost_total=0.03,
+            cost_share=0.5,
+            p_ref=0.5,
+            cost_share_limit=-0.17,
+            cost_share_skip=skip,
+        ),
+    )
+
+
+async def _run(mode: str, skip: bool):
+    env = {"NURSE_USE_LLM_REASONING": "true", "CIO_COST_SHARE_PREFILTER": mode}
+    with (
+        patch.dict(os.environ, env),
+        patch("cio.core.orchestrator.CodeEngine") as engine,
+        patch("cio.core.orchestrator.RegimeAnalyst") as regime,
+        patch("cio.core.orchestrator.StrategyAssessor"),
+        patch("cio.core.orchestrator.ActionClassifier"),
+    ):
+        engine.run.return_value = _code_result(skip)
+        regime.return_value.classify = AsyncMock(side_effect=RuntimeError("stop here"))
+        decision = await Orchestrator().run(_context())
+        return decision, regime.return_value.classify
+
+
+@pytest.mark.asyncio
+async def test_enforce_skips_before_any_llm_call():
+    decision, classify = await _run("enforce", skip=True)
+    assert decision.action == ActionType.SKIP
+    assert "cost_share_prefilter" in decision.justification
+    classify.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_log_only_by_default_does_not_skip():
+    decision, classify = await _run("log_only", skip=True)
+    classify.assert_called()  # the LLM stage still runs
+
+
+@pytest.mark.asyncio
+async def test_enforce_without_a_breach_proceeds():
+    _, classify = await _run("enforce", skip=False)
+    classify.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_off_never_skips():
+    _, classify = await _run("off", skip=True)
+    classify.assert_called()
