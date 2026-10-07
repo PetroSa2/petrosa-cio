@@ -259,9 +259,11 @@ def evaluate(
         )
 
     fallbacks: list[str] = []
-    floor = limits.min_sl_distance_pct
+    floor = limits.min_sl_distance_frac
     if floor is None:
         fallbacks.append("stop_floor_unavailable")
+    elif limits.min_sl_distance_source == "fallback":
+        fallbacks.append("stop_floor_fallback")  # tradeengine's fixed placeholder
     s_eff = max(stop_pct, floor) if floor else stop_pct
     reward_risk = take_profit_pct / s_eff
 
@@ -276,7 +278,8 @@ def evaluate(
         result="not_evaluated",
         reason="",
         stop_pct=stop_pct,
-        stop_floor_pct=floor,
+        stop_floor_frac=floor,
+        stop_floor_reported_pct=limits.min_sl_distance_pct,
         stop_floor_source=limits.min_sl_distance_source,
         s_eff=s_eff,
         take_profit_pct=take_profit_pct,

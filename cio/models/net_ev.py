@@ -97,7 +97,12 @@ class NetEvGate(BaseModel):
     cold_start: ColdStartLimits | None = None
     method: Literal["posterior", "fallback_min_ev", "none"] = "none"
     stop_pct: float | None = None  # carried or configured stop distance
-    stop_floor_pct: float | None = None  # tradeengine's floor from /state
+    stop_floor_frac: float | None = (
+        None  # tradeengine's floor from /state, as a fraction of the entry
+    )
+    stop_floor_reported_pct: float | None = (
+        None  # the same floor as /state reports it, in percent
+    )
     stop_floor_source: str | None = None
     s_eff: float | None = None  # max(stop, floor): the stop that will really be placed
     take_profit_pct: float | None = None  # unchanged by the floor (rule 23, option A)

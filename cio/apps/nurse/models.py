@@ -3,7 +3,7 @@ Nurse-specific safety models for the Petrosa CIO.
 Changes to this file require MFA approval via GitHub branch protection.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from cio.core.safety_constants import (
     HEARTBEAT_TIMEOUT_MS,
@@ -47,15 +47,23 @@ class RiskLimits(BaseModel):
         5000.0,
         description="Hard absolute cap on any single position size in USD.",
     )
+    # tradeengine reports the floor in PERCENT (6.0 = 6%), unlike its fraction-valued sibling
+    # ``min_sl_entry_distance_pct``. ``min_sl_distance_frac`` is the same floor as a fraction of the entry,
+    # converted here at the boundary (pct / 100), and is the only one the net-EV gate uses.
     min_sl_distance_pct: float | None = Field(
         None,
         description=(
-            "The stop-distance floor tradeengine re-anchors every stop to (fraction of the entry). "
-            "The net-EV gate uses max(order stop, this floor). Absent (older tradeengine) means unknown."
+            "The stop-distance floor tradeengine re-anchors every stop to, in PERCENT as reported on "
+            "/state. Absent (older tradeengine) means unknown."
         ),
     )
     min_sl_distance_source: str | None = Field(
-        None, description="Where the floor comes from (config, derived, ...)."
+        None,
+        description="Where the floor comes from, as tradeengine emits it: env | fallback | derived.",
+    )
+    min_sl_distance_frac: float | None = Field(
+        None,
+        description="min_sl_distance_pct / 100: the floor as a fraction of the entry.",
     )
     probe_mode: bool = Field(
         False,
@@ -64,6 +72,14 @@ class RiskLimits(BaseModel):
             "max_position_size_usd is then that probe notional. Absent (older tradeengine) means false."
         ),
     )
+
+    @model_validator(mode="after")
+    def _floor_fraction(self) -> "RiskLimits":
+        """Convert tradeengine's percent floor to a fraction once, at the boundary."""
+        pct = self.min_sl_distance_pct
+        if self.min_sl_distance_frac is None and pct is not None and pct > 0:
+            self.min_sl_distance_frac = pct / 100.0
+        return self
 
 
 class ExecutionPolicy(BaseModel):

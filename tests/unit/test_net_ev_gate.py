@@ -46,7 +46,8 @@ def _context(
     win_rate=0.7,
     wins=70,
     losses=30,
-    floor=0.06,
+    floor=6.0,  # tradeengine reports the floor in PERCENT
+    floor_source="env",
     commission="exchange",
     slippage="measured",
     dm_regime="balanced_market",
@@ -106,7 +107,7 @@ def _context(
             max_orders_per_symbol=5,
             max_position_size_usd=1000.0,
             min_sl_distance_pct=floor,
-            min_sl_distance_source="config" if floor else None,
+            min_sl_distance_source=floor_source if floor else None,
         ),
         commission=commission,
         slippage=slippage,
@@ -158,7 +159,8 @@ def test_beta_cdf_edges_and_known_value():
 def test_effective_stop_is_the_floor_and_take_profit_is_unchanged():
     gate = evaluate(_context(), 0.03, 0.04)
     assert gate.stop_pct == 0.03
-    assert gate.stop_floor_pct == 0.06
+    assert gate.stop_floor_frac == pytest.approx(0.06)
+    assert gate.stop_floor_reported_pct == 6.0
     assert gate.s_eff == 0.06
     assert gate.take_profit_pct == 0.04
     # carried -3% / +4% looks 1.33:1, the effective -6% makes it 0.67:1
@@ -170,7 +172,7 @@ def test_effective_stop_is_the_floor_and_take_profit_is_unchanged():
 
 
 def test_stop_wider_than_the_floor_is_kept():
-    gate = evaluate(_context(floor=0.02), 0.03, 0.04)
+    gate = evaluate(_context(floor=2.0), 0.03, 0.04)
     assert gate.s_eff == 0.03
     assert gate.reward_risk == pytest.approx(4 / 3)
 
@@ -474,8 +476,8 @@ async def test_state_commission_and_stop_floor_reach_the_context():
             "max_orders_global": 50,
             "max_orders_per_symbol": 5,
             "max_position_size_usd": 1000.0,
-            "min_sl_distance_pct": 0.06,
-            "min_sl_distance_source": "config",
+            "min_sl_distance_pct": 6.0,
+            "min_sl_distance_source": "fallback",
         },
         "env_stats": {"available_capital_usd": 5000.0},
         "commission": {
@@ -489,8 +491,9 @@ async def test_state_commission_and_stop_floor_reach_the_context():
         return_value=MagicMock(raise_for_status=lambda: None, json=lambda: payload)
     )
     _, risk, env_stats = await builder._fetch_portfolio_and_risk("BTCUSDT", "cid")
-    assert risk.min_sl_distance_pct == 0.06
-    assert risk.min_sl_distance_source == "config"
+    assert risk.min_sl_distance_pct == 6.0
+    assert risk.min_sl_distance_frac == pytest.approx(0.06)
+    assert risk.min_sl_distance_source == "fallback"
     assert env_stats["commission"]["taker_rate"] == 0.0004
 
 
@@ -705,3 +708,110 @@ async def test_orchestrator_marks_a_probe_decision_as_cold_start_notional():
     orchestrator.portfolio_tracker = other
     await orchestrator._record_cold_start(ctx, skipped)
     assert await other.cold_start_notional("s1") == (0.0, 0.0)
+
+
+# --- contract with tradeengine's real /state shape (units) ---------------------------------------
+
+# tradeengine's /state as it is today (te#741 stop floor, te#735 commission, te#736 drawdown): the floor
+# is in PERCENT, its sibling min_sl_entry_distance_pct and the commission rates are fractions.
+TE_STATE = {
+    "portfolio": {
+        "gross_exposure": 0.2,
+        "same_asset_pct": 0.1,
+        "open_positions_count": 2,
+    },
+    "risk_limits": {
+        "max_drawdown_pct": 0.1,
+        "max_orders_global": 50,
+        "max_orders_per_symbol": 5,
+        "max_position_size_usd": 1000.0,
+        "min_sl_distance_pct": 6.0,
+        "min_sl_distance_source": "fallback",
+        "min_sl_entry_distance_pct": 0.005,
+        "min_sl_entry_distance_source": "env",
+    },
+    "env_stats": {"available_capital_usd": 5000.0, "global_drawdown_pct": 0.012},
+    "commission": {
+        "taker_rate": 0.0005,
+        "maker_rate": 0.0002,
+        "source": "fallback",
+        "fetched_at": None,
+        "fee_burn": None,
+    },
+    "drawdown": {"equity": 5000.0, "from_peak_pct": 0.012},
+}
+
+
+async def _context_from_state(state, stop=0.03, tp=0.04):
+    builder = _builder()
+    builder.client = MagicMock()
+    builder.client.get = AsyncMock(
+        return_value=MagicMock(raise_for_status=lambda: None, json=lambda: state)
+    )
+    _, risk, env_stats = await builder._fetch_portfolio_and_risk("BTCUSDT", "cid")
+    ctx = _context()
+    ctx = ctx.model_copy(
+        update={
+            "risk_limits": risk,
+            "commission": ContextBuilder._commission_from(env_stats.get("commission")),
+        }
+    )
+    return ctx, evaluate(ctx, stop, tp)
+
+
+@pytest.mark.asyncio
+async def test_te_state_fallback_floor_in_percent_gives_s_eff_of_six_percent():
+    ctx, gate = await _context_from_state(TE_STATE)
+    assert ctx.risk_limits.min_sl_distance_frac == pytest.approx(0.06)
+    assert gate.s_eff == pytest.approx(0.06)  # not 6.0
+    assert gate.p_be < 1.0
+    assert "stop_floor_fallback" in gate.fallbacks
+    # commission rates are fractions: 5 bp taker, both sides
+    part = next(c for c in gate.costs if c.name == "commission")
+    assert part.value == pytest.approx(2 * 0.0005)
+    assert part.source == "fallback"  # tradeengine labels it a fallback
+
+
+@pytest.mark.asyncio
+async def test_te_state_derived_floor_gives_the_derived_fraction():
+    state = {
+        **TE_STATE,
+        "risk_limits": {
+            **TE_STATE["risk_limits"],
+            "min_sl_distance_pct": 1.32,
+            "min_sl_distance_source": "derived",
+        },
+        "commission": {
+            **TE_STATE["commission"],
+            "taker_rate": 0.0004,
+            "source": "exchange",
+        },
+    }
+    # a ~22 bp carried stop is widened to the derived floor
+    ctx, gate = await _context_from_state(state, stop=0.0022, tp=0.004)
+    assert gate.s_eff == pytest.approx(0.0132)
+    assert gate.stop_floor_reported_pct == 1.32
+    assert gate.stop_floor_frac == pytest.approx(0.0132)
+    assert "stop_floor_fallback" not in gate.fallbacks
+    assert next(c for c in gate.costs if c.name == "commission").source == "exchange"
+
+
+@pytest.mark.asyncio
+async def test_te_state_env_source_is_accepted_and_a_wider_order_stop_wins():
+    state = {
+        **TE_STATE,
+        "risk_limits": {**TE_STATE["risk_limits"], "min_sl_distance_source": "env"},
+    }
+    _, gate = await _context_from_state(state, stop=0.08)
+    assert gate.s_eff == pytest.approx(0.08)
+    assert gate.stop_floor_source == "env"
+
+
+def test_the_entry_distance_sibling_is_not_read_as_the_stop_floor():
+    risk = RiskLimits(**TE_STATE["risk_limits"])
+    assert risk.min_sl_distance_frac == pytest.approx(0.06)  # not 0.005
+
+
+def test_a_state_without_the_floor_leaves_it_unknown():
+    risk = RiskLimits(max_orders_global=1, max_orders_per_symbol=1)
+    assert risk.min_sl_distance_pct is None and risk.min_sl_distance_frac is None
