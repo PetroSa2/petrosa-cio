@@ -39,7 +39,8 @@ PAYLOAD = {
 PAIRS = ["BTCUSDT", "ETHUSDT", "BCHUSDT", "LTCUSDT", "XRPUSDT"]
 
 
-def _inputs(sigma=0.027, rho=1.0, pairs=PAIRS, equity_sigma=None, equity_ok=False):
+def _inputs(sigma=0.027, rho=1.0, pairs=PAIRS, equity_sigma=0.005, equity_ok=True):
+    # a sufficient realized equity sigma below the model sigma: the derived steps apply with no floor (#313)
     return RiskInputs(
         sigma_daily={s: sigma for s in pairs},
         correlation={a: {b: (1.0 if a == b else rho) for b in pairs} for a in pairs},
@@ -173,7 +174,7 @@ def test_without_usable_inputs_the_fixed_steps_apply_labelled(inputs, label):
 
 
 def test_an_insufficient_correlation_leaves_the_model_out():
-    inputs = _inputs(pairs=["AAA", "BBB"])
+    inputs = _inputs(pairs=["AAA", "BBB"], equity_sigma=None, equity_ok=False)
     inputs.correlation["AAA"]["BBB"] = None
     decision = evaluate_drawdown(_dd(0.0), inputs)
     assert decision.model_sigma is None
@@ -529,7 +530,9 @@ def test_no_held_pairs_leaves_the_model_out():
 def test_the_missing_components_are_recorded():
     both = evaluate_drawdown(_dd(0.0), _inputs(equity_sigma=0.02, equity_ok=True))
     assert both.components_missing == []
-    only_model = evaluate_drawdown(_dd(0.0), _inputs())
+    only_model = evaluate_drawdown(
+        _dd(0.0), _inputs(equity_sigma=None, equity_ok=False)
+    )
     assert only_model.components_missing == ["realized"]
     only_realized = evaluate_drawdown(
         _dd(0.0), RiskInputs(equity_sigma=0.02, equity_sufficient=True)
@@ -576,3 +579,59 @@ async def test_the_per_symbol_net_notional_reaches_the_portfolio_summary():
     portfolio, _, _ = await builder._fetch_portfolio_and_risk("BTCUSDT", "cid")
     assert portfolio.net_notional_by_symbol == {"BTCUSDT": 750.0, "ETHUSDT": -3000.0}
     assert portfolio.gross_notional_by_symbol["ETHUSDT"] == 3000.0
+
+
+# --- the floor while the equity history is insufficient (petrosa-cio#313) ------------------------
+
+
+def test_a_low_exposure_book_without_equity_history_gets_the_fixed_steps_as_a_floor():
+    # net 0.175x equity, basket sigma 2.7%: model sigma 0.47%, 2 sigma 0.94%, 3 sigma 1.4%
+    decision = evaluate_drawdown(
+        _dd(0.012, net=0.175), _inputs(sigma=0.027, equity_sigma=None, equity_ok=False)
+    )
+    assert decision.model_sigma == pytest.approx(0.175 * 0.027)
+    assert decision.reduce_threshold == 0.03 and decision.halt_threshold == 0.06
+    assert decision.threshold_source == "fallback_floor"
+    assert decision.components_missing == ["realized"]
+    assert "realized_sigma_insufficient" in decision.fallbacks
+    assert "thresholds_fallback_floor" in decision.fallbacks
+    # a 1.2% drawdown (fees and marks) is noise: nothing happens
+    assert decision.action == "none" and decision.reason == "within_steps"
+
+
+def test_a_derived_step_above_the_floor_is_kept_while_the_equity_history_is_short():
+    # net 2x equity: model sigma 5.4%, 2 sigma 10.8% and 3 sigma 16.2% exceed 3% / 6%
+    decision = evaluate_drawdown(
+        _dd(0.0, net=2.0), _inputs(sigma=0.027, equity_sigma=None, equity_ok=False)
+    )
+    assert decision.reduce_threshold == pytest.approx(0.108)
+    assert decision.halt_threshold == pytest.approx(0.162)
+    assert decision.threshold_source == "fallback_floor"
+
+
+def test_a_sufficient_equity_sigma_removes_the_floor():
+    decision = evaluate_drawdown(
+        _dd(0.0, net=0.175), _inputs(sigma=0.027, equity_sigma=0.01, equity_ok=True)
+    )
+    assert decision.sigma_source == "realized" and decision.sigma == 0.01
+    assert decision.reduce_threshold == pytest.approx(0.02)
+    assert decision.halt_threshold == pytest.approx(0.03)
+    assert decision.threshold_source == "derived"
+    assert "thresholds_fallback_floor" not in decision.fallbacks
+
+
+def test_the_floor_still_steps_up_at_the_fixed_levels():
+    inputs = _inputs(sigma=0.027, equity_sigma=None, equity_ok=False)
+    assert evaluate_drawdown(_dd(0.03, net=0.175), inputs).action == "reduce"
+    assert evaluate_drawdown(_dd(0.06, net=0.175), inputs).action == "halt"
+
+
+def test_closes_pass_during_a_halt_under_the_floor():
+    context = _context(
+        drawdown=_dd(0.07, net=0.175),
+        inputs=_inputs(sigma=0.027, equity_sigma=None, equity_ok=False),
+        payload={**PAYLOAD, "side": "close"},
+    )
+    result = CodeEngine.run(context)
+    assert result.drawdown.action == "halt"
+    assert result.hard_blocked is False

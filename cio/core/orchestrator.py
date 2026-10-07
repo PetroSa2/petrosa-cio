@@ -5,6 +5,7 @@ import time
 from typing import TYPE_CHECKING
 
 from cio.clients.factory import ClientFactory
+from cio.core import stage_timing
 from cio.core.assembler import DecisionAssembler
 from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.context_gate import apply_context_gate
@@ -265,7 +266,8 @@ class Orchestrator:
             else:
                 engine_context = context
 
-            code_result = CodeEngine.run(engine_context)
+            with stage_timing.stage("gate"):
+                code_result = CodeEngine.run(engine_context)
             # Cost-share pre-filter (petrosa-cio#296, rule 19), before any LLM call and before the
             # admission is recorded: skip when c/S > p_ref (R + 1) - 1. Log-only by default.
             gate = code_result.net_ev_gate
@@ -544,9 +546,10 @@ class Orchestrator:
                     )
                 return result
 
-            regime, strategy = await asyncio.gather(
-                _resolve_regime(), _resolve_strategy()
-            )
+            with stage_timing.stage("llm_regime_strategy"):
+                regime, strategy = await asyncio.gather(
+                    _resolve_regime(), _resolve_strategy()
+                )
 
             failed = [
                 prompt_id
@@ -574,9 +577,10 @@ class Orchestrator:
                 extra={"correlation_id": context.correlation_id},
             )
             action_started = time.perf_counter()
-            decision = await self.action_classifier.classify(
-                context, code_result, regime, strategy
-            )
+            with stage_timing.stage("llm_action"):
+                decision = await self.action_classifier.classify(
+                    context, code_result, regime, strategy
+                )
             self._observe_llm_call(
                 "action",
                 provider_name,
@@ -592,7 +596,8 @@ class Orchestrator:
             await self._record_cold_start(context, decision)
             latency_ms = int((time.perf_counter() - start_time) * 1000)
             logger.info(
-                f"✅ REASONING LOOP COMPLETE | Action: {decision.action} | Latency: {latency_ms}ms",
+                f"✅ REASONING LOOP COMPLETE | Action: {decision.action} | Latency: {latency_ms}ms | "
+                f"stages: {stage_timing.summary()}",
                 extra={
                     "correlation_id": context.correlation_id,
                     "latency_ms": latency_ms,

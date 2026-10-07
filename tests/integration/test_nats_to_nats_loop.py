@@ -1,4 +1,5 @@
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -12,12 +13,13 @@ from cio.core.router import OutputRouter
 
 
 @pytest.mark.asyncio
-async def test_full_nats_to_nats_loop():
+async def test_full_nats_to_nats_loop(caplog):
     """
     Integration test for the full CIO reasoning loop with T-Junction logic.
     NATS Intent -> HTTP Gathers -> Code Engine -> Mock LLM -> NATS Legacy + Modern.
     """
 
+    caplog.set_level(logging.INFO)
     # 1. Setup Mocks
     mock_nc = AsyncMock()
 
@@ -149,6 +151,16 @@ async def test_full_nats_to_nats_loop():
 
             # 4. Execute the loop via the listener's handler
             await listener._handle_message(mock_msg)
+
+            # petrosa-cio#312: the decision line carries the elapsed ms of each stage
+            timing = next(
+                r.getMessage()
+                for r in caplog.records
+                if "DECISION_TIMING" in r.getMessage()
+            )
+            assert (
+                "stages=context=" in timing and "gate=" in timing and "route=" in timing
+            )
 
             # 5. Assertions
             # Verify NATS publish call set.

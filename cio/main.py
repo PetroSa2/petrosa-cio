@@ -42,6 +42,7 @@ from cio.core.keep_kill_job import (
 from cio.core.keep_kill_job import KeepKillJob, make_pause
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
+from cio.core.loop_watchdog import LoopWatchdog
 from cio.core.orchestrator import Orchestrator
 from cio.core.position_review_loop import (
     DEFAULT_REEVAL_INTERVAL_SECONDS,
@@ -411,6 +412,10 @@ async def main():
         vector_client=vector_client,
     )
 
+    # petrosa-cio#312: refresh the data-manager reports now, off the decision path, and watch the loop so a
+    # stall leaves a stack in the log instead of a killed pod with nothing in it.
+    builder.warm_reports()
+    LoopWatchdog(asyncio.get_running_loop()).start()
     orchestrator = Orchestrator(llm_client=llm_client, cache=cache)
     enforcer = NurseEnforcer(orchestrator=orchestrator)
     router = OutputRouter(
