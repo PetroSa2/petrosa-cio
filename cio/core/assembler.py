@@ -134,7 +134,7 @@ class DecisionAssembler:
         # from the code (below), so a modify_params never carries more than the computed size.
         action = llm_action or ActionType.SKIP
         justification = llm_justification or "Assembled without explicit LLM action."
-        gate = evaluate_net_ev(context, sl_pct, tp_pct)
+        gate = evaluate_net_ev(context, sl_pct, tp_pct, point="assembler")
         log_gate(context, gate)
         probe_override = False
         if gate_enforced() and action in (

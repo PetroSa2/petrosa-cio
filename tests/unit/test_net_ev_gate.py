@@ -9,10 +9,10 @@ from cio.core.assembler import DecisionAssembler
 from cio.core.context_builder import ContextBuilder
 from cio.core.engine import CodeEngine
 from cio.core.net_ev import (
-    FALLBACK_MIN_NET_EV_R,
     beta_cdf,
     evaluate,
     gate_enforced,
+    log_gate,
     prefilter_mode,
 )
 from cio.core.orchestrator import Orchestrator
@@ -220,12 +220,20 @@ def test_gate_fails_when_costs_cannot_be_paid():
     assert gate.result == "fail"
 
 
-def test_gate_not_evaluated_without_levels_or_win_rate():
-    assert evaluate(_context(), None, 0.04).result == "not_evaluated"
-    ctx = _context(win_rate=None, wins=None, losses=None)
+def test_gate_not_evaluated_only_without_levels():
+    gate = evaluate(_context(), None, 0.04)
+    assert gate.result == "not_evaluated" and gate.reason == "levels_unknown"
+
+
+def test_no_win_rate_goes_through_the_phase_decision_as_cold_start():
+    # petrosa-cio#307: it is not an open pass; it is cold start with the prior as its posterior
+    ctx = _context(win_rate=None, wins=None, losses=None, floor=None)
     gate = evaluate(ctx, 0.03, 0.04)
-    assert gate.result == "not_evaluated"
-    assert gate.reason == "no_win_rate"
+    assert gate.result == "fail" and gate.method == "posterior"
+    assert gate.prob_edge == pytest.approx(0.5, abs=0.02)  # no evidence: the prior
+    assert gate.n is None and gate.phase == "cold_start"
+    assert "closed_round_counts_unknown" in gate.fallbacks
+    assert gate.outcome == "probe" and gate.reason == "cold_start_probe"
 
 
 def test_alpha_is_an_operator_input(monkeypatch):
@@ -282,20 +290,52 @@ def test_favourable_measured_slippage_counts_as_zero():
     assert next(c for c in gate.costs if c.name == "slippage").value == 0.0
 
 
-def test_missing_posterior_falls_back_to_min_net_ev():
-    # wins/losses unknown, point win rate 0.9: net EV = 0.9 * (R + 1) - 1 - c/S
-    ctx = _context(wins=None, losses=None, win_rate=0.9)
-    gate = evaluate(ctx, 0.03, 0.04)
-    assert gate.method == "fallback_min_ev"
-    assert "posterior_fallback" in gate.fallbacks
-    assert gate.min_net_ev_r == FALLBACK_MIN_NET_EV_R
-    assert gate.net_ev_r == pytest.approx(
-        0.9 * (gate.reward_risk + 1) - 1 - gate.cost_share
+def test_unknown_counts_with_a_bare_win_rate_of_0_667_vetoes_an_unreachable_payoff():
+    # iceberg_detector: win rate 0.667 from 3 rounds, no counts; s_eff 6%, take-profit 5%: p_be 0.558
+    ctx = _context(wins=None, losses=None, win_rate=0.667)
+    gate = evaluate(ctx, 0.03, 0.05)
+    assert gate.p_be == pytest.approx(0.558, abs=0.001)
+    assert gate.p_be >= 0.5 and gate.n is None
+    assert gate.phase == "cold_start"
+    assert gate.result == "fail"  # a bare win rate never passes
+    assert (gate.outcome, gate.reason) == ("veto", "net_ev_unreachable_payoff")
+    assert gate.n_req is None
+
+
+@pytest.mark.parametrize("win_rate", [0.55, 0.9, 0.99, 1.0])
+def test_a_bare_win_rate_never_passes_however_high(win_rate):
+    gate = evaluate(_context(wins=None, losses=None, win_rate=win_rate), 0.03, 0.04)
+    assert gate.result == "fail" and gate.outcome != "pass"
+    assert (
+        gate.method == "posterior" and gate.posterior.wins == gate.posterior.losses == 0
     )
-    assert gate.result == "pass"
-    weak = evaluate(_context(wins=None, losses=None, win_rate=0.55), 0.03, 0.04)
-    assert weak.method == "fallback_min_ev"
-    assert weak.result == "fail"
+
+
+def test_unknown_counts_with_a_reachable_payoff_go_at_probe_size_within_the_limits():
+    # stop 3%, take-profit 6%, no floor: p_be about 0.35 < 0.50
+    ctx = _context(wins=None, losses=None, win_rate=0.667, floor=None)
+    gate = evaluate(ctx, 0.03, 0.06)
+    assert gate.p_be < 0.4 and gate.phase == "cold_start"
+    assert (gate.outcome, gate.reason) == ("probe", "cold_start_probe")
+    assert gate.cold_start.binding == "none"
+    over = _context(
+        wins=None, losses=None, win_rate=0.667, floor=None, total_notional=950.0
+    )
+    assert (
+        evaluate(over, 0.03, 0.06).outcome == "veto"
+    )  # the labelled total cap still binds
+
+
+def test_counts_known_still_use_the_posterior_and_enforce_after_n_req():
+    gate = evaluate(
+        _context(floor=None, wins=40, losses=70, win_rate=40 / 110), 0.03, 0.04
+    )
+    assert gate.phase == "enforced" and gate.n == 110
+    assert gate.p_ref is not None  # real evidence feeds the cost-share pre-filter
+    prior_only = evaluate(
+        _context(floor=None, wins=None, losses=None, win_rate=0.6), 0.03, 0.04
+    )
+    assert prior_only.p_ref is None and prior_only.cost_share_skip is False
 
 
 # --- the deterministic post-LLM veto (rule 1) ----------------------------------------------------
@@ -354,11 +394,59 @@ def test_gate_never_upgrades_an_llm_skip():
     assert decision.action == ActionType.SKIP
 
 
-def test_unevaluated_gate_does_not_veto_the_cold_start_path():
-    ctx = _context(win_rate=None, wins=None, losses=None)
-    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+def test_no_win_rate_in_enforce_mode_is_a_cold_start_probe_not_an_open_pass():
+    ctx = _context(win_rate=None, wins=None, losses=None, floor=None)
+    decision, code = _assemble(ctx, ActionType.EXECUTE)
+    gate = decision.net_ev_gate
     assert decision.action == ActionType.EXECUTE
-    assert decision.net_ev_gate.result == "not_evaluated"
+    assert (gate.phase, gate.outcome) == ("cold_start", "probe")
+    assert decision.computed_position_size_usd == gate.cold_start.probe_notional_usd
+
+
+def test_no_win_rate_with_an_unreachable_payoff_is_vetoed_in_enforce_mode():
+    ctx = _context(
+        win_rate=None, wins=None, losses=None
+    )  # the 6% floor: p_be above 0.50
+    decision, _ = _assemble(ctx, ActionType.EXECUTE)
+    assert decision.action == ActionType.SKIP
+    assert "net_ev_unreachable_payoff" in decision.justification
+
+
+def test_the_gate_record_says_where_it_ran():
+    ctx = _context(floor=None, wins=6, losses=4, win_rate=0.6)
+    decision, code = _assemble(ctx, ActionType.EXECUTE)
+    assert code.net_ev_gate.evaluation == "engine"
+    assert decision.net_ev_gate.evaluation == "assembler"
+
+
+def test_the_gate_line_carries_the_ids_and_the_point(caplog):
+    ctx = _context(payload={**PAYLOAD, "symbol": "BTCUSDT"}, floor=None)
+    with caplog.at_level("INFO", logger="cio.core.net_ev"):
+        _assemble(ctx, ActionType.EXECUTE)
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("NET_EV_GATE")
+    ]
+    assert len(lines) == 2  # the engine and the assembler: count per decision_id
+    for line in lines:
+        assert "strategy=s1" in line and f"decision={ctx.decision_id}" in line
+        assert "symbol=BTCUSDT" in line
+    assert "point=engine" in lines[0] and "point=assembler" in lines[1]
+
+
+def test_a_levels_unknown_line_shows_the_levels_the_signal_carried(caplog):
+    ctx = _context(
+        payload={"symbol": "ETHUSDT", "entry_price": 100.0, "stop_loss_pct": 0.02}
+    )
+    with caplog.at_level("INFO", logger="cio.core.net_ev"):
+        gate = evaluate(ctx, None, None)
+        log_gate(ctx, gate)
+    line = next(
+        r.getMessage() for r in caplog.records if "levels_unknown" in r.getMessage()
+    )
+    assert "stop_loss_pct=0.02" in line and "entry_price=100.0" in line
+    assert "take_profit" not in line  # it carried none
 
 
 def test_log_only_mode_computes_but_never_vetoes(monkeypatch):
