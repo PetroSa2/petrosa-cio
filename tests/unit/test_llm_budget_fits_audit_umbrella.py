@@ -48,15 +48,12 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     inner_timeout = AsyncMock(side_effect=asyncio.TimeoutError)
     monkeypatch.setattr(llm_client_module, "_acompletion_with_timeout", inner_timeout)
     inner_timeout_completed = asyncio.Event()
-    outer_timeout_reached = asyncio.Event()
-
-    async def dispatch_outer_timeout(*_args, **_kwargs):
-        outer_timeout_reached.set()
+    outer_timeout_alert = AsyncMock()
 
     monkeypatch.setattr(
         enforcer_module.AlertManager,
         "dispatch_critical_alert",
-        dispatch_outer_timeout,
+        outer_timeout_alert,
     )
 
     client = LiteLLMClient()
@@ -79,7 +76,7 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     assert decision.action == ActionType.RETRY_SAFE
     assert inner_timeout_completed.is_set()
     await asyncio.sleep(0)
-    assert not outer_timeout_reached.is_set()
+    assert outer_timeout_alert.await_count == 0
     # Default routes are distinct (haiku primary, gpt-4o-mini fallback), so a
     # primary timeout goes straight to the fallback after one attempt.
     assert inner_timeout.await_count == llm_client_module._primary_attempts(True) + 1
