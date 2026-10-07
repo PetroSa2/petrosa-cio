@@ -449,6 +449,38 @@ def test_a_levels_unknown_line_shows_the_levels_the_signal_carried(caplog):
     assert "take_profit" not in line  # it carried none
 
 
+def test_a_levels_unknown_line_with_no_levels_in_the_signal_says_none(caplog):
+    ctx = _context(payload={"symbol": "ETHUSDT"})
+    with caplog.at_level("INFO", logger="cio.core.net_ev"):
+        gate = evaluate(ctx, None, None)
+        log_gate(ctx, gate)
+    line = next(
+        r.getMessage() for r in caplog.records if "levels_unknown" in r.getMessage()
+    )
+    assert "levels=none" in line
+
+
+def test_a_line_for_a_known_level_pair_does_not_repeat_the_levels(caplog):
+    ctx = _context()
+    with caplog.at_level("INFO", logger="cio.core.net_ev"):
+        log_gate(ctx, evaluate(ctx, 0.02, 0.04))
+    line = next(
+        r.getMessage() for r in caplog.records if "NET_EV_GATE" in r.getMessage()
+    )
+    assert line.endswith("levels=-")
+
+
+def test_costs_at_or_above_the_take_profit_fail_with_a_zero_edge_probability():
+    # c = 2 x 0.0004 commission + 2 x 3 bp slippage = 0.0014; a 0.05% take-profit cannot pay it: p_be >= 1
+    gate = evaluate(_context(), 0.02, 0.0005)
+    assert gate.p_be >= 1.0
+    assert gate.result == "fail"
+    # the phase decision may relabel it (unreachable payoff in cold start); the posterior path still ran
+    assert gate.reason in {"net_ev_lcb_below_zero", "net_ev_unreachable_payoff"}
+    assert gate.method == "posterior"
+    assert gate.prob_edge == 0.0 and gate.net_ev_r == -1.0
+
+
 def test_log_only_mode_computes_but_never_vetoes(monkeypatch):
     monkeypatch.setenv("CIO_NET_EV_GATE_MODE", "log_only")
     assert gate_enforced() is False
