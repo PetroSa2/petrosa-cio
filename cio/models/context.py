@@ -19,6 +19,7 @@ from cio.models.enums import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.net_ev import CommissionRates, SlippageEstimate
 from cio.models.regime import RegimeResult
 
 
@@ -32,6 +33,10 @@ class StrategyStats(BaseModel):
     """
 
     win_rate: float | None = None
+    # Closed rounds behind the win rate (the posterior of the net-EV gate); None when data-manager
+    # does not report them.
+    wins: int | None = None
+    losses: int | None = None
     avg_win_usd: float | None = None
     avg_loss_usd: float | None = None
     win_rate_delta: float | None = None
@@ -171,6 +176,10 @@ class TriggerContext(BaseModel):
     risk_limits: RiskLimits
 
     # Market Constants for calculations
+    # Measured costs for the net-EV gate (petrosa-cio#296); None means unavailable (labelled fallbacks).
+    commission: CommissionRates | None = None
+    slippage: SlippageEstimate | None = None
+
     maker_fee: float = 0.0002
     taker_fee: float = 0.0004
     is_perpetual_futures: bool = True

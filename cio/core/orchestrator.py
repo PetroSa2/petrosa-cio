@@ -10,6 +10,7 @@ from cio.core.characterization_stale_gate import is_characterization_stale
 from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.net_ev import prefilter_mode
 from cio.core.portfolio_tracker import PortfolioTracker
 from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
 from cio.core.spend_tracker import LlmSpendTracker
@@ -30,6 +31,7 @@ from cio.models import (
 )
 from cio.models.decision import is_safe_default
 from cio.models.enums import RejectionSource
+from cio.models.net_ev import NetEvGate
 from cio.output.translator import resolve_direction_token
 from cio.personas.action_classifier import PROMPT_ID as ACTION_PROMPT_ID
 from cio.personas.action_classifier import ActionClassifier
@@ -251,6 +253,45 @@ class Orchestrator:
                 engine_context = context
 
             code_result = CodeEngine.run(engine_context)
+            # Cost-share pre-filter (petrosa-cio#296, rule 19), before any LLM call and before the
+            # admission is recorded: skip when c/S > p_ref (R + 1) - 1. Log-only by default.
+            gate = code_result.net_ev_gate
+            if (
+                self.use_llm_reasoning
+                and not code_result.hard_blocked
+                and isinstance(gate, NetEvGate)
+                and gate.cost_share_skip
+                and prefilter_mode() != "off"
+            ):
+                limit = (
+                    gate.cost_share_limit if gate.cost_share_limit is not None else 0.0
+                )
+                detail = (
+                    f"cost_share_prefilter: c/S={gate.cost_share:.3f} > "
+                    f"p_ref*(R+1)-1={limit:.3f}"
+                )
+                if prefilter_mode() == "enforce":
+                    logger.info(
+                        "COST_SHARE_PREFILTER skip",
+                        extra={
+                            "correlation_id": context.correlation_id,
+                            "detail": detail,
+                        },
+                    )
+                    _prefiltered = DecisionAssembler.assemble(
+                        context=context,
+                        code_result=code_result,
+                        regime_result=bypass_regime,
+                        strategy_result=bypass_strategy,
+                        llm_action=ActionType.SKIP,
+                        llm_justification=detail,
+                    )
+                    self._emit_decision_action(_prefiltered.action)
+                    return _prefiltered
+                logger.info(
+                    "COST_SHARE_PREFILTER would skip (log-only)",
+                    extra={"correlation_id": context.correlation_id, "detail": detail},
+                )
 
             # P1.5-AC5 (#138) — portfolio aggregate leverage ceiling. Runs
             # AFTER the code engine (so we know kelly_position_usd) but

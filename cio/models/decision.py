@@ -11,6 +11,7 @@ from cio.models.enums import (
     RejectionSource,
     VolatilityLevel,
 )
+from cio.models.net_ev import NetEvGate
 from cio.models.regime import RegimeResult
 from cio.models.strategy import AppliedParamChange, StrategyResult
 
@@ -41,6 +42,9 @@ class DecisionResult(BaseModel):
     ev_passes: bool
     cost_viable: bool
     net_ev_usd: float | None = None
+    # The net-EV gate record: p_be, the cost components and their sources, P(win rate > p_be), alpha
+    # and the result (petrosa-cio#296).
+    net_ev_gate: NetEvGate | None = None
     total_cost_usd: float | None = None
 
     # 3. LLM Classification Results

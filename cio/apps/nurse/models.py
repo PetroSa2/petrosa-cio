@@ -47,6 +47,16 @@ class RiskLimits(BaseModel):
         5000.0,
         description="Hard absolute cap on any single position size in USD.",
     )
+    min_sl_distance_pct: float | None = Field(
+        None,
+        description=(
+            "The stop-distance floor tradeengine re-anchors every stop to (fraction of the entry). "
+            "The net-EV gate uses max(order stop, this floor). Absent (older tradeengine) means unknown."
+        ),
+    )
+    min_sl_distance_source: str | None = Field(
+        None, description="Where the floor comes from (config, derived, ...)."
+    )
     probe_mode: bool = Field(
         False,
         description=(

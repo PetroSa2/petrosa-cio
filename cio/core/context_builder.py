@@ -21,6 +21,7 @@ from cio.core.service_resolver import TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
     CharacterizationRef,
+    CommissionRates,
     ContextGap,
     EvaluatorVerdict,
     MarketSignals,
@@ -32,6 +33,7 @@ from cio.models import (
     RegimeAPIResponse,
     RegimeResult,
     RiskLimits,
+    SlippageEstimate,
     StrategyDefaults,
     StrategyStats,
     TriggerContext,
@@ -176,6 +178,8 @@ class ContextBuilder:
         self.tradeengine_url = tradeengine_url
         self.vector_client = vector_client
         self._clock = clock or time.monotonic
+        # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
+        self._slippage_cache: tuple[float, dict[str, tuple[float, int]]] | None = None
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
         ] = {}
@@ -278,6 +282,9 @@ class ContextBuilder:
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
 
+        commission = self._commission_from(env_stats.get("commission"))
+        slippage = await self._fetch_slippage(regime, correlation_id)
+
         # AC2 (#197): a single upstream outage (data-manager unreachable/slow)
         # commonly times out regime + strategy_stats + strategy_defaults
         # concurrently, since all three hit the same host under the same
@@ -354,9 +361,56 @@ class ContextBuilder:
             available_capital_usd=env_stats.get("available_capital_usd", 0.0),
             portfolio=portfolio,
             risk_limits=risk,
+            commission=commission,
+            slippage=slippage,
             historical_context=historical_context,
             pre_decision_context=pre_decision_context,
         )
+
+    @staticmethod
+    def _commission_from(raw: Any) -> CommissionRates | None:
+        """tradeengine's ``/state`` commission block, or None when absent or malformed."""
+        if not isinstance(raw, dict):
+            return None
+        try:
+            return CommissionRates(**raw)
+        except Exception:
+            return None
+
+    async def _fetch_slippage(
+        self, regime: RegimeResult, correlation_id: str
+    ) -> SlippageEstimate | None:
+        """Measured slippage (bp per fill) of the regime in force, from data-manager (#535).
+
+        The report is cached for an hour (a failed read for a minute); None when the regime is not a
+        data-manager one or the report has no fills for it, which selects the labelled fallback.
+        """
+        key = regime.data_manager_regime
+        if not key:
+            return None
+        now = self._clock()
+        if self._slippage_cache is None or now >= self._slippage_cache[0]:
+            table: dict[str, tuple[float, int]] = {}
+            ttl = 3600.0
+            try:
+                response = await self.client.get(
+                    f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30"
+                )
+                response.raise_for_status()
+                for name, stats in (response.json().get("by_regime") or {}).items():
+                    table[str(name)] = (float(stats["median_bp"]), int(stats["count"]))
+            except Exception as exc:
+                ttl = 60.0
+                logger.warning(
+                    "SLIPPAGE_FETCH_FAILED: %s",
+                    exc,
+                    extra={"correlation_id": correlation_id},
+                )
+            self._slippage_cache = (now + ttl, table)
+        entry = self._slippage_cache[1].get(key)
+        if entry is None:
+            return None
+        return SlippageEstimate(regime=key, median_bp=entry[0], count=entry[1])
 
     def _build_market_signals(
         self,
@@ -916,7 +970,10 @@ class ContextBuilder:
 
                 portfolio = PortfolioSummary(**data["portfolio"])
                 risk = RiskLimits(**data["risk_limits"])
-                env_stats = data["env_stats"]
+                env_stats = dict(data["env_stats"])
+                if data.get("commission") is not None:
+                    # tradeengine's measured commission for the symbol (the net-EV gate's input)
+                    env_stats["commission"] = data["commission"]
                 self._portfolio_cache[symbol] = (
                     self._clock(),
                     portfolio.model_copy(deep=True),

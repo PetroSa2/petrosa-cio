@@ -41,6 +41,11 @@ from cio.models.enums import VolatilityLevel as VolatilityLevel
 
 # LLM infrastructure models
 from cio.models.llm import RawLLMResponse as RawLLMResponse
+from cio.models.net_ev import CommissionRates as CommissionRates
+from cio.models.net_ev import CostComponent as CostComponent
+from cio.models.net_ev import NetEvGate as NetEvGate
+from cio.models.net_ev import NetEvPosterior as NetEvPosterior
+from cio.models.net_ev import SlippageEstimate as SlippageEstimate
 
 # Regime models
 from cio.models.regime import CONFIDENCE_THRESHOLDS as CONFIDENCE_THRESHOLDS
