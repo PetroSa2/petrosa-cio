@@ -86,6 +86,19 @@ async def get_decisions_recent(
                 # the leverage arbiter. None for pre-#174 historical records
                 # and for decisions that never reached the arbitration step.
                 "decided_leverage": r.decided_leverage,
+                "sizing": (
+                    r.sizing.model_dump(mode="json") if r.sizing is not None else None
+                ),
+                "drawdown": (
+                    r.drawdown.model_dump(mode="json")
+                    if r.drawdown is not None
+                    else None
+                ),
+                "net_ev_gate": (
+                    r.net_ev_gate.model_dump(mode="json")
+                    if r.net_ev_gate is not None
+                    else None
+                ),
                 # P1.4-AC4 (#132): structured PreDecisionContext snapshot.
                 # `None` for pre-EPIC-#122 historical records that predate
                 # the bundle — the dashboard renders "context not recorded"
