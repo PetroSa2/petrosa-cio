@@ -46,9 +46,7 @@ async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
     monkeypatch.setattr(enforcer_module, "AUDIT_TIMEOUT_SECONDS", 0.5)
     monkeypatch.delenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raising=False)
     inner_timeout = AsyncMock(side_effect=asyncio.TimeoutError)
-    monkeypatch.setattr(
-        llm_client_module, "_acompletion_with_timeout", inner_timeout
-    )
+    monkeypatch.setattr(llm_client_module, "_acompletion_with_timeout", inner_timeout)
     inner_timeout_completed = asyncio.Event()
     outer_timeout_reached = asyncio.Event()
 
