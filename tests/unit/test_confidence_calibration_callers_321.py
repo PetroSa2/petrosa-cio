@@ -154,7 +154,7 @@ def test_service_status_returns_the_strategys_group_from_the_report() -> None:
     from cio.core.confidence_calibration import ConfidenceCalibrationService
 
     class Service(ConfidenceCalibrationService):
-        async def report(self):
+        async def report(self, timeout=None):
             return {
                 "groups": [
                     {"strategy_id": "other", "calibrated": True},
@@ -175,7 +175,7 @@ def test_service_status_is_none_for_a_strategy_without_a_group() -> None:
     from cio.core.confidence_calibration import ConfidenceCalibrationService
 
     class Service(ConfidenceCalibrationService):
-        async def report(self):
+        async def report(self, timeout=None):
             return {"groups": [{"strategy_id": "other", "calibrated": True}]}
 
     import asyncio
@@ -203,3 +203,188 @@ def test_calibrated_context_falls_back_to_the_neutral_input_for_an_unreadable_co
         assert (
             calibrated.strategy_stats.win_rate == 0.5
         )  # an unreadable raw confidence reads as 0.5
+
+
+# --- the decision path reads a cached report (petrosa-cio#312 style: no data-manager call per decision) ---
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _service_with_fetches(outcomes, clock):
+    """A service whose report() pops ``outcomes`` (a report dict or an exception) and counts the fetches."""
+    from cio.core.confidence_calibration import ConfidenceCalibrationService
+
+    class Service(ConfidenceCalibrationService):
+        calls = 0
+        timeouts: list = []
+
+        async def report(self, timeout=None):
+            Service.calls += 1
+            Service.timeouts.append(timeout)
+            outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+    Service.calls = 0
+    Service.timeouts = []
+    return Service(clock=clock), Service
+
+
+GOOD = {"groups": [{"strategy_id": "s", "calibrated": True}]}
+
+
+def test_two_decisions_within_the_ttl_make_one_fetch(monkeypatch) -> None:
+    monkeypatch.delenv("CIO_CALIBRATION_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("CIO_CALIBRATION_TIMEOUT_SECONDS", raising=False)
+    clock = _Clock()
+    service, cls = _service_with_fetches([GOOD], clock)
+
+    async def two():
+        first = await service.status("s")
+        clock.now += 899
+        second = await service.status("s")
+        return first, second
+
+    first, second = asyncio.run(two())
+    assert first == second == {"strategy_id": "s", "calibrated": True}
+    assert cls.calls == 1
+    assert cls.timeouts == [2.0]  # the short decision-path timeout, not the endpoint's
+
+
+def test_the_report_is_fetched_again_after_the_ttl(monkeypatch) -> None:
+    monkeypatch.setenv("CIO_CALIBRATION_TTL_SECONDS", "60")
+    clock = _Clock()
+    service, cls = _service_with_fetches([GOOD], clock)
+
+    async def run():
+        await service.status("s")
+        clock.now += 61
+        await service.status("s")
+
+    asyncio.run(run())
+    assert cls.calls == 2
+
+
+def test_a_failed_fetch_is_not_retried_until_the_ttl(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.delenv("CIO_CALIBRATION_TTL_SECONDS", raising=False)
+    clock = _Clock()
+    service, cls = _service_with_fetches([RuntimeError("404")], clock)
+    caplog.set_level(logging.WARNING, logger="cio.core.confidence_calibration")
+
+    async def run():
+        results = [await service.status("s")]
+        for _ in range(5):  # five more decisions inside the TTL
+            clock.now += 100
+            results.append(await service.status("s"))
+        return results
+
+    assert asyncio.run(run()) == [None] * 6  # no report: the neutral prior
+    assert cls.calls == 1
+    warnings = [r for r in caplog.records if "report unavailable" in r.getMessage()]
+    assert len(warnings) == 1  # at most one warning per TTL
+    assert "using the neutral prior" in warnings[0].getMessage()
+    # after the TTL it tries again, and warns again
+    clock.now += 500
+    asyncio.run(service.status("s"))
+    assert cls.calls == 2
+    assert (
+        len([r for r in caplog.records if "report unavailable" in r.getMessage()]) == 2
+    )
+
+
+def test_a_failed_refresh_keeps_the_last_good_report(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.setenv("CIO_CALIBRATION_TTL_SECONDS", "60")
+    clock = _Clock()
+    service, cls = _service_with_fetches([GOOD, RuntimeError("down")], clock)
+    caplog.set_level(logging.WARNING, logger="cio.core.confidence_calibration")
+
+    async def run():
+        first = await service.status("s")
+        clock.now += 61
+        second = await service.status("s")  # the refresh fails
+        clock.now += 30
+        third = await service.status("s")  # backed off: no new fetch
+        return first, second, third
+
+    first, second, third = asyncio.run(run())
+    assert first == second == third == {"strategy_id": "s", "calibrated": True}
+    assert cls.calls == 2
+    assert any("using the last good report" in r.getMessage() for r in caplog.records)
+
+
+def test_concurrent_decisions_share_one_fetch(monkeypatch) -> None:
+    from cio.core.confidence_calibration import ConfidenceCalibrationService
+
+    class Service(ConfidenceCalibrationService):
+        calls = 0
+
+        async def report(self, timeout=None):
+            Service.calls += 1
+            await asyncio.sleep(0.05)
+            return GOOD
+
+    Service.calls = 0
+
+    async def run():
+        service = Service()
+        return await asyncio.gather(*(service.status("s") for _ in range(10)))
+
+    results = asyncio.run(run())
+    assert all(r == {"strategy_id": "s", "calibrated": True} for r in results)
+    assert Service.calls == 1
+
+
+def test_the_ttl_and_timeout_are_env_inputs_with_defaults(monkeypatch) -> None:
+    from cio.core.confidence_calibration import (
+        calibration_timeout_seconds,
+        calibration_ttl_seconds,
+    )
+
+    monkeypatch.delenv("CIO_CALIBRATION_TTL_SECONDS", raising=False)
+    monkeypatch.delenv("CIO_CALIBRATION_TIMEOUT_SECONDS", raising=False)
+    assert (calibration_ttl_seconds(), calibration_timeout_seconds()) == (900.0, 2.0)
+    for bad in ("0", "-5", "x"):
+        monkeypatch.setenv("CIO_CALIBRATION_TTL_SECONDS", bad)
+        assert calibration_ttl_seconds() == 900.0
+    monkeypatch.setenv("CIO_CALIBRATION_TTL_SECONDS", "30")
+    monkeypatch.setenv("CIO_CALIBRATION_TIMEOUT_SECONDS", "0.5")
+    assert (calibration_ttl_seconds(), calibration_timeout_seconds()) == (30.0, 0.5)
+
+
+def test_the_fresh_report_endpoint_read_is_unchanged_and_passes_the_timeout() -> None:
+    import httpx
+
+    from cio.core.confidence_calibration import ConfidenceCalibrationService
+
+    seen = []
+
+    class Client:
+        async def get(self, url, **kwargs):
+            seen.append((url, kwargs))
+            response = httpx.Response(
+                200,
+                json={
+                    "records": [{"strategy_id": "s", "confidence": 0.9, "net_pnl": 1.0}]
+                },
+                request=httpx.Request("GET", url),
+            )
+            return response
+
+    service = ConfidenceCalibrationService(
+        client=Client(), data_manager_url="http://dm"
+    )
+    asyncio.run(service.report())
+    asyncio.run(service.report(timeout=2.0))
+    assert seen[0] == ("http://dm/analysis/calibration/confidence", {})
+    assert seen[1] == ("http://dm/analysis/calibration/confidence", {"timeout": 2.0})

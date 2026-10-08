@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
@@ -219,24 +221,61 @@ def build_report(
     }
 
 
+DEFAULT_CALIBRATION_TTL_SECONDS = 900.0
+DEFAULT_CALIBRATION_TIMEOUT_SECONDS = 2.0
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def calibration_ttl_seconds() -> float:
+    """How long a calibration report (or a failed fetch) is reused: ``CIO_CALIBRATION_TTL_SECONDS``, 900 s."""
+    return _positive_float_env(
+        "CIO_CALIBRATION_TTL_SECONDS", DEFAULT_CALIBRATION_TTL_SECONDS
+    )
+
+
+def calibration_timeout_seconds() -> float:
+    """The longest a decision waits for the report: ``CIO_CALIBRATION_TIMEOUT_SECONDS``, 2 s."""
+    return _positive_float_env(
+        "CIO_CALIBRATION_TIMEOUT_SECONDS", DEFAULT_CALIBRATION_TIMEOUT_SECONDS
+    )
+
+
 class ConfidenceCalibrationService:
-    """Fetch executed records from data-manager and calculate a report."""
+    """Fetch executed records from data-manager and calculate a report.
+
+    ``report()`` is a fresh read (the calibration endpoint). The decision path reads ``status()``, which uses
+    ``cached_report()``: one fetch per TTL with a short timeout (petrosa-cio#312: no data-manager call per
+    decision). A failed fetch keeps the last good report; with none, the status is None, and the fetch is not
+    retried until the TTL passes. The unavailable warning is logged once per TTL.
+    """
 
     def __init__(
         self,
         client: httpx.AsyncClient | None = None,
         data_manager_url: str | None = None,
+        clock: Callable[[], float] | None = None,
     ):
         self.client = client
         self.data_manager_url = (
             data_manager_url
             or os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:80")
         ).rstrip("/")
+        self._clock = clock or time.monotonic
+        self._cache: tuple[float, CalibrationReport | None] | None = None
+        self._lock = asyncio.Lock()
 
-    async def report(self) -> CalibrationReport:
+    async def report(self, timeout: float | None = None) -> CalibrationReport:
         async def fetch(client: httpx.AsyncClient) -> dict[str, Any]:
             response = await client.get(
-                f"{self.data_manager_url}/analysis/calibration/confidence"
+                f"{self.data_manager_url}/analysis/calibration/confidence",
+                **({"timeout": timeout} if timeout is not None else {}),
             )
             response.raise_for_status()
             return response.json()
@@ -244,13 +283,42 @@ class ConfidenceCalibrationService:
         if self.client is not None:
             payload = await fetch(self.client)
         else:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=timeout or 15.0) as client:
                 payload = await fetch(client)
         return build_report(_records_from_response(payload))
 
+    async def cached_report(self) -> CalibrationReport | None:
+        """The report for the decision path: at most one fetch per TTL, the last good one on failure, else None."""
+        if self._cache is not None and self._clock() < self._cache[0]:
+            return self._cache[1]
+        async with self._lock:
+            # another decision may have refreshed it while this one waited for the lock
+            if self._cache is not None and self._clock() < self._cache[0]:
+                return self._cache[1]
+            last_good = self._cache[1] if self._cache is not None else None
+            ttl = calibration_ttl_seconds()
+            try:
+                report: CalibrationReport | None = await self.report(
+                    timeout=calibration_timeout_seconds()
+                )
+            except Exception as exc:  # noqa: BLE001 - calibration cannot stop decisions
+                report = last_good
+                logger.warning(
+                    "Confidence calibration report unavailable (%s); %s, next attempt in %.0fs",
+                    exc,
+                    "using the last good report"
+                    if last_good is not None
+                    else "using the neutral prior",
+                    ttl,
+                )
+            self._cache = (self._clock() + ttl, report)
+            return report
+
     async def status(self, strategy_id: str) -> dict[str, Any] | None:
         """Return the strategy's calibration status from the shared report contract."""
-        report = await self.report()
+        report = await self.cached_report()
+        if report is None:
+            return None
         for group in report["groups"]:
             if group.get("strategy_id") == strategy_id:
                 return group
