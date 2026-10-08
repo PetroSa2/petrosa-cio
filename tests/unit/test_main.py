@@ -52,6 +52,10 @@ async def test_nats_subscription_with_wildcard():
         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
         patch("cio.main.PositionReviewLoop") as MockPositionReviewLoop,
+        patch(
+            "cio.main.KeepKillJob",
+            return_value=MagicMock(stop=AsyncMock(), start=MagicMock()),
+        ),
     ):
         mock_nats_listener = MockNATSListener.return_value
         mock_nats_listener.start = AsyncMock()
@@ -148,6 +152,10 @@ async def test_nats_error_cb_logs_structured_exc_type_not_bare_str(caplog):
         patch("cio.main.HeartbeatResponder") as MockHeartbeatResponder,
         patch("cio.main.HeartbeatPublisher") as MockHeartbeatPublisher,
         patch("cio.main.PositionReviewLoop") as MockPositionReviewLoop,
+        patch(
+            "cio.main.KeepKillJob",
+            return_value=MagicMock(stop=AsyncMock(), start=MagicMock()),
+        ),
     ):
         MockNATSListener.return_value.start = AsyncMock()
         MockNATSListener.return_value.stop = AsyncMock()
@@ -220,6 +228,13 @@ def _enter_main_collaborator_patches(stack: ExitStack) -> dict:
     mock_responder_cls = stack.enter_context(patch("cio.main.HeartbeatResponder"))
     mock_publisher_cls = stack.enter_context(patch("cio.main.HeartbeatPublisher"))
     mock_position_review_cls = stack.enter_context(patch("cio.main.PositionReviewLoop"))
+    # petrosa-cio#299: the daily keep/kill job is a collaborator of main() like the review loop
+    stack.enter_context(
+        patch(
+            "cio.main.KeepKillJob",
+            return_value=MagicMock(stop=AsyncMock(), start=MagicMock()),
+        )
+    )
 
     mocks = {
         "listener": mock_listener_cls,
