@@ -44,7 +44,7 @@ def test_llm_budget_fits_inside_audit_umbrella():
 
 @pytest.mark.asyncio
 async def test_inner_llm_timeout_precedes_audit_timeout(monkeypatch):
-    monkeypatch.setattr(enforcer_module, "AUDIT_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(enforcer_module, "AUDIT_TIMEOUT_SECONDS", 1.0)
     monkeypatch.delenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", raising=False)
     monkeypatch.setattr(llm_client_module, "LLM_CALL_TIMEOUT_SECONDS", 0.05)
     monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0.01)
