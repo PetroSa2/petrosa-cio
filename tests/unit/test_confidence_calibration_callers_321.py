@@ -2,7 +2,7 @@ import asyncio
 
 from cio.core.confidence_calibration import calibration_mode, effective_confidence
 from cio.core.orchestrator import Orchestrator
-from cio.models.context import StrategyStats, TriggerContext
+from cio.models import StrategyStats, TriggerContext
 
 
 def test_uncalibrated_confidences_produce_identical_effective_inputs() -> None:
@@ -52,3 +52,41 @@ def test_calibrated_context_replaces_ev_input_with_neutral_prior() -> None:
         ).strategy_stats.win_rate
         == 0.95
     )
+
+
+def test_enforce_mode_runs_the_engine_with_calibrated_context(monkeypatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from test_orchestrator_persona_concurrency import (
+        _make_context,
+        _make_regime_result,
+        _make_strategy_result,
+        _mock_cache,
+        _patched_engine_no_block,
+    )
+
+    class Service:
+        async def status(self, strategy_id: str):
+            return {"strategy_id": strategy_id, "calibrated": False}
+
+    monkeypatch.setenv("CIO_CALIBRATION_MODE", "enforce")
+    with (
+        patch("cio.core.orchestrator.CodeEngine") as engine,
+        patch("cio.core.orchestrator.RegimeAnalyst") as regime,
+        patch("cio.core.orchestrator.StrategyAssessor") as strategy,
+        patch("cio.core.orchestrator.ActionClassifier") as classifier,
+    ):
+        engine.run.return_value = _patched_engine_no_block()
+        regime.return_value.classify = AsyncMock(return_value=_make_regime_result())
+        strategy.return_value.assess = AsyncMock(return_value=_make_strategy_result())
+        classifier.return_value.classify = AsyncMock(return_value=MagicMock())
+        orchestrator = Orchestrator(
+            cache=_mock_cache(None, None), calibration_service=Service()
+        )
+
+        import asyncio
+
+        asyncio.run(orchestrator.run(_make_context()))
+
+        assert engine.run.call_count == 1
+        assert engine.run.call_args.args[0].strategy_stats.win_rate == 0.5
