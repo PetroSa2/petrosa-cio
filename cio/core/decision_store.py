@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cio.models.context import PreDecisionContext
+    from cio.models.net_ev import DrawdownDecision, NetEvGate, SizingRecord
 
 _UTC = timezone.utc  # noqa: UP017
 DEFAULT_MAX_SIZE = 500
@@ -46,6 +47,9 @@ class DecisionRecord:
     # legacy code paths that bypass the arbiter (defensive default so
     # adding the field does not break callers).
     decided_leverage: int | None = None
+    sizing: SizingRecord | None = None
+    drawdown: DrawdownDecision | None = None
+    net_ev_gate: NetEvGate | None = None
 
 
 class DecisionStore:

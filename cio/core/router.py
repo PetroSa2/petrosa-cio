@@ -5,6 +5,7 @@ import os
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
+from pydantic import BaseModel
 
 from cio.core.alerting.fr66_alerts import (
     CIO_ALERT_ACTIONS,
@@ -33,6 +34,97 @@ except ImportError:
     _inject_trace_context = None
 
 logger = logging.getLogger(__name__)
+
+
+def _log_value(value: Any) -> str:
+    """Render a log value without relying on logging ``extra`` serialization."""
+    return json.dumps(value, default=str, separators=(",", ":"))
+
+
+def _decision_symbol(context: TriggerContext) -> str | None:
+    payload = getattr(context, "trigger_payload", None)
+    if not isinstance(payload, dict):
+        return None
+    symbol = payload.get("symbol")
+    if isinstance(symbol, str):
+        return symbol
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("symbol"), str):
+        return metadata["symbol"]
+    return None
+
+
+def _record_dump(record: Any) -> dict[str, Any] | None:
+    return record.model_dump(mode="json") if isinstance(record, BaseModel) else None
+
+
+def _log_final_decision_observability(
+    context: TriggerContext, decision: DecisionResult, action: ActionType
+) -> None:
+    """Emit final decision records in message text for JSON log compatibility."""
+    common = (
+        f"strategy={_log_value(getattr(context, 'strategy_id', None))} "
+        f"decision={_log_value(getattr(context, 'decision_id', None))} "
+        f"symbol={_log_value(_decision_symbol(context))}"
+    )
+    logger.info(
+        "KEEP_KILL %s action=%s strategy_health=%s activation_recommendation=%s reason=%s",
+        common,
+        _log_value(getattr(action, "value", action)),
+        _log_value(getattr(getattr(decision, "strategy_health", None), "value", None)),
+        _log_value(
+            getattr(getattr(decision, "activation_recommendation", None), "value", None)
+        ),
+        _log_value(
+            getattr(decision, "justification", None)
+            or getattr(decision, "hard_block_reason", None)
+        ),
+    )
+    sizing = _record_dump(getattr(decision, "sizing", None))
+    if sizing is not None:
+        logger.info(
+            "SIZING %s p_post=%s k=%s k_source=%s prob_net_ev_positive=%s "
+            "kelly_fraction=%s kelly_size_usd=%s probe_usd=%s final_size_usd=%s "
+            "binding=%s reason=%s",
+            common,
+            _log_value(sizing.get("p_post")),
+            _log_value(sizing.get("k")),
+            _log_value(sizing.get("k_source")),
+            _log_value(sizing.get("prob_net_ev_positive")),
+            _log_value(sizing.get("kelly_fraction")),
+            _log_value(sizing.get("kelly_size_usd")),
+            _log_value(sizing.get("probe_usd")),
+            _log_value(sizing.get("final_size_usd")),
+            _log_value(sizing.get("binding")),
+            _log_value(sizing.get("reason")),
+        )
+    drawdown = _record_dump(getattr(decision, "drawdown", None))
+    if drawdown is not None:
+        logger.info(
+            "DRAWDOWN %s sigma=%s components_missing=%s reduce_at=%s halt_at=%s "
+            "drawdown=%s action=%s source=%s",
+            common,
+            _log_value(drawdown.get("sigma")),
+            _log_value(drawdown.get("components_missing")),
+            _log_value(drawdown.get("reduce_threshold")),
+            _log_value(drawdown.get("halt_threshold")),
+            _log_value(drawdown.get("drawdown")),
+            _log_value(drawdown.get("action")),
+            _log_value(drawdown.get("sigma_source")),
+        )
+    gate = _record_dump(getattr(decision, "net_ev_gate", None))
+    if gate is not None:
+        logger.info(
+            "NET_EV_GATE %s action=%s result=%s outcome=%s reason=%s "
+            "prob_net_ev_positive=%s",
+            common,
+            _log_value(action.value),
+            _log_value(gate.get("result")),
+            _log_value(gate.get("outcome")),
+            _log_value(gate.get("reason")),
+            _log_value(gate.get("prob_edge")),
+        )
+
 
 if TYPE_CHECKING:
     from cio.core.auto_resume import LLMPauseRegistry
@@ -383,6 +475,7 @@ class OutputRouter:
         }
         if authority_was_disabled:
             audit_payload["authority_fallback_from"] = original_action.value
+        _log_final_decision_observability(context, decision, action)
         audit_task = self.vector_client.upsert(
             strategy_id=strategy_id,
             payload=audit_payload,
@@ -954,6 +1047,15 @@ class OutputRouter:
                     strategy_revision_id=getattr(context, "strategy_revision_id", None),
                     pre_decision_context=getattr(context, "pre_decision_context", None),
                     decided_leverage=leverage_decision.decided_leverage,
+                    sizing=decision.sizing
+                    if isinstance(decision.sizing, BaseModel)
+                    else None,
+                    drawdown=decision.drawdown
+                    if isinstance(decision.drawdown, BaseModel)
+                    else None,
+                    net_ev_gate=decision.net_ev_gate
+                    if isinstance(decision.net_ev_gate, BaseModel)
+                    else None,
                 )
             )
 
