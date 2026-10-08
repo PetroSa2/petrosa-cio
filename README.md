@@ -48,9 +48,10 @@ Execution Layer
 
 Core documentation:
 - `README.md` - Project overview and quick start
-- `CI_CD_PIPELINE.md` - CI/CD reference
-- `TESTING.md` - Testing procedures
-- `MAKEFILE.md` - Makefile commands
+- `docs/INDEX.md` - Documentation index
+- `docs/CONTRACTS.md` - Service contracts
+- `docs/HEARTBEAT_SPEC.md` - Heartbeat behavior
+- `docs/EMERGENCY_OPERATIONS.md` - Operational procedures
 
 ---
 
