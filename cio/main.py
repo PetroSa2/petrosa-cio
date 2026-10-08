@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from nats.aio.client import Client as NATS
 
 from cio.apps.authority_api import router as authority_router
+from cio.apps.calibration_api import router as calibration_router
 from cio.apps.dashboard_api import router as dashboard_router
 from cio.apps.lifecycle_api import router as lifecycle_router
 from cio.apps.nurse.enforcer import NurseEnforcer
@@ -29,6 +30,7 @@ from cio.core.auto_resume import (
     migrate_redis_registry,
 )
 from cio.core.cache import AsyncRedisCache
+from cio.core.confidence_calibration import ConfidenceCalibrationService
 from cio.core.context_builder import ContextBuilder
 from cio.core.decision_store import DecisionStore
 from cio.core.durable_state import DataManagerStateStore
@@ -135,6 +137,8 @@ app.include_router(state_router)
 # available immediately; OutputRouter also receives the reference in main().
 app.state.decision_store = DecisionStore()
 app.include_router(dashboard_router)
+app.state.confidence_calibration = ConfidenceCalibrationService()
+app.include_router(calibration_router)
 
 
 @app.get("/health/liveness")
