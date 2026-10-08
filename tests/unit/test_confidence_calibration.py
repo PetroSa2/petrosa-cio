@@ -127,12 +127,15 @@ def test_response_contract_rejects_invalid_record_fields() -> None:
         [{"strategy_id": "s", "net_pnl": 1.0}],
         [{"strategy_id": "s", "confidence": 0.5}],
     ]
+    rejected = 0
     for records in invalid_records:
         try:
             _records_from_response({"records": records})
         except ValueError:
+            rejected += 1
             continue
         raise AssertionError("invalid calibration record was accepted")
+    assert rejected == len(invalid_records)
 
 
 def test_calibrated_confidence_is_clamped_and_invalid_confidence_is_skipped() -> None:
