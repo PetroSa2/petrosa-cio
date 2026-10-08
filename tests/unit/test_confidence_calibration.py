@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 from cio.apps.calibration_api import router
 from cio.core.confidence_calibration import (
     CalibrationConfig,
+    ConfidenceCalibrationService,
+    _records_from_response,
     build_report,
     effective_confidence,
 )
@@ -72,3 +74,47 @@ def test_endpoint_reports_unavailable_source() -> None:
     app.state.confidence_calibration = Service()
     response = TestClient(app).get("/api/v1/calibration/confidence")
     assert response.status_code == 503
+
+
+def test_data_manager_response_contract_requires_executed_records() -> None:
+    records = _records_from_response(
+        {
+            "records": [
+                {
+                    "strategy_id": "s",
+                    "confidence": 0.75,
+                    "net_pnl": 2.0,
+                }
+            ]
+        }
+    )
+    assert records[0]["strategy_id"] == "s"
+
+
+def test_data_manager_response_contract_rejects_unknown_shape() -> None:
+    try:
+        _records_from_response({"outcomes": []})
+    except ValueError as exc:
+        assert "records" in str(exc)
+    else:
+        raise AssertionError("invalid calibration response was accepted")
+
+
+def test_service_uses_only_the_documented_records_field() -> None:
+    class Client:
+        async def get(self, url):
+            return Response()
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "records": [{"strategy_id": "s", "confidence": 0.75, "net_pnl": 1.0}]
+            }
+
+    import asyncio
+
+    report = asyncio.run(ConfidenceCalibrationService(client=Client()).report())
+    assert report["outcome_source"] == "executed"
