@@ -148,3 +148,58 @@ def test_log_only_mode_computes_diagnostics_without_replacing_context(
         assert engine.run.call_count == 2
         assert engine.run.call_args_list[0].args[0].strategy_stats.win_rate is None
         assert engine.run.call_args_list[1].args[0].strategy_stats.win_rate == 0.5
+
+
+def test_service_status_returns_the_strategys_group_from_the_report() -> None:
+    from cio.core.confidence_calibration import ConfidenceCalibrationService
+
+    class Service(ConfidenceCalibrationService):
+        async def report(self):
+            return {
+                "groups": [
+                    {"strategy_id": "other", "calibrated": True},
+                    {"strategy_id": "strategy", "calibrated": False},
+                ]
+            }
+
+    import asyncio
+
+    service = Service()
+    assert asyncio.run(service.status("strategy")) == {
+        "strategy_id": "strategy",
+        "calibrated": False,
+    }
+
+
+def test_service_status_is_none_for_a_strategy_without_a_group() -> None:
+    from cio.core.confidence_calibration import ConfidenceCalibrationService
+
+    class Service(ConfidenceCalibrationService):
+        async def report(self):
+            return {"groups": [{"strategy_id": "other", "calibrated": True}]}
+
+    import asyncio
+
+    assert asyncio.run(Service().status("strategy")) is None
+    assert asyncio.run(Service().status("")) is None
+
+
+def test_calibrated_context_falls_back_to_the_neutral_input_for_an_unreadable_confidence() -> (
+    None
+):
+    for payload in ({"confidence": "bad"}, {"confidence": None}):
+        context = TriggerContext.model_construct(
+            strategy_id="strategy",
+            trigger_payload=payload,
+            strategy_stats=StrategyStats(win_rate=0.8),
+        )
+        uncalibrated = Orchestrator._calibrated_context(
+            context, {"strategy_id": "strategy", "calibrated": False}
+        )
+        assert uncalibrated.strategy_stats.win_rate == 0.5  # the neutral prior
+        calibrated = Orchestrator._calibrated_context(
+            context, {"strategy_id": "strategy", "calibrated": True}
+        )
+        assert (
+            calibrated.strategy_stats.win_rate == 0.5
+        )  # an unreadable raw confidence reads as 0.5
