@@ -8,6 +8,11 @@ from cio.clients.factory import ClientFactory
 from cio.core import stage_timing
 from cio.core.assembler import DecisionAssembler
 from cio.core.characterization_stale_gate import is_characterization_stale
+from cio.core.confidence_calibration import (
+    ConfidenceCalibrationService,
+    calibration_mode,
+    effective_confidence,
+)
 from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
@@ -60,6 +65,7 @@ class Orchestrator:
         cache=None,
         portfolio_tracker: PortfolioTracker | None = None,
         position_review_loop: "PositionReviewLoop | None" = None,
+        calibration_service: ConfidenceCalibrationService | None = None,
     ):
         self.client = llm_client or ClientFactory.create()
         self.cache = cache
@@ -80,6 +86,7 @@ class Orchestrator:
         # in local-dev / tests that don't wire it (legacy behavior: no
         # scheduled re-review, matching pre-#175 behavior).
         self.position_review_loop = position_review_loop
+        self.calibration_service = calibration_service
 
         # Read governance flags from environment (Ticket #334/337)
         self.use_llm_reasoning = (
@@ -91,6 +98,56 @@ class Orchestrator:
             )
         # FR63: track whether ceiling triggered the bypass so period-reset can restore it.
         self._ceiling_triggered_bypass = False
+
+    async def _calibration_status(
+        self, context: TriggerContext
+    ) -> dict[str, object] | None:
+        if self.calibration_service is None:
+            return None
+        try:
+            status = await self.calibration_service.status(context.strategy_id)
+        except Exception as exc:  # noqa: BLE001 - calibration cannot stop decisions
+            logger.warning(
+                "Confidence calibration status unavailable",
+                extra={"strategy_id": context.strategy_id, "error": str(exc)},
+            )
+            status = None
+        try:
+            raw = float(context.trigger_payload.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            raw = 0.5
+        effective = effective_confidence(raw, status)
+        logger.info(
+            "Confidence calibration inputs",
+            extra={
+                "strategy_id": context.strategy_id,
+                "calibrated": bool(status and status.get("calibrated") is True),
+                "raw_confidence": raw,
+                "neutral_prior": effective
+                if not status or status.get("calibrated") is not True
+                else None,
+                "effective_confidence": effective,
+                "mode": calibration_mode(),
+            },
+        )
+        return status
+
+    @staticmethod
+    def _calibrated_context(
+        context: TriggerContext, calibration_status: dict[str, object] | None
+    ) -> TriggerContext:
+        try:
+            raw = float(context.trigger_payload.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            raw = 0.5
+        calibrated = effective_confidence(raw, calibration_status)
+        return context.model_copy(
+            update={
+                "strategy_stats": context.strategy_stats.model_copy(
+                    update={"win_rate": calibrated}
+                )
+            }
+        )
 
     async def run(self, context: TriggerContext) -> DecisionResult:
         """
@@ -218,6 +275,7 @@ class Orchestrator:
                 )
 
         try:
+            calibration_status = await self._calibration_status(context)
             # Placeholder results for deterministic bypass (Ticket #334/337)
             # Use explicit "bypass" placeholders instead of SAFE_DEFAULTS to avoid "PARSE_FAILURE" trace
             bypass_regime = RegimeResult(
@@ -266,8 +324,27 @@ class Orchestrator:
             else:
                 engine_context = context
 
+            if calibration_status is not None and calibration_mode() == "enforce":
+                context = self._calibrated_context(context, calibration_status)
+                engine_context = self._calibrated_context(
+                    engine_context, calibration_status
+                )
             with stage_timing.stage("gate"):
                 code_result = CodeEngine.run(engine_context)
+            if calibration_status is not None and calibration_mode() == "log_only":
+                calibrated_result = CodeEngine.run(
+                    self._calibrated_context(engine_context, calibration_status)
+                )
+                logger.info(
+                    "Confidence calibration EV/sizing diagnostics",
+                    extra={
+                        "strategy_id": context.strategy_id,
+                        "raw_ev": code_result.gross_ev,
+                        "raw_size_usd": code_result.kelly_position_usd,
+                        "calibrated_ev": calibrated_result.gross_ev,
+                        "calibrated_size_usd": calibrated_result.kelly_position_usd,
+                    },
+                )
             # Cost-share pre-filter (petrosa-cio#296, rule 19), before any LLM call and before the
             # admission is recorded: skip when c/S > p_ref (R + 1) - 1. Log-only by default.
             gate = code_result.net_ev_gate
@@ -300,6 +377,11 @@ class Orchestrator:
                         strategy_result=bypass_strategy,
                         llm_action=ActionType.SKIP,
                         llm_justification=detail,
+                        calibration_status=(
+                            calibration_status
+                            if calibration_mode() == "enforce"
+                            else None
+                        ),
                     )
                     self._emit_decision_action(_prefiltered.action)
                     return _prefiltered
@@ -413,6 +495,9 @@ class Orchestrator:
                     code_result=code_result,
                     regime_result=bypass_regime,
                     strategy_result=bypass_strategy,
+                    calibration_status=(
+                        calibration_status if calibration_mode() == "enforce" else None
+                    ),
                 )
                 self._emit_decision_action(_fallback_decision.action)
                 return _fallback_decision
@@ -437,6 +522,9 @@ class Orchestrator:
                     bypass_regime,
                     bypass_strategy,
                     bypass_mode=not self.use_llm_reasoning,
+                    calibration_status=(
+                        calibration_status if calibration_mode() == "enforce" else None
+                    ),
                 )
                 self._emit_decision_action(_blocked_decision.action)
                 return _blocked_decision
@@ -454,6 +542,9 @@ class Orchestrator:
                     bypass_regime,
                     bypass_strategy,
                     bypass_mode=True,
+                    calibration_status=(
+                        calibration_status if calibration_mode() == "enforce" else None
+                    ),
                 )
                 await self._record_cold_start(context, _bypass_decision)
                 self._emit_decision_action(_bypass_decision.action)
@@ -579,7 +670,13 @@ class Orchestrator:
             action_started = time.perf_counter()
             with stage_timing.stage("llm_action"):
                 decision = await self.action_classifier.classify(
-                    context, code_result, regime, strategy
+                    context,
+                    code_result,
+                    regime,
+                    strategy,
+                    calibration_status=(
+                        calibration_status if calibration_mode() == "enforce" else None
+                    ),
                 )
             self._observe_llm_call(
                 "action",

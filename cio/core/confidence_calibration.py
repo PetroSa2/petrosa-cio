@@ -100,6 +100,18 @@ class CalibrationConfig:
         )
 
 
+CalibrationMode = Literal["log_only", "enforce"]
+
+
+def calibration_mode() -> CalibrationMode:
+    """Return the operator-controlled caller mode, defaulting to diagnostic-only."""
+    return (
+        "enforce"
+        if os.getenv("CIO_CALIBRATION_MODE", "log_only").strip().lower() == "enforce"
+        else "log_only"
+    )
+
+
 def effective_confidence(
     raw: float, status: dict[str, Any] | None, config: CalibrationConfig | None = None
 ) -> float:
@@ -235,3 +247,11 @@ class ConfidenceCalibrationService:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 payload = await fetch(client)
         return build_report(_records_from_response(payload))
+
+    async def status(self, strategy_id: str) -> dict[str, Any] | None:
+        """Return the strategy's calibration status from the shared report contract."""
+        report = await self.report()
+        for group in report["groups"]:
+            if group.get("strategy_id") == strategy_id:
+                return group
+        return None

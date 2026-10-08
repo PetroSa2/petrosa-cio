@@ -420,7 +420,11 @@ async def main():
     # stall leaves a stack in the log instead of a killed pod with nothing in it.
     builder.warm_reports()
     LoopWatchdog(asyncio.get_running_loop()).start()
-    orchestrator = Orchestrator(llm_client=llm_client, cache=cache)
+    orchestrator = Orchestrator(
+        llm_client=llm_client,
+        cache=cache,
+        calibration_service=app.state.confidence_calibration,
+    )
     enforcer = NurseEnforcer(orchestrator=orchestrator)
     router = OutputRouter(
         nats_client=nc,
