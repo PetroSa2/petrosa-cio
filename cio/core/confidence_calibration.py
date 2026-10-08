@@ -74,7 +74,9 @@ def _records_from_response(payload: dict[str, Any]) -> list[CalibrationOutcomeRe
             for field in ("gross_pnl", "costs")
         )
         if not has_net and not has_gross_and_costs:
-            raise ValueError("calibration record requires net_pnl or gross_pnl and costs")
+            raise ValueError(
+                "calibration record requires net_pnl or gross_pnl and costs"
+            )
         normalized.append(record)
     return normalized
 
