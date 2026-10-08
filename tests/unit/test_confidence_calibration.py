@@ -118,3 +118,32 @@ def test_service_uses_only_the_documented_records_field() -> None:
 
     report = asyncio.run(ConfidenceCalibrationService(client=Client()).report())
     assert report["outcome_source"] == "executed"
+
+
+def test_response_contract_rejects_invalid_record_fields() -> None:
+    invalid_records = [
+        ["not an object"],
+        [{"confidence": 0.5, "net_pnl": 1.0}],
+        [{"strategy_id": "s", "net_pnl": 1.0}],
+        [{"strategy_id": "s", "confidence": 0.5}],
+    ]
+    for records in invalid_records:
+        try:
+            _records_from_response({"records": records})
+        except ValueError:
+            continue
+        raise AssertionError("invalid calibration record was accepted")
+
+
+def test_calibrated_confidence_is_clamped_and_invalid_confidence_is_skipped() -> None:
+    config = CalibrationConfig(neutral_prior=0.5)
+    assert effective_confidence(2.0, {"calibrated": True}, config) == 1.0
+    report = build_report(
+        [{"strategy_id": "s", "confidence": 1.5, "net_pnl": 1.0}], config
+    )
+    assert report["groups"][0]["n"] == 1
+
+
+def test_empty_report_has_executed_overall_group() -> None:
+    report = build_report([], CalibrationConfig(minimum_sample=1))
+    assert report["groups"][0]["strategy_id"] == "overall"
