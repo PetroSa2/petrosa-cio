@@ -1,6 +1,7 @@
 import logging
 from datetime import UTC, datetime
 
+from cio.core.confidence_calibration import effective_confidence
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import gate_enforced, log_gate, probe_notional
 from cio.models import (
@@ -39,6 +40,7 @@ class DecisionAssembler:
         strategy_result: StrategyResult,
         llm_action: ActionType | None = None,
         llm_justification: str | None = None,
+        calibration_status: dict | None = None,
     ) -> DecisionResult:
         """
         Pure synchronous assembly logic.
@@ -188,6 +190,13 @@ class DecisionAssembler:
         sizing = (
             code_result.sizing if isinstance(code_result.sizing, SizingRecord) else None
         )
+        if sizing is not None:
+            raw_confidence = float(context.trigger_payload.get("confidence", 0.5))
+            sizing = sizing.model_copy(
+                update={
+                    "p_post": effective_confidence(raw_confidence, calibration_status),
+                }
+            )
         if sizing is not None and probe_override:
             sizing = sizing.model_copy(
                 update={"final_size_usd": final_size_usd, "binding": "cold_start_probe"}
