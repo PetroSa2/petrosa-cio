@@ -44,6 +44,7 @@ class ActionClassifier:
         regime_result: RegimeResult,
         strategy_result: StrategyResult,
         bypass_mode: bool = False,
+        calibration_status: dict | None = None,
     ) -> DecisionResult:
         """
         Runs the final LLM classification loop to determine the ActionType.
@@ -74,6 +75,7 @@ class ActionClassifier:
                 strategy_result=strategy_result,
                 llm_action=action,
                 llm_justification=justification,
+                calibration_status=calibration_status,
             )
 
         user_context = self._build_user_context(
@@ -107,6 +109,7 @@ class ActionClassifier:
             strategy_result=strategy_result,
             llm_action=action_result.action,
             llm_justification=action_result.justification,
+            calibration_status=calibration_status,
         )
 
     def _build_user_context(
