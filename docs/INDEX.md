@@ -4,17 +4,11 @@ This directory contains the technical documentation for the `petrosa-cio` servic
 
 ## 🚀 Getting Started
 - [**README.md**](../README.md) - High-level overview and quick start.
-- [**Architecture Overview**](ARCHITECTURE.md) - Detailed design of Nurse and Strategist layers.
-- [**Implementation Plan**](IMPLEMENTATION_PLAN.md) - Phased roadmap to sovereign governance.
-
-## 📋 Requirements
-- [**PRD**](PRD.md) - Product Requirements Document.
-- [**EPICS**](EPICS.md) - Breakdown of features and stories.
+- [**LLM Strategist Overview**](llm-strategist/architecture/overview.md) - Current strategist design.
+- [**Prompt Context Contract**](../cio/docs/prompt-context-contract.md) - Prompt input contract.
 
 ## 🔧 Operations
-- [**CI/CD Pipeline**](CI_CD_PIPELINE.md) - Standardized deployment flow.
-- [**Testing Guide**](TESTING.md) - Procedures for ensuring enforcement safety.
-- [**Makefile Reference**](MAKEFILE.md) - Command guide.
-
-## 🤖 Agent Reports
-- [**Agent Work Directory**](agent-work/) - Latest analysis and execution logs.
+- [**Contracts**](CONTRACTS.md) - Service interfaces and data contracts.
+- [**Heartbeat Specification**](HEARTBEAT_SPEC.md) - Health and liveness behavior.
+- [**Emergency Operations**](EMERGENCY_OPERATIONS.md) - Operational response procedures.
+- [**MCP Tools**](MCP_TOOLS.md) - Tool integration reference.
