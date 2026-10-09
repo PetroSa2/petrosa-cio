@@ -29,7 +29,7 @@ from cio.models import (
 async def test_output_router_shadow_mode():
     """
     Verifies that OutputRouter:
-    1. Does NOT publish to NATS when DRY_RUN=true.
+    1. Publishes isolated qa.* results but not production subjects when DRY_RUN=true.
     2. ALWAYS calls vector_client.upsert regardless of DRY_RUN.
     """
     # 1. Setup Mock NATS Client and Vector Client
@@ -100,14 +100,26 @@ async def test_output_router_shadow_mode():
     )
 
     # 3. Execution with DRY_RUN=true
-    with patch.dict(os.environ, {"DRY_RUN": "true"}):
+    with patch.dict(
+        os.environ,
+        {
+            "DRY_RUN": "true",
+            "NATS_TOPIC_INTENTS": "qa.cio.intent.trading",
+            "NATS_TOPIC_SIGNALS": "qa.signals.trading",
+        },
+    ):
         await router.route(context, decision)
 
         # 4. Assertions
-        mock_nc.publish.assert_not_called()
+        assert mock_nc.publish.call_count == 2
+        assert {call.args[0] for call in mock_nc.publish.call_args_list} == {
+            "qa.signals.trading.test_strat",
+            "qa.cio.decision.audit.execute",
+        }
         mock_vc.upsert.assert_called_once()
         print(
-            "✅ Verified: OutputRouter blocked NATS publish but performed Vector upsert in shadow mode."
+            "✅ Verified: OutputRouter published isolated QA output and performed "
+            "Vector upsert in shadow mode."
         )
 
     # 5. Execution with DRY_RUN=false

@@ -359,6 +359,7 @@ class OutputRouter:
         )
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
+        qa_intents = os.getenv("NATS_TOPIC_INTENTS", "").startswith("qa.")
 
         # P1.5-AC3 (#137) / #174 — resolve the admission-time leverage
         # decision ONCE per routed decision so the SAME `decided_leverage`
@@ -1029,9 +1030,12 @@ class OutputRouter:
         }
         if authority_was_disabled:
             audit_copy_payload["authority_fallback_from"] = original_action.value
+        audit_base = os.getenv("NATS_TOPIC_DECISION_AUDIT")
+        if not audit_base:
+            audit_base = "qa.cio.decision.audit" if qa_intents else "cio.decision.audit"
         dispatch_tasks_data.append(
             (
-                f"cio.decision.audit.{action.value}",
+                f"{audit_base.rstrip('.>')}.{action.value}",
                 json.dumps(audit_copy_payload).encode(),
             )
         )
@@ -1040,7 +1044,7 @@ class OutputRouter:
         nats_publish_tasks = []
 
         for subject, msg_bytes in dispatch_tasks_data:
-            if is_dry_run:
+            if is_dry_run and not subject.startswith("qa."):
                 logger.info(
                     f"[SHADOW MODE] Would have published to {subject}",
                     extra={
