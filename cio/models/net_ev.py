@@ -177,7 +177,9 @@ class RegimeAvailability(BaseModel):
     """Whether the regime could inform the decision: confident and fresh (petrosa-cio#294)."""
 
     available: bool
-    reason: Literal["regime_low_confidence", "regime_stale"] | None = None
+    reason: (
+        Literal["regime_low_confidence", "regime_stale", "regime_missing"] | None
+    ) = None
     confidence: str | None = None
     confidence_value: float | None = None
     min_confidence: float | None = None
@@ -185,6 +187,7 @@ class RegimeAvailability(BaseModel):
     age_seconds: float | None = None
     age_known: bool = False
     stale_after_seconds: float
+    stale_after_source: Literal["env", "fallback"] = "fallback"
     computed_at: datetime | None = None
 
 

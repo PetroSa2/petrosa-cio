@@ -375,3 +375,132 @@ def test_the_context_gap_names_the_minimum_and_its_source(monkeypatch):
     )
     assert "min_confidence=0.8(env)" in gaps[0].reason
     assert "value=0.75" in gaps[0].reason
+
+
+# --- petrosa-cio#326: staleness is enforced and degrades gracefully -------------------------------
+def _missing(signal="error"):
+    """What the context builder returns when the regime fetch fails or data-manager has none."""
+    return RegimeResult(
+        regime=RegimeEnum.CHOPPY,
+        regime_confidence=ConfidenceLevel.LOW,
+        volatility_level=VolatilityLevel.MEDIUM,
+        primary_signal=signal,
+        thought_trace="t",
+    )
+
+
+@pytest.mark.parametrize("kind", [RegimeEnum.CHOPPY, RegimeEnum.CAPITULATION])
+def test_a_stale_confident_choppy_or_capitulation_regime_does_not_block(kind):
+    # the hard blocks act only on a fresh, confident regime: stale data goes at probe size, never blocked
+    result = CodeEngine.run(_context(_regime(kind=kind, age=timedelta(hours=5))))
+    assert result.hard_blocked is False
+    assert result.sizing.binding == "regime_probe"
+    assert result.sizing.regime_reason == "regime_stale"
+    assert result.sizing.final_size_usd == result.sizing.probe_usd
+
+
+def test_a_stale_regime_is_probe_size_not_blocked_and_keeps_what_the_posterior_gave():
+    fresh = CodeEngine.run(_context(_regime()))
+    stale = CodeEngine.run(_context(_regime(age=timedelta(hours=5))))
+    assert stale.hard_blocked is False
+    assert stale.sizing.binding == "regime_probe"
+    assert stale.sizing.size_before_regime_usd == fresh.sizing.final_size_usd
+
+
+def test_a_fresh_low_confidence_regime_is_probe_size():
+    result = CodeEngine.run(
+        _context(_regime(confidence=ConfidenceLevel.LOW, age=timedelta(minutes=2)))
+    )
+    assert result.hard_blocked is False
+    assert (result.sizing.binding, result.sizing.regime_reason) == (
+        "regime_probe",
+        "regime_low_confidence",
+    )
+
+
+def test_a_fresh_confident_choppy_regime_keeps_the_existing_block():
+    result = CodeEngine.run(
+        _context(_regime(kind=RegimeEnum.CHOPPY, age=timedelta(minutes=2)))
+    )
+    assert result.hard_blocked is True
+    assert result.block_reason.startswith("regime_block: CHOPPY")
+
+
+@pytest.mark.parametrize("signal", ["error", "timeout", "data_manager_empty"])
+def test_a_missing_regime_is_neutral_probe_size_never_a_block_or_a_crash(signal):
+    state = regime_availability(_missing(signal))
+    assert (state.available, state.reason) == (False, "regime_missing")
+    result = CodeEngine.run(_context(_missing(signal)))
+    assert result.hard_blocked is False
+    assert (result.sizing.binding, result.sizing.regime_reason) == (
+        "regime_probe",
+        "regime_missing",
+    )
+
+
+def test_data_manager_having_no_regime_for_the_pair_is_a_missing_regime():
+    response = RegimeAPIResponse.model_validate(
+        {
+            "pair": "SOLUSDT",
+            "metric": "regime",
+            "data": None,
+            "metadata": {
+                "timestamp": "2026-10-09T10:33:41.358688+00:00",
+                "collection": "analytics_SOLUSDT_regime",
+            },
+        }
+    )
+    regime = RegimeResult.from_api_response(response)
+    assert regime_availability(regime).reason == "regime_missing"
+    assert CodeEngine.run(_context(regime)).hard_blocked is False
+
+
+def test_a_naive_data_manager_timestamp_is_read_as_utc():
+    # data-manager's metadata.timestamp is stored without a zone ("2026-10-09T10:30:43.094000"), UTC
+    stamp = (datetime.now(UTC) - timedelta(hours=5)).replace(tzinfo=None).isoformat()
+    response = RegimeAPIResponse.model_validate(
+        {
+            "pair": "BTCUSDT",
+            "metric": "regime",
+            "data": {
+                "regime": "balanced_market",
+                "volatility_level": "medium",
+                "volume_level": "medium",
+                "trend_direction": "neutral",
+                "confidence": "0.7",
+            },
+            "metadata": {"timestamp": stamp, "collection": "c"},
+        }
+    )
+    state = regime_availability(RegimeResult.from_api_response(response))
+    assert (state.available, state.reason) == (False, "regime_stale")
+    assert state.age_seconds == pytest.approx(5 * 3600, abs=10)
+
+
+def test_the_stale_limit_is_derived_from_the_interval_and_labelled(monkeypatch):
+    monkeypatch.delenv("CIO_REGIME_ANALYZER_INTERVAL_SECONDS", raising=False)
+    assert regime_availability(_regime()).stale_after_source == "fallback"
+    monkeypatch.setenv("CIO_REGIME_ANALYZER_INTERVAL_SECONDS", "1800")
+    state = regime_availability(_regime(age=timedelta(minutes=80)))
+    assert (state.stale_after_seconds, state.stale_after_source) == (5400.0, "env")
+    assert state.available is True  # 80 min < 3 x 30 min
+    gaps: list[ContextGap] = []
+    ContextBuilder._note_regime_unavailable(_regime(age=timedelta(hours=3)), gaps)
+    assert "stale_after_s=5400(env)" in gaps[0].reason
+
+
+def test_regime_freshness_is_monitored(monkeypatch):
+    from cio.core import engine as engine_module
+
+    ages, unavailable = [], []
+    monkeypatch.setattr(engine_module.REGIME_AGE, "record", ages.append)
+    monkeypatch.setattr(
+        engine_module.REGIME_UNAVAILABLE,
+        "add",
+        lambda value, attributes: unavailable.append(attributes["reason"]),
+    )
+    CodeEngine.run(_context(_regime(age=timedelta(hours=5))))
+    CodeEngine.run(_context(_regime()))
+    CodeEngine.run(_context(_missing()))
+    assert len(ages) == 2 and ages[0] == pytest.approx(5 * 3600, abs=10)
+    assert unavailable == ["regime_stale", "regime_missing"]

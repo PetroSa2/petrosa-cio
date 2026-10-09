@@ -3,6 +3,11 @@
 * **Low-confidence regime** (decision 22): treated as unavailable: the order goes at **probe size only**, and the
   reason is recorded (on the sizing record and as a context gap).
 * **Stale regime** (decision 3): older than max(3 x the analyzer interval, 1 h): also unavailable, so probe size only.
+  The age is now minus the time data-manager computed the regime (its ``metadata.timestamp``; a naive time is UTC);
+  the interval is ``CIO_REGIME_ANALYZER_INTERVAL_SECONDS`` or its labelled 900 s fallback. An unknown time is not
+  called stale.
+* **Missing regime** (the fetch failed or data-manager has none for the pair): neutral, probe size only
+  (``regime_missing``); never a block and never an error.
 * **turbulent_illiquidity** (decision 21): no block. The cost uplift is the *measured* per-regime slippage of
   PetroSa2/petrosa-data-manager#535 (which the net-EV gate already uses); only until enough fills exist is the
   documented fallback applied: twice the slippage and +0.05R on the required EV (``net_ev.py``).
@@ -29,13 +34,26 @@ STALE_FLOOR_SECONDS = 3600.0
 STALE_INTERVALS = 3.0
 
 
-def analyzer_interval_seconds() -> float:
-    """The data-manager analytics interval (``CIO_REGIME_ANALYZER_INTERVAL_SECONDS``, default 900)."""
+#: How a regime fetch that returned nothing usable looks (``RegimeResult`` safe defaults of the context builder)
+MISSING_SIGNALS = frozenset(
+    {"data_manager_empty", "data_manager_unknown", "timeout", "error"}
+)
+
+
+def analyzer_interval() -> tuple[float, str]:
+    """(seconds, source): the data-manager analytics interval, ``CIO_REGIME_ANALYZER_INTERVAL_SECONDS`` (source
+    ``env``) or the 900 s fallback (source ``fallback``)."""
     try:
         value = float(os.environ["CIO_REGIME_ANALYZER_INTERVAL_SECONDS"])
     except (KeyError, ValueError):
-        return DEFAULT_ANALYZER_INTERVAL_SECONDS
-    return value if value > 0 else DEFAULT_ANALYZER_INTERVAL_SECONDS
+        return DEFAULT_ANALYZER_INTERVAL_SECONDS, "fallback"
+    if value > 0:
+        return value, "env"
+    return DEFAULT_ANALYZER_INTERVAL_SECONDS, "fallback"
+
+
+def analyzer_interval_seconds() -> float:
+    return analyzer_interval()[0]
 
 
 def stale_after_seconds() -> float:
@@ -49,6 +67,7 @@ def regime_availability(
     """Whether the regime can inform a decision: confident enough and fresh enough."""
     now = now or datetime.now(UTC)
     stale_after = stale_after_seconds()
+    stale_source = analyzer_interval()[1]
     age = None
     computed_at = regime.computed_at
     if computed_at is not None:
@@ -56,7 +75,11 @@ def regime_availability(
         age = max(0.0, (now - stamp).total_seconds())
     minimum, minimum_source = regime_min_confidence()
     reason = None
-    if regime.regime_confidence == ConfidenceLevel.LOW:
+    if regime.data_manager_regime is None and regime.primary_signal in MISSING_SIGNALS:
+        reason = (
+            "regime_missing"  # no regime at all: neutral, probe size, never a block
+        )
+    elif regime.regime_confidence == ConfidenceLevel.LOW:
         reason = "regime_low_confidence"
     elif age is not None and age > stale_after:
         reason = "regime_stale"
@@ -69,6 +92,7 @@ def regime_availability(
         min_confidence_source=minimum_source,  # type: ignore[arg-type]
         age_seconds=age,
         stale_after_seconds=stale_after,
+        stale_after_source=stale_source,  # type: ignore[arg-type]
         computed_at=computed_at,
         age_known=age is not None,
     )

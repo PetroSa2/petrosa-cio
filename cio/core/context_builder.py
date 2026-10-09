@@ -547,7 +547,8 @@ class ContextBuilder:
                     reason=f"{state.reason}: confidence={state.confidence} "
                     f"value={state.confidence_value} "
                     f"min_confidence={state.min_confidence}({state.min_confidence_source}) "
-                    f"age_s={state.age_seconds} stale_after_s={state.stale_after_seconds:.0f}",
+                    f"age_s={state.age_seconds} "
+                    f"stale_after_s={state.stale_after_seconds:.0f}({state.stale_after_source})",
                 )
             )
 
