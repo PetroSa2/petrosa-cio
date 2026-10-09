@@ -193,6 +193,15 @@ class OutputRouter:
         self.realtime_strategies_url = realtime_strategies_url or os.getenv(
             "REALTIME_STRATEGIES_URL", ""
         )
+        self.realtime_pause_mode = (
+            os.getenv("CIO_REALTIME_PAUSE_MODE", "shadow").strip().lower()
+        )
+        if self.realtime_pause_mode not in {"shadow", "apply"}:
+            logger.warning(
+                "CONFIG_WARNING: CIO_REALTIME_PAUSE_MODE=%s is invalid; using shadow",
+                self.realtime_pause_mode,
+            )
+            self.realtime_pause_mode = "shadow"
         self.cache = cache
         self.pause_registry = pause_registry
 
@@ -616,7 +625,29 @@ class OutputRouter:
             is_llm_unavailable = (
                 decision.rejection_source == RejectionSource.LLM_UNAVAILABLE
             )
-            if self.pause_registry is not None and not is_dry_run:
+            target_service = TargetServiceResolver.resolve(
+                self._resolve_routing_strategy_id(context, strategy_id)
+            )
+            is_realtime_shadow = (
+                target_service == ServiceType.REALTIME_STRATEGIES
+                and self.realtime_pause_mode == "shadow"
+            )
+            if is_realtime_shadow:
+                logger.info(
+                    "SHADOW_PAUSE would pause realtime strategy",
+                    extra={
+                        "strategy_id": strategy_id,
+                        "symbol": context.trigger_payload.get("symbol", ""),
+                        "justification": decision.justification,
+                        "decision_id": decision_id,
+                        "correlation_id": correlation_id,
+                    },
+                )
+            if (
+                self.pause_registry is not None
+                and not is_dry_run
+                and not is_realtime_shadow
+            ):
                 if is_llm_unavailable:
                     await self.pause_registry.touch_unavailable(strategy_id)
                 else:
@@ -632,10 +663,7 @@ class OutputRouter:
                 action_name="PAUSE_STRATEGY",
             )
 
-            if base_url is not None:
-                target_service = TargetServiceResolver.resolve(
-                    self._resolve_routing_strategy_id(context, strategy_id)
-                )
+            if base_url is not None and not is_realtime_shadow:
                 use_lifecycle_endpoint = (
                     target_service == ServiceType.REALTIME_STRATEGIES
                 )
