@@ -31,8 +31,12 @@ Four principles govern every design decision in this framework.
 **Principle 1 — Code owns numbers, LLMs own language.**
 Any output that is a number computed from other numbers is produced by a Python function. LLMs are called only when the input is natural language context (regime descriptions, strategy documentation, qualitative health signals) and the output is a classification. LLMs hallucinate floats. This is not a limitation to work around — it is a constraint to design for.
 
-**Principle 2 — Maximum three LLM calls per decision.**
-The entire decision pipeline runs on at most three LLM calls: Regime Classifier, Strategy Assessor, Action Classifier. Everything else is code. On the HOT path, this drops to zero LLM calls when cached assessments are valid.
+**Principle 2 — Minimize LLM calls per decision.**
+The transition pipeline has at most three LLM calls: Regime Classifier, Strategy Assessor, and
+Action Classifier. The Strategy Assessor is scheduled for removal: its qualitative output does not
+justify another latency, spend, and failure boundary when deterministic strategy statistics and
+existing risk gates are available. The target pipeline has two calls, and the HOT path remains at
+zero when cached assessments are valid.
 
 **Principle 3 — Schemas must have four fields or fewer.**
 Every LLM output schema has at most four top-level fields. Above this limit, small models begin omitting fields, inventing field names, or producing malformed JSON. Smaller schemas mean fewer parse failures and cheaper outputs.
@@ -59,13 +63,40 @@ Before any prompt is written, every decision must be classified. This table is t
 | Parameter value computation | **Code** | Direction signal × step size × schema bounds |
 | Hard exit triggers | **Code** | Stop loss / take profit / time expiry comparisons |
 | Market regime classification | **LLM** | Multi-signal pattern recognition |
-| Strategy qualitative fit assessment | **LLM** | Natural language strategy docs + regime context |
+| Strategy qualitative fit assessment | **Retire** | The live assessor is advisory and duplicates deterministic health/risk signals |
 | Action classification | **LLM** | Synthesising flags + qualitative assessments |
 | Parameter change justification | **LLM** | Audit trace grounded in strategy docs |
 
-The split is roughly 75% code, 25% LLM. Code handles all quantitative work. LLMs handle classification and language.
+The current split is roughly 75% code, 25% LLM. The target split removes the advisory strategy-fit
+call; code continues to handle all quantitative and safety-critical work.
 
-## 4. Orchestration Pipeline
+## 4. Strategy Analysis Stage Decision
+
+The repository contains a live `StrategyAssessor` call in the transition pipeline, but the MCP
+configuration server described by the old integration documentation no longer exists. Rebuilding
+that MCP surface would restore configuration tooling, not decision quality. The assessor receives
+strategy statistics and regime fields already available from the Data Manager and returns
+qualitative health, fit, activation, and optional parameter-change suggestions. Those outputs add
+latency and an LLM failure mode while deterministic EV, sizing, drawdown, pause, and keep/kill
+controls remain authoritative.
+
+**Recommendation: remove the strategy-specific LLM analysis stage; do not rebuild MCP.** A separate
+implementation ticket must first replace the assessor-derived audit fields with deterministic
+values or explicit unavailable markers, then remove its call, model, prompt, cache key, and tests.
+The existing net-EV gate, risk limits, sizing, context-gap handling, and keep/kill controls remain
+unchanged. The Strategy Assessor should not be removed in this spike because the current runtime
+still calls it.
+
+**Effort estimate:** rebuilding MCP is approximately 3–5 engineer-days for a server contract,
+audit/auth wiring, integration tests, deployment, and operator documentation, with no identified
+decision benefit. Removing the stage is approximately 1–2 engineer-days for the runtime contract,
+audit-field migration, focused tests, and documentation; it is the lower-risk option.
+
+**Alternatives considered:** retain the assessor unchanged (rejected: redundant cost and failure
+surface); retain it as advisory-only (interim compatibility only, not a target design); or replace
+it with deterministic health and regime-fit rules (preferred implementation boundary).
+
+## 5. Orchestration Pipeline
 
 ```
 TRIGGER RECEIVED (NATS intent.* or scheduled)
@@ -100,8 +131,8 @@ TRIGGER RECEIVED (NATS intent.* or scheduled)
 ┌──────────────────────────────────────────────────────────┐
 │              LLM CALLS (conditional on path)             │
 │                                                          │
-│  [1] REGIME CLASSIFIER (Haiku, cached)                   │
-│  [2] STRATEGY ASSESSOR (Haiku, cached)                   │
+│  [1] REGIME CLASSIFIER (Haiku, cached; transition)       │
+│  [2] STRATEGY ASSESSOR (Haiku, cached; scheduled removal)│
 │  [3] ACTION CLASSIFIER (Haiku, unique per call)          │
 └──────────────────────────────┬───────────────────────────┘
                                │

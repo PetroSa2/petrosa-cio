@@ -11,4 +11,4 @@ This directory contains the technical documentation for the `petrosa-cio` servic
 - [**Contracts**](CONTRACTS.md) - Service interfaces and data contracts.
 - [**Heartbeat Specification**](HEARTBEAT_SPEC.md) - Health and liveness behavior.
 - [**Emergency Operations**](EMERGENCY_OPERATIONS.md) - Operational response procedures.
-- [**MCP Tools**](MCP_TOOLS.md) - Tool integration reference.
+- The former MCP configuration surface is retired; see the [strategy-analysis decision](llm-strategist/architecture/overview.md#4-strategy-analysis-stage-decision).
