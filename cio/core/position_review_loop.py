@@ -52,6 +52,18 @@ DEFAULT_REEVAL_INTERVAL_SECONDS = 300.0
 # The registry is bounded (petrosa-cio review-loop leak fix): positions are registered only for a real EXECUTE
 # (see ``OutputRouter``) and retired by the close event; this cap is the last line of defence.
 DEFAULT_MAX_POSITIONS = 200
+# A registration that has seen no fill event for this long is retired: the EXECUTE was dispatched but the order was
+# rejected, cancelled or lost before any fill, so no close event will ever retire it (labelled fallback, seconds).
+DEFAULT_UNFILLED_TTL_SECONDS = 900.0
+
+
+def unfilled_ttl_from_env() -> float:
+    """``CIO_REVIEW_LOOP_UNFILLED_TTL_SECONDS`` (default 900 s); an unreadable or non-positive value is the default."""
+    try:
+        value = float(os.environ["CIO_REVIEW_LOOP_UNFILLED_TTL_SECONDS"])
+    except (KeyError, ValueError):
+        return DEFAULT_UNFILLED_TTL_SECONDS
+    return value if value > 0 else DEFAULT_UNFILLED_TTL_SECONDS
 
 
 def max_positions_from_env() -> int:
@@ -66,6 +78,12 @@ def max_positions_from_env() -> int:
 cio_review_loop_positions = Gauge(
     "cio_review_loop_positions",
     "Positions currently registered with the in-position review loop",
+)
+
+cio_review_loop_retired_unfilled = Counter(
+    "cio_review_loop_retired_unfilled_total",
+    "Registrations retired without ever seeing a fill (reason: ttl, or rejected by the trade engine)",
+    ["reason"],
 )
 
 cio_review_loop_evicted = Counter(
@@ -98,6 +116,14 @@ cio_reeval_dropped = Counter(
     "Re-evaluation triggers dropped because a prior re-eval is still in flight",
     ["source"],
 )
+
+
+@dataclass
+class _Registration:
+    """When a position was registered and whether a fill event was seen for it."""
+
+    registered_at: float
+    filled: bool = False
 
 
 @dataclass(frozen=True)
@@ -155,6 +181,8 @@ class PositionReviewLoop:
         *,
         interval_seconds: float = DEFAULT_REEVAL_INTERVAL_SECONDS,
         max_positions: int | None = None,
+        unfilled_ttl_seconds: float | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError(f"interval_seconds must be > 0, got {interval_seconds!r}")
@@ -165,8 +193,14 @@ class PositionReviewLoop:
             if max_positions and max_positions > 0
             else max_positions_from_env()
         )
-        # key -> when it was registered (insertion order = oldest first)
-        self._positions: dict[PositionKey, float] = {}
+        self._unfilled_ttl = (
+            unfilled_ttl_seconds
+            if unfilled_ttl_seconds and unfilled_ttl_seconds > 0
+            else unfilled_ttl_from_env()
+        )
+        self._clock = clock or time.monotonic
+        # key -> registration (insertion order = oldest first)
+        self._positions: dict[PositionKey, _Registration] = {}
         self._inflight: set[PositionKey] = set()
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -187,7 +221,11 @@ class PositionReviewLoop:
         if key in self._positions:
             return False
         while len(self._positions) >= self._max_positions:
-            oldest = next(iter(self._positions))
+            # the oldest registration that never saw a fill goes first; a position with a fill is real
+            oldest = next(
+                (k for k, reg in self._positions.items() if not reg.filled),
+                next(iter(self._positions)),
+            )
             del self._positions[oldest]
             cio_review_loop_evicted.inc()
             logger.warning(
@@ -195,7 +233,7 @@ class PositionReviewLoop:
                 oldest,
                 self._max_positions,
             )
-        self._positions[key] = time.monotonic()
+        self._positions[key] = _Registration(registered_at=self._clock())
         self._sync_gauge()
         logger.debug("position_review_loop.added position=%s", key)
         return True
@@ -211,6 +249,45 @@ class PositionReviewLoop:
             self._sync_gauge()
             logger.debug("position_review_loop.removed position=%s", key)
         return removed
+
+    def mark_filled(self, strategy_id: str, position_id: str) -> bool:
+        """An opening fill was seen for this position: it is real and is no longer subject to the unfilled TTL."""
+        reg = self._positions.get(
+            PositionKey(strategy_id=strategy_id, position_id=position_id)
+        )
+        if reg is None or reg.filled:
+            return False
+        reg.filled = True
+        return True
+
+    def retire_unfilled(
+        self, strategy_id: str, position_id: str, *, reason: str = "rejected"
+    ) -> bool:
+        """Retire a registration that has seen no fill (the trade engine rejected or failed the order). A position
+        that has a fill is NOT retired here: a rejection can concern a later order of a live position."""
+        key = PositionKey(strategy_id=strategy_id, position_id=position_id)
+        reg = self._positions.get(key)
+        if reg is None or reg.filled:
+            return False
+        del self._positions[key]
+        cio_review_loop_retired_unfilled.labels(reason=reason).inc()
+        logger.info(
+            "position_review_loop.retired_unfilled position=%s reason=%s", key, reason
+        )
+        self._sync_gauge()
+        return True
+
+    def expire_unfilled(self) -> list[PositionKey]:
+        """Retire every registration older than the unfilled TTL that never saw a fill."""
+        now = self._clock()
+        expired = [
+            key
+            for key, reg in self._positions.items()
+            if not reg.filled and now - reg.registered_at >= self._unfilled_ttl
+        ]
+        for key in expired:
+            self.retire_unfilled(key.strategy_id, key.position_id, reason="ttl")
+        return expired
 
     def active_positions(self) -> list[PositionKey]:
         """Snapshot of currently-registered positions (sorted for stability)."""
@@ -264,6 +341,7 @@ class PositionReviewLoop:
 
             # Snapshot the active set so a concurrent add/remove during the
             # iteration doesn't surprise us.
+            self.expire_unfilled()
             for key in list(self._positions):
                 await self._fire_once(
                     key, source=SOURCE_CADENCE, reason="scheduled_review_cadence"

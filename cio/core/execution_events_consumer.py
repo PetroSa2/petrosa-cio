@@ -52,6 +52,7 @@ logger = logging.getLogger(__name__)
 EXECUTION_EVENTS_SUBJECT_PATTERN = "execution.events.>"
 
 _CLOSING_EVENT_TYPES_REQUIRING_STATUS = {"filled"}
+_FILL_EVENT_TYPES = {"filled", "partial_fill"}
 _UNCONDITIONAL_CLOSING_EVENT_TYPES = {"position_force_closed_no_stops"}
 
 _received = Counter(
@@ -120,6 +121,31 @@ class ExecutionEventsConsumer:
                 )
             self._subscription = None
 
+    def _track_position_lifecycle(self, payload: dict, event_type: str) -> None:
+        """Keep the review loop's registrations honest for positions that never opened.
+
+        * a fill (``filled`` or ``partial_fill``) marks the registration as real (no unfilled TTL any more);
+        * a ``rejected`` event for a registration that has seen no fill retires it: the trade engine publishes
+          ``rejected`` for risk rejections, exchange rejected/expired/cancelled/failed orders and execution
+          exceptions, all with the CIO ``position_id`` as ``client_order_id`` when the signal carried one.
+        """
+        loop = self._position_review_loop
+        strategy_id = payload.get("strategy_id")
+        position_id = payload.get("client_order_id")
+        if loop is None or not strategy_id or not position_id:
+            return
+        if event_type in _FILL_EVENT_TYPES and not _is_position_closed(payload):
+            loop.mark_filled(strategy_id, position_id)
+        elif event_type == "rejected":
+            if loop.retire_unfilled(strategy_id, position_id, reason="rejected"):
+                logger.info(
+                    "execution_events_consumer.unfilled_position_retired strategy_id=%s "
+                    "position_id=%s reason=%s",
+                    strategy_id,
+                    position_id,
+                    payload.get("reason", ""),
+                )
+
     async def _handle_message(self, msg) -> None:
         subject = msg.subject
 
@@ -136,6 +162,7 @@ class ExecutionEventsConsumer:
         event_type = payload.get("event_type", "unknown")
         _received.labels(event_type=event_type).inc()
 
+        self._track_position_lifecycle(payload, event_type)
         if not _is_position_closed(payload):
             return
 

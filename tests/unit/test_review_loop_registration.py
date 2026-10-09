@@ -232,3 +232,168 @@ def test_the_positions_gauge_follows_the_registry():
     # the OTLP observable gauge of the same name reports the live registry too
     observed = list(prl._observe_positions(None))
     assert observed and observed[0].value >= 1
+
+
+# --- registrations that never see a fill: rejected orders and the unfilled TTL --------------------
+
+
+def _event(event_type, position_id, *, strategy_id="iceberg_detector", **extra):
+    msg = MagicMock()
+    msg.subject = f"execution.events.{strategy_id}"
+    payload = {"event_type": event_type, "strategy_id": strategy_id, **extra}
+    if position_id is not None:
+        payload["client_order_id"] = position_id
+    msg.data = json.dumps(payload).encode()
+    return msg
+
+
+def _consumer(loop):
+    return ExecutionEventsConsumer(
+        nats_client=MagicMock(),
+        portfolio_tracker=AsyncMock(),
+        position_review_loop=loop,
+    )
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _retired(reason):
+    return prl.cio_review_loop_retired_unfilled.labels(reason=reason)._value.get()
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_execute_is_retired_by_the_rejection_event():
+    loop = PositionReviewLoop(runner=_Runner())
+    await _route(_router(loop), _context("pos-rej"), ActionType.EXECUTE)
+    assert len(loop.active_positions()) == 1
+    before = _retired("rejected")
+    # the trade engine publishes `rejected` for risk rejections, exchange rejected/expired/cancelled/failed orders
+    # and execution exceptions, with the CIO position id as client_order_id
+    for reason in (
+        "insufficient_margin",
+        "exchange_cancelled",
+        "order_execution_exception: boom",
+    ):
+        loop.add_position("iceberg_detector", "pos-rej")
+        await _consumer(loop)._handle_message(
+            _event("rejected", "pos-rej", reason=reason)
+        )
+        assert loop.active_positions() == []
+    assert _retired("rejected") - before == 3
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_does_not_retire_a_position_that_has_a_fill():
+    loop = PositionReviewLoop(runner=_Runner())
+    loop.add_position("iceberg_detector", "pos-live")
+    consumer = _consumer(loop)
+    await consumer._handle_message(_event("filled", "pos-live", position_status="open"))
+    await consumer._handle_message(
+        _event("rejected", "pos-live", reason="exchange_rejected")
+    )  # e.g. a later protective order of the live position
+    assert loop.active_positions() == [PositionKey("iceberg_detector", "pos-live")]
+
+
+@pytest.mark.asyncio
+async def test_rejections_without_a_position_id_or_for_an_unknown_one_are_ignored():
+    loop = PositionReviewLoop(runner=_Runner())
+    loop.add_position("iceberg_detector", "pos-1")
+    consumer = _consumer(loop)
+    await consumer._handle_message(_event("rejected", None, reason="x"))
+    await consumer._handle_message(_event("rejected", "someone-else", reason="x"))
+    assert loop.active_positions() == [PositionKey("iceberg_detector", "pos-1")]
+
+
+@pytest.mark.asyncio
+async def test_a_partial_fill_also_marks_the_position_as_real():
+    loop = PositionReviewLoop(runner=_Runner())
+    loop.add_position("iceberg_detector", "pos-p")
+    await _consumer(loop)._handle_message(_event("partial_fill", "pos-p"))
+    assert loop.retire_unfilled("iceberg_detector", "pos-p") is False
+
+
+def test_an_unfilled_registration_retires_after_the_ttl():
+    clock = _Clock()
+    loop = PositionReviewLoop(runner=_Runner(), unfilled_ttl_seconds=900.0, clock=clock)
+    loop.add_position("s", "p")
+    before = _retired("ttl")
+    clock.now += 899
+    assert loop.expire_unfilled() == []
+    assert len(loop.active_positions()) == 1
+    clock.now += 2
+    assert loop.expire_unfilled() == [PositionKey("s", "p")]
+    assert loop.active_positions() == []
+    assert _retired("ttl") - before == 1
+
+
+def test_a_filled_registration_does_not_retire_on_the_ttl():
+    clock = _Clock()
+    loop = PositionReviewLoop(runner=_Runner(), unfilled_ttl_seconds=900.0, clock=clock)
+    loop.add_position("s", "filled")
+    loop.add_position("s", "unfilled")
+    assert loop.mark_filled("s", "filled") is True
+    assert loop.mark_filled("s", "filled") is False  # idempotent
+    clock.now += 100_000
+    assert loop.expire_unfilled() == [PositionKey("s", "unfilled")]
+    assert loop.active_positions() == [PositionKey("s", "filled")]
+
+
+@pytest.mark.asyncio
+async def test_the_cadence_tick_expires_unfilled_registrations_before_reviewing():
+    import asyncio
+
+    clock = _Clock()
+    reviewed = []
+
+    async def runner(key, reason):
+        reviewed.append(key)
+
+    loop = PositionReviewLoop(
+        runner=runner, interval_seconds=0.02, unfilled_ttl_seconds=900.0, clock=clock
+    )
+    loop.add_position("s", "dead")
+    loop.add_position("s", "real")
+    loop.mark_filled("s", "real")
+    clock.now += 1000
+    await loop.start()
+    await asyncio.sleep(0.15)
+    await loop.stop()
+    assert PositionKey("s", "dead") not in loop.active_positions()
+    assert PositionKey("s", "dead") not in reviewed  # never reviewed
+    assert PositionKey("s", "real") in reviewed
+
+
+def test_eviction_takes_an_unfilled_registration_before_a_filled_one():
+    loop = PositionReviewLoop(runner=_Runner(), max_positions=2)
+    loop.add_position("s", "real-old")
+    loop.mark_filled("s", "real-old")
+    loop.add_position("s", "unfilled")
+    loop.add_position("s", "new")  # full: the unfilled one goes, not the older real one
+    assert {k.position_id for k in loop.active_positions()} == {"real-old", "new"}
+
+
+def test_the_unfilled_ttl_comes_from_the_environment_with_a_fallback(monkeypatch):
+    monkeypatch.delenv("CIO_REVIEW_LOOP_UNFILLED_TTL_SECONDS", raising=False)
+    assert prl.unfilled_ttl_from_env() == 900.0
+    monkeypatch.setenv("CIO_REVIEW_LOOP_UNFILLED_TTL_SECONDS", "120")
+    assert prl.unfilled_ttl_from_env() == 120.0
+    assert PositionReviewLoop(runner=_Runner())._unfilled_ttl == 120.0
+    for bad in ("0", "-5", "x", ""):
+        monkeypatch.setenv("CIO_REVIEW_LOOP_UNFILLED_TTL_SECONDS", bad)
+        assert prl.unfilled_ttl_from_env() == 900.0
+
+
+@pytest.mark.asyncio
+async def test_a_closing_fill_still_retires_a_filled_position():
+    loop = PositionReviewLoop(runner=_Runner())
+    loop.add_position("iceberg_detector", "pos-c")
+    consumer = _consumer(loop)
+    await consumer._handle_message(_event("filled", "pos-c", position_status="open"))
+    await consumer._handle_message(_event("filled", "pos-c", position_status="closed"))
+    assert loop.active_positions() == []
