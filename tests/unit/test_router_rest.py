@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -372,13 +373,14 @@ async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
     mock_vc = AsyncMock()
     mock_cache = AsyncMock()
     mock_cache.get = AsyncMock(return_value="LOCKED")
-    router = OutputRouter(
-        nats_client=mock_nc,
-        vector_client=mock_vc,
-        ta_bot_url="http://ta-bot",
-        realtime_strategies_url="http://realtime",
-        cache=mock_cache,
-    )
+    with patch.dict(os.environ, {"CIO_REALTIME_PAUSE_MODE": "apply"}):
+        router = OutputRouter(
+            nats_client=mock_nc,
+            vector_client=mock_vc,
+            ta_bot_url="http://ta-bot",
+            realtime_strategies_url="http://realtime",
+            cache=mock_cache,
+        )
     context = MagicMock(spec=TriggerContext)
     context.strategy_id = "iceberg_detector"
     context.decision_id = "decision"
@@ -411,6 +413,63 @@ async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
         },
     )
     mock_cache.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_realtime_pause_defaults_to_shadow(caplog):
+    caplog.set_level(logging.INFO)
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    mock_cache = AsyncMock()
+    pause_registry = AsyncMock()
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "iceberg_detector"
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    context.trigger_payload = {"symbol": "BTCUSDT"}
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification="pause it",
+        thought_trace="test",
+    )
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("CIO_REALTIME_PAUSE_MODE", None)
+        router = OutputRouter(
+            nats_client=mock_nc,
+            vector_client=mock_vc,
+            ta_bot_url="http://ta-bot",
+            realtime_strategies_url="http://realtime",
+            cache=mock_cache,
+            pause_registry=pause_registry,
+        )
+    with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+        await router.route(context, decision)
+
+    put.assert_not_awaited()
+    pause_registry.touch_unavailable.assert_not_awaited()
+    pause_registry.remove.assert_not_awaited()
+    mock_cache.set.assert_not_called()
+    assert [record.message for record in caplog.records].count(
+        "SHADOW_PAUSE would pause realtime strategy"
+    ) == 1
+    record = next(
+        record
+        for record in caplog.records
+        if record.message == "SHADOW_PAUSE would pause realtime strategy"
+    )
+    assert record.strategy_id == "iceberg_detector"
+    assert record.symbol == "BTCUSDT"
+    assert record.justification == "pause it"
+    assert record.decision_id == "decision"
+    assert record.correlation_id == "correlation"
 
 
 @pytest.mark.asyncio
