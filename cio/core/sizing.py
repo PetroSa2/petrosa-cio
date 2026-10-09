@@ -15,7 +15,7 @@ import os
 
 from cio.core.net_ev import probe_notional
 from cio.models.context import TriggerContext
-from cio.models.net_ev import NetEvGate, SizingRecord
+from cio.models.net_ev import NetEvGate, RegimeAvailability, SizingRecord
 
 DEFAULT_KELLY_FRACTION = 0.25  # f_q: the operator's input, confirmed 0.25
 
@@ -37,7 +37,11 @@ def kelly_fraction(p: float, b_net: float) -> float:
 
 
 def size_order(
-    context: TriggerContext, gate: NetEvGate, drawdown_factor: float = 1.0
+    context: TriggerContext,
+    gate: NetEvGate,
+    drawdown_factor: float = 1.0,
+    regime_reason: str | None = None,
+    regime_state: RegimeAvailability | None = None,
 ) -> SizingRecord:
     """Size the order from the gate's posterior; the probe when there is no posterior or the data is flagged.
 
@@ -50,6 +54,19 @@ def size_order(
         record.final_size_usd = max(
             record.probe_usd, record.final_size_usd * drawdown_factor
         )
+    if regime_reason is not None:
+        # A low-confidence, stale or missing regime is unavailable: probe size only (decisions 22 and 3). A CAP,
+        # the last min() before the return, never a floor: a smaller or zero size stays as it is.
+        record.regime_reason = regime_reason
+        if regime_state is not None:
+            record.regime_confidence_value = regime_state.confidence_value
+            record.regime_min_confidence = regime_state.min_confidence
+            record.regime_min_confidence_source = regime_state.min_confidence_source
+        capped = min(record.final_size_usd, record.probe_usd)
+        if capped < record.final_size_usd:
+            record.size_before_regime_usd = record.final_size_usd
+            record.final_size_usd = capped
+            record.binding = "regime_probe"
     return record
 
 

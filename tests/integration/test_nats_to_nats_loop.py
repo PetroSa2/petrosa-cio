@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -34,7 +35,7 @@ async def test_full_nats_to_nats_loop(caplog):
             "trend_direction": "up",
             "confidence": "0.95",
         },
-        "metadata": {"timestamp": "2026-03-08T17:00:00Z", "collection": "live"},
+        "metadata": {"timestamp": datetime.now(UTC).isoformat(), "collection": "live"},
     }
 
     tradeengine_data = {

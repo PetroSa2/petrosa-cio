@@ -95,6 +95,17 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 SUMMARY = SummaryLog()
 
+# Regime freshness and availability (petrosa-cio#326): how old the regime that informed a decision was, and how
+# often it was unavailable (stale, low confidence or missing) and the order went at probe size only
+REGIME_AGE = meter.create_histogram(
+    "cio_regime_age_seconds",
+    description="Age of the data-manager regime (now minus its computation time) at decision time",
+    unit="s",
+)
+REGIME_UNAVAILABLE = meter.create_counter(
+    "cio_regime_unavailable_total",
+    description="Decisions whose regime was unavailable (reason: regime_stale, regime_low_confidence, regime_missing)",
+)
 # LLM Performance Metrics
 LLM_LATENCY = meter.create_histogram(
     "cio_llm_latency_seconds",

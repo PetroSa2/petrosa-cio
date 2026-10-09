@@ -5,10 +5,16 @@ from cio.core.drawdown import (
     evaluate_drawdown,
     is_closing_intent,
 )
-from cio.core.metrics import RISK_GATE_CONTEXT_FALLBACK, RISK_GATE_REAL_BREACH
+from cio.core.metrics import (
+    REGIME_AGE,
+    REGIME_UNAVAILABLE,
+    RISK_GATE_CONTEXT_FALLBACK,
+    RISK_GATE_REAL_BREACH,
+)
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import log_gate
 from cio.core.order_levels import carried_order_distances
+from cio.core.regime_policy import regime_availability
 from cio.core.sizing import size_order
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
 
@@ -41,6 +47,10 @@ REGIME_LEVERAGE_CAPS = {
 }
 DEFAULT_LEVERAGE_CAP = 1.0
 
+# CAPITULATION and CHOPPY block new entries, but only on a CONFIDENT regime: a low-confidence one is
+# unavailable (probe size only, see regime_policy.py), not blocking. data-manager reports `transitional`
+# (mapped to CHOPPY) at a constant low confidence and nothing maps to CAPITULATION yet, so these blocks only
+# fire once data-manager reports those regimes with confidence (petrosa-cio#294).
 REGIME_HARD_BLOCKS = {
     RegimeEnum.CAPITULATION: "regime_block: CAPITULATION — capital preservation mode, no new entries",
     RegimeEnum.CHOPPY: "regime_block: CHOPPY — signal quality too low, skip to avoid noise trades",
@@ -159,11 +169,23 @@ class CodeEngine:
                 extra={"correlation_id": context.correlation_id},
             )
 
-        # 2. REGIME HARD BLOCKS (Fix 4)
-        if (
-            context.regime.regime in REGIME_HARD_BLOCKS
-            and context.regime.regime_confidence != "low"
-        ):
+        # 2. REGIME HARD BLOCKS (Fix 4): only on a fresh, confident regime. A stale, low-confidence or missing
+        # regime is unavailable: probe size only (below), never a block (petrosa-cio#294, #326).
+        regime_state = regime_availability(context.regime)
+        if regime_state.age_seconds is not None:
+            REGIME_AGE.record(regime_state.age_seconds)
+        if not regime_state.available:
+            REGIME_UNAVAILABLE.add(1, {"reason": str(regime_state.reason)})
+            logger.info(
+                "REGIME_UNAVAILABLE %s: probe size only, no regime block",
+                regime_state.reason,
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "regime": str(context.regime.regime),
+                    "age_seconds": regime_state.age_seconds,
+                },
+            )
+        if context.regime.regime in REGIME_HARD_BLOCKS and regime_state.available:
             result.hard_blocked = True
             result.block_reason = REGIME_HARD_BLOCKS[context.regime.regime]
             logger.warning(
@@ -235,7 +257,13 @@ class CodeEngine:
                 if drawdown.action == "reduce" and not closing and drawdown_enforced()
                 else 1.0
             )
-            sizing = size_order(context, result.net_ev_gate, factor)
+            sizing = size_order(
+                context,
+                result.net_ev_gate,
+                factor,
+                regime_state.reason,
+                regime_state,
+            )
             result.sizing = sizing
             result.kelly_fraction = sizing.kelly_fraction
             result.kelly_position_usd = sizing.final_size_usd
