@@ -1341,3 +1341,135 @@ async def test_output_router_rest_fail_safe_create_task_exception_logged(caplog)
             await router.route(context, decision)  # must not raise
 
     assert "Failed to fire fail-safe REST pause" in caplog.text
+
+
+def _pause_decision(justification="pause it"):
+    return DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.PAUSE_STRATEGY,
+        justification=justification,
+        thought_trace="test",
+    )
+
+
+def _pause_context(strategy_id):
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = strategy_id
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    context.trigger_payload = {"symbol": "BTCUSDT"}
+    return context
+
+
+def _pause_router(mode, *, pause_registry=None, cache=None):
+    env = {} if mode is None else {"CIO_REALTIME_PAUSE_MODE": mode}
+    with patch.dict(os.environ, env, clear=False):
+        if mode is None:
+            os.environ.pop("CIO_REALTIME_PAUSE_MODE", None)
+        return OutputRouter(
+            nats_client=AsyncMock(),
+            vector_client=AsyncMock(),
+            ta_bot_url="http://ta-bot",
+            realtime_strategies_url="http://realtime",
+            cache=cache or AsyncMock(),
+            pause_registry=pause_registry,
+        )
+
+
+@pytest.mark.parametrize("raw", ["bogus", "", "  APPLYY "])
+def test_an_invalid_realtime_pause_mode_falls_back_to_shadow_with_a_warning(
+    raw, caplog
+):
+    caplog.set_level(logging.WARNING)
+    router = _pause_router(raw)
+    assert router.realtime_pause_mode == "shadow"
+    assert (
+        "CIO_REALTIME_PAUSE_MODE" in caplog.text
+        and "invalid; using shadow" in caplog.text
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, "shadow"),
+        ("shadow", "shadow"),
+        (" SHADOW ", "shadow"),
+        ("apply", "apply"),
+        (" Apply", "apply"),
+    ],
+)
+def test_the_realtime_pause_mode_is_read_from_the_environment(raw, expected, caplog):
+    caplog.set_level(logging.WARNING)
+    assert _pause_router(raw).realtime_pause_mode == expected
+    assert "invalid; using shadow" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_apply_mode_keeps_todays_realtime_pause_put_and_registry():
+    registry = AsyncMock()
+    router = _pause_router("apply", pause_registry=registry)
+    with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+    put.assert_awaited_once()
+    assert put.await_args.args[0] == (
+        "http://realtime/api/v1/strategies/iceberg_detector/state"
+    )
+    assert put.await_args.kwargs["json"]["state"] == "paused"
+    registry.remove.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_without_a_registry_still_makes_no_call(caplog):
+    caplog.set_level(logging.INFO)
+    router = _pause_router("shadow", pause_registry=None)
+    with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+    put.assert_not_awaited()
+    assert "SHADOW_PAUSE would pause realtime strategy" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_shadow_mode_in_dry_run_logs_and_makes_no_call(caplog):
+    caplog.set_level(logging.INFO)
+    registry = AsyncMock()
+    router = _pause_router("shadow", pause_registry=registry)
+    with (
+        patch.dict(os.environ, {"DRY_RUN": "true"}),
+        patch.object(router.http_client, "put", new_callable=AsyncMock) as put,
+    ):
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+    put.assert_not_awaited()
+    registry.remove.assert_not_awaited()
+    registry.touch_unavailable.assert_not_awaited()
+    assert "SHADOW_PAUSE would pause realtime strategy" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ta_bot_pauses_are_unaffected_by_the_realtime_shadow_default(caplog):
+    caplog.set_level(logging.INFO)
+    registry = AsyncMock()
+    cache = AsyncMock()
+    cache.get = AsyncMock(return_value=None)  # not frozen: the pause is applied
+    router = _pause_router(
+        None, pause_registry=registry, cache=cache
+    )  # the shadow default
+    config_get = MagicMock(status_code=200)
+    config_get.json.return_value = {"data": {"strategies": {}}}
+    with (
+        patch.object(
+            router.http_client, "get", new_callable=AsyncMock, return_value=config_get
+        ),
+        patch.object(router.http_client, "post", new_callable=AsyncMock) as post,
+    ):
+        await router.route(_pause_context("shooting_star_reversal"), _pause_decision())
+    assert "SHADOW_PAUSE" not in caplog.text
+    registry.remove.assert_awaited_once()  # the pause registry is used for a TA-bot strategy
+    post.assert_awaited_once()  # a TA-bot pause is a config POST, as before
+    assert post.await_args.args[0] == "http://ta-bot/api/v1/config/application"
