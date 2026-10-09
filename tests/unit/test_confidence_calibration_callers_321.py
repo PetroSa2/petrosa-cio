@@ -162,13 +162,13 @@ def test_service_status_returns_the_strategys_group_from_the_report() -> None:
                 ]
             }
 
-    import asyncio
+    async def go():
+        service = Service()
+        service.warm()
+        await service.wait_refresh()
+        return await service.status("strategy")
 
-    service = Service()
-    assert asyncio.run(service.status("strategy")) == {
-        "strategy_id": "strategy",
-        "calibrated": False,
-    }
+    assert asyncio.run(go()) == {"strategy_id": "strategy", "calibrated": False}
 
 
 def test_service_status_is_none_for_a_strategy_without_a_group() -> None:
@@ -178,10 +178,14 @@ def test_service_status_is_none_for_a_strategy_without_a_group() -> None:
         async def report(self, timeout=None):
             return {"groups": [{"strategy_id": "other", "calibrated": True}]}
 
-    import asyncio
+    async def go(strategy):
+        service = Service()
+        service.warm()
+        await service.wait_refresh()
+        return await service.status(strategy)
 
-    assert asyncio.run(Service().status("strategy")) is None
-    assert asyncio.run(Service().status("")) is None
+    assert asyncio.run(go("strategy")) is None
+    assert asyncio.run(go("")) is None
 
 
 def test_calibrated_context_falls_back_to_the_neutral_input_for_an_unreadable_confidence() -> (
@@ -247,15 +251,18 @@ def test_two_decisions_within_the_ttl_make_one_fetch(monkeypatch) -> None:
     service, cls = _service_with_fetches([GOOD], clock)
 
     async def two():
-        first = await service.status("s")
+        first = await service.status("s")  # cold: the neutral prior, the refresh starts
+        await service.wait_refresh()
         clock.now += 899
         second = await service.status("s")
+        await service.wait_refresh()
         return first, second
 
     first, second = asyncio.run(two())
-    assert first == second == {"strategy_id": "s", "calibrated": True}
+    assert first is None
+    assert second == {"strategy_id": "s", "calibrated": True}
     assert cls.calls == 1
-    assert cls.timeouts == [2.0]  # the short decision-path timeout, not the endpoint's
+    assert cls.timeouts == [120.0]  # the background timeout, not the endpoint's default
 
 
 def test_the_report_is_fetched_again_after_the_ttl(monkeypatch) -> None:
@@ -265,14 +272,21 @@ def test_the_report_is_fetched_again_after_the_ttl(monkeypatch) -> None:
 
     async def run():
         await service.status("s")
+        await service.wait_refresh()
         clock.now += 61
-        await service.status("s")
+        stale = await service.status(
+            "s"
+        )  # served at once, the refresh runs in the background
+        await service.wait_refresh()
+        return stale
 
-    asyncio.run(run())
+    assert asyncio.run(run()) == {"strategy_id": "s", "calibrated": True}
     assert cls.calls == 2
 
 
-def test_a_failed_fetch_is_not_retried_until_the_ttl(monkeypatch, caplog) -> None:
+def test_a_failed_fetch_backs_off_and_warns_once_per_attempt(
+    monkeypatch, caplog
+) -> None:
     import logging
 
     monkeypatch.delenv("CIO_CALIBRATION_TTL_SECONDS", raising=False)
@@ -282,23 +296,29 @@ def test_a_failed_fetch_is_not_retried_until_the_ttl(monkeypatch, caplog) -> Non
 
     async def run():
         results = [await service.status("s")]
-        for _ in range(5):  # five more decisions inside the TTL
-            clock.now += 100
+        await service.wait_refresh()
+        for _ in range(5):  # five more decisions inside the first backoff (60 s)
+            clock.now += 10
             results.append(await service.status("s"))
+            await service.wait_refresh()
         return results
 
     assert asyncio.run(run()) == [None] * 6  # no report: the neutral prior
     assert cls.calls == 1
     warnings = [r for r in caplog.records if "report unavailable" in r.getMessage()]
-    assert len(warnings) == 1  # at most one warning per TTL
+    assert len(warnings) == 1
     assert "using the neutral prior" in warnings[0].getMessage()
-    # after the TTL it tries again, and warns again
-    clock.now += 500
-    asyncio.run(service.status("s"))
+    assert "exc_type=RuntimeError" in warnings[0].getMessage()
+    # after the backoff it tries again, and the next delay is longer (120 s)
+    clock.now += 61
+
+    async def again():
+        await service.status("s")
+        await service.wait_refresh()
+
+    asyncio.run(again())
     assert cls.calls == 2
-    assert (
-        len([r for r in caplog.records if "report unavailable" in r.getMessage()]) == 2
-    )
+    assert service._retry_at - clock.now == 120.0
 
 
 def test_a_failed_refresh_keeps_the_last_good_report(monkeypatch, caplog) -> None:
@@ -310,15 +330,18 @@ def test_a_failed_refresh_keeps_the_last_good_report(monkeypatch, caplog) -> Non
     caplog.set_level(logging.WARNING, logger="cio.core.confidence_calibration")
 
     async def run():
-        first = await service.status("s")
+        await service.status("s")
+        await service.wait_refresh()
         clock.now += 61
-        second = await service.status("s")  # the refresh fails
+        second = await service.status("s")  # the refresh fails in the background
+        await service.wait_refresh()
         clock.now += 30
         third = await service.status("s")  # backed off: no new fetch
-        return first, second, third
+        await service.wait_refresh()
+        return second, third
 
-    first, second, third = asyncio.run(run())
-    assert first == second == third == {"strategy_id": "s", "calibrated": True}
+    second, third = asyncio.run(run())
+    assert second == third == {"strategy_id": "s", "calibrated": True}
     assert cls.calls == 2
     assert any("using the last good report" in r.getMessage() for r in caplog.records)
 
@@ -338,10 +361,14 @@ def test_concurrent_decisions_share_one_fetch(monkeypatch) -> None:
 
     async def run():
         service = Service()
-        return await asyncio.gather(*(service.status("s") for _ in range(10)))
+        cold = await asyncio.gather(*(service.status("s") for _ in range(10)))
+        await service.wait_refresh()
+        warm = await asyncio.gather(*(service.status("s") for _ in range(10)))
+        return cold, warm
 
-    results = asyncio.run(run())
-    assert all(r == {"strategy_id": "s", "calibrated": True} for r in results)
+    cold, warm = asyncio.run(run())
+    assert cold == [None] * 10  # nobody waited for the fetch
+    assert all(r == {"strategy_id": "s", "calibrated": True} for r in warm)
     assert Service.calls == 1
 
 
@@ -353,7 +380,7 @@ def test_the_ttl_and_timeout_are_env_inputs_with_defaults(monkeypatch) -> None:
 
     monkeypatch.delenv("CIO_CALIBRATION_TTL_SECONDS", raising=False)
     monkeypatch.delenv("CIO_CALIBRATION_TIMEOUT_SECONDS", raising=False)
-    assert (calibration_ttl_seconds(), calibration_timeout_seconds()) == (900.0, 2.0)
+    assert (calibration_ttl_seconds(), calibration_timeout_seconds()) == (900.0, 120.0)
     for bad in ("0", "-5", "x"):
         monkeypatch.setenv("CIO_CALIBRATION_TTL_SECONDS", bad)
         assert calibration_ttl_seconds() == 900.0

@@ -9,9 +9,18 @@ import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal, TypedDict
 
 import httpx
+
+from cio.core.metrics import REPORT_AGE, REPORT_REFRESH
+from cio.core.report_freshness import (
+    backoff_seconds,
+    computed_at_of,
+    report_age_seconds,
+    report_max_age_seconds,
+)
 
 logger = logging.getLogger(__name__)
 _last_unavailable_warning = 0.0
@@ -222,7 +231,7 @@ def build_report(
 
 
 DEFAULT_CALIBRATION_TTL_SECONDS = 900.0
-DEFAULT_CALIBRATION_TIMEOUT_SECONDS = 2.0
+DEFAULT_CALIBRATION_TIMEOUT_SECONDS = 120.0
 
 
 def _positive_float_env(name: str, default: float) -> float:
@@ -234,14 +243,18 @@ def _positive_float_env(name: str, default: float) -> float:
 
 
 def calibration_ttl_seconds() -> float:
-    """How long a calibration report (or a failed fetch) is reused: ``CIO_CALIBRATION_TTL_SECONDS``, 900 s."""
+    """How long a calibration report is reused before the next background refresh:
+    ``CIO_CALIBRATION_TTL_SECONDS``, 900 s."""
     return _positive_float_env(
         "CIO_CALIBRATION_TTL_SECONDS", DEFAULT_CALIBRATION_TTL_SECONDS
     )
 
 
 def calibration_timeout_seconds() -> float:
-    """The longest a decision waits for the report: ``CIO_CALIBRATION_TIMEOUT_SECONDS``, 2 s."""
+    """The timeout of the background calibration refresh: ``CIO_CALIBRATION_TIMEOUT_SECONDS``, 120 s.
+
+    No decision waits for it (the refresh runs in the background); the endpoint is slow (minutes) today.
+    """
     return _positive_float_env(
         "CIO_CALIBRATION_TIMEOUT_SECONDS", DEFAULT_CALIBRATION_TIMEOUT_SECONDS
     )
@@ -268,8 +281,16 @@ class ConfidenceCalibrationService:
             or os.getenv("DATA_MANAGER_URL", "http://petrosa-data-manager:80")
         ).rstrip("/")
         self._clock = clock or time.monotonic
-        self._cache: tuple[float, CalibrationReport | None] | None = None
-        self._lock = asyncio.Lock()
+        # the last good report, when CIO fetched it, when data-manager computed it; the next refresh is not
+        # before ``_retry_at``; a refresh in flight is shared by every decision
+        self._good: CalibrationReport | None = None
+        self._good_at: float | None = None
+        self._good_computed_at: datetime | None = None
+        self._retry_at = 0.0
+        self._failures = 0
+        self._task: asyncio.Future[None] | None = None
+        self._too_old_logged = False
+        self._last_computed_at: datetime | None = None
 
     async def report(self, timeout: float | None = None) -> CalibrationReport:
         async def fetch(client: httpx.AsyncClient) -> dict[str, Any]:
@@ -285,38 +306,94 @@ class ConfidenceCalibrationService:
         else:
             async with httpx.AsyncClient(timeout=timeout or 15.0) as client:
                 payload = await fetch(client)
+        self._last_computed_at = computed_at_of(payload)
         return build_report(_records_from_response(payload))
 
-    async def cached_report(self) -> CalibrationReport | None:
-        """The report for the decision path: at most one fetch per TTL, the last good one on failure, else None."""
-        if self._cache is not None and self._clock() < self._cache[0]:
-            return self._cache[1]
-        async with self._lock:
-            # another decision may have refreshed it while this one waited for the lock
-            if self._cache is not None and self._clock() < self._cache[0]:
-                return self._cache[1]
-            last_good = self._cache[1] if self._cache is not None else None
-            ttl = calibration_ttl_seconds()
-            try:
-                report: CalibrationReport | None = await self.report(
-                    timeout=calibration_timeout_seconds()
-                )
-            except Exception as exc:  # noqa: BLE001 - calibration cannot stop decisions
-                report = last_good
+    def cached_report(self) -> CalibrationReport | None:
+        """The report for the decision path. **Never awaits a data-manager call** (petrosa-cio#312 follow-up).
+
+        Returns the last good report while it is younger than ``CIO_REPORT_MAX_AGE_SECONDS`` (else None: the neutral
+        prior) and, when a refresh is due, starts one in the background (one at a time).
+        """
+        self._start_refresh_if_due()
+        return self._usable_report()
+
+    def _usable_report(self) -> CalibrationReport | None:
+        if self._good is None or self._good_at is None:
+            return None
+        age = report_age_seconds(
+            since_fetch=self._clock() - self._good_at,
+            computed_at=self._good_computed_at,
+        )
+        REPORT_AGE.record(age, {"report": "calibration"})
+        if age > report_max_age_seconds():
+            if not self._too_old_logged:
+                self._too_old_logged = True
                 logger.warning(
-                    "Confidence calibration report unavailable (%s); %s, next attempt in %.0fs",
-                    exc,
-                    "using the last good report"
-                    if last_good is not None
-                    else "using the neutral prior",
-                    ttl,
+                    "REPORT_TOO_OLD report=calibration age_s=%.0f max_age_s=%.0f: using the neutral prior",
+                    age,
+                    report_max_age_seconds(),
                 )
-            self._cache = (self._clock() + ttl, report)
-            return report
+            return None
+        return self._good
+
+    def _start_refresh_if_due(self) -> None:
+        if self._clock() < self._retry_at:
+            return
+        if self._task is not None and not self._task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # no loop: nothing to refresh on
+            return
+        self._task = loop.create_task(self.refresh())
+
+    def warm(self) -> None:
+        """Start the first refresh now (at startup), off the decision path. Needs the running loop."""
+        self._start_refresh_if_due()
+
+    async def wait_refresh(self) -> None:
+        """Wait for the refresh in flight, if any (tests and shutdown; the decision path never calls this)."""
+        task = self._task
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+
+    async def refresh(self) -> None:
+        """Fetch the report and keep it; a failure keeps the last good one and backs off (60 s ... 15 min)."""
+        ttl = calibration_ttl_seconds()
+        try:
+            payload_report = await self._fetch(timeout=calibration_timeout_seconds())
+        except Exception as exc:  # noqa: BLE001 - calibration cannot stop decisions
+            self._failures += 1
+            delay = backoff_seconds(self._failures)
+            self._retry_at = self._clock() + delay
+            REPORT_REFRESH.add(1, {"report": "calibration", "outcome": "failed"})
+            logger.warning(
+                "Confidence calibration report unavailable (exc_type=%s %s); %s, next attempt in %.0fs",
+                type(exc).__name__,
+                exc,
+                "using the last good report"
+                if self._good is not None
+                else "using the neutral prior",
+                delay,
+            )
+            return
+        report, computed_at = payload_report
+        self._good = report
+        self._good_at = self._clock()
+        self._good_computed_at = computed_at
+        self._too_old_logged = False
+        self._failures = 0
+        self._retry_at = self._clock() + ttl
+        REPORT_REFRESH.add(1, {"report": "calibration", "outcome": "ok"})
+
+    async def _fetch(self, timeout: float) -> tuple[CalibrationReport, Any]:
+        report = await self.report(timeout=timeout)
+        return report, getattr(self, "_last_computed_at", None)
 
     async def status(self, strategy_id: str) -> dict[str, Any] | None:
         """Return the strategy's calibration status from the shared report contract."""
-        report = await self.cached_report()
+        report = self.cached_report()
         if report is None:
             return None
         for group in report["groups"]:
