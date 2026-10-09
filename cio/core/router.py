@@ -752,9 +752,7 @@ class OutputRouter:
             audit_copy_payload["authority_fallback_from"] = original_action.value
         audit_base = os.getenv("NATS_TOPIC_DECISION_AUDIT")
         if not audit_base:
-            audit_base = (
-                "qa.cio.decision.audit" if qa_intents else "cio.decision.audit"
-            )
+            audit_base = "qa.cio.decision.audit" if qa_intents else "cio.decision.audit"
         dispatch_tasks_data.append(
             (
                 f"{audit_base.rstrip('.>')}.{action.value}",

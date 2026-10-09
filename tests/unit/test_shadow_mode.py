@@ -112,9 +112,7 @@ async def test_output_router_shadow_mode():
 
         # 4. Assertions
         assert mock_nc.publish.call_count == 2
-        assert {
-            call.args[0] for call in mock_nc.publish.call_args_list
-        } == {
+        assert {call.args[0] for call in mock_nc.publish.call_args_list} == {
             "qa.signals.trading.test_strat",
             "qa.cio.decision.audit.execute",
         }
