@@ -193,9 +193,9 @@ class OutputRouter:
         self.realtime_strategies_url = realtime_strategies_url or os.getenv(
             "REALTIME_STRATEGIES_URL", ""
         )
-        self.realtime_pause_mode = os.getenv(
-            "CIO_REALTIME_PAUSE_MODE", "shadow"
-        ).strip().lower()
+        self.realtime_pause_mode = (
+            os.getenv("CIO_REALTIME_PAUSE_MODE", "shadow").strip().lower()
+        )
         if self.realtime_pause_mode not in {"shadow", "apply"}:
             logger.warning(
                 "CONFIG_WARNING: CIO_REALTIME_PAUSE_MODE=%s is invalid; using shadow",
@@ -643,7 +643,11 @@ class OutputRouter:
                         "correlation_id": correlation_id,
                     },
                 )
-            if self.pause_registry is not None and not is_dry_run and not is_realtime_shadow:
+            if (
+                self.pause_registry is not None
+                and not is_dry_run
+                and not is_realtime_shadow
+            ):
                 if is_llm_unavailable:
                     await self.pause_registry.touch_unavailable(strategy_id)
                 else:
