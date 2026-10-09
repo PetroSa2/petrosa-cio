@@ -174,6 +174,17 @@ class CodeEngine:
         regime_state = regime_availability(context.regime)
         if regime_state.age_seconds is not None:
             REGIME_AGE.record(regime_state.age_seconds)
+        if not regime_state.available:
+            REGIME_UNAVAILABLE.add(1, {"reason": str(regime_state.reason)})
+            logger.info(
+                "REGIME_UNAVAILABLE %s: probe size only, no regime block",
+                regime_state.reason,
+                extra={
+                    "correlation_id": context.correlation_id,
+                    "regime": str(context.regime.regime),
+                    "age_seconds": regime_state.age_seconds,
+                },
+            )
         if context.regime.regime in REGIME_HARD_BLOCKS and regime_state.available:
             result.hard_blocked = True
             result.block_reason = REGIME_HARD_BLOCKS[context.regime.regime]
@@ -246,17 +257,6 @@ class CodeEngine:
                 if drawdown.action == "reduce" and not closing and drawdown_enforced()
                 else 1.0
             )
-            if not regime_state.available:
-                REGIME_UNAVAILABLE.add(1, {"reason": str(regime_state.reason)})
-                logger.info(
-                    "REGIME_UNAVAILABLE %s: probe size only",
-                    regime_state.reason,
-                    extra={
-                        "correlation_id": context.correlation_id,
-                        "regime": str(context.regime.regime),
-                        "age_seconds": regime_state.age_seconds,
-                    },
-                )
             sizing = size_order(
                 context,
                 result.net_ev_gate,

@@ -178,7 +178,13 @@ class RegimeAvailability(BaseModel):
 
     available: bool
     reason: (
-        Literal["regime_low_confidence", "regime_stale", "regime_missing"] | None
+        Literal[
+            "regime_low_confidence",
+            "regime_stale",
+            "regime_missing",
+            "regime_age_unknown",
+        ]
+        | None
     ) = None
     confidence: str | None = None
     confidence_value: float | None = None

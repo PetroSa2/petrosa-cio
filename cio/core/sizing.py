@@ -48,23 +48,25 @@ def size_order(
     ``drawdown_factor`` (0.5 at the drawdown reduce step) scales the result, never below the probe.
     """
     record = _size_order(context, gate)
-    if regime_reason is not None:
-        # A low-confidence or stale regime is unavailable: probe size only (decisions 22 and 3)
-        record.size_before_regime_usd = record.final_size_usd
-        record.final_size_usd = record.probe_usd
-        record.binding = "regime_probe"
-        record.regime_reason = regime_reason
-        if regime_state is not None:
-            record.regime_confidence_value = regime_state.confidence_value
-            record.regime_min_confidence = regime_state.min_confidence
-            record.regime_min_confidence_source = regime_state.min_confidence_source
-        return record
     if drawdown_factor < 1.0:
         record.size_before_drawdown_usd = record.final_size_usd
         record.drawdown_factor = drawdown_factor
         record.final_size_usd = max(
             record.probe_usd, record.final_size_usd * drawdown_factor
         )
+    if regime_reason is not None:
+        # A low-confidence, stale or missing regime is unavailable: probe size only (decisions 22 and 3). A CAP,
+        # the last min() before the return, never a floor: a smaller or zero size stays as it is.
+        record.regime_reason = regime_reason
+        if regime_state is not None:
+            record.regime_confidence_value = regime_state.confidence_value
+            record.regime_min_confidence = regime_state.min_confidence
+            record.regime_min_confidence_source = regime_state.min_confidence_source
+        capped = min(record.final_size_usd, record.probe_usd)
+        if capped < record.final_size_usd:
+            record.size_before_regime_usd = record.final_size_usd
+            record.final_size_usd = capped
+            record.binding = "regime_probe"
     return record
 
 

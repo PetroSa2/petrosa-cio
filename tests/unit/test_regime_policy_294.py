@@ -131,13 +131,17 @@ def test_a_stale_regime_is_unavailable_even_when_confident(monkeypatch):
     assert regime_availability(_regime(age=timedelta(minutes=59))).available is True
 
 
-def test_an_unknown_computation_time_is_not_called_stale():
+def test_an_unknown_computation_time_is_unavailable_not_fresh():
+    # data-manager's regime without a timestamp: freshness cannot be shown, so staleness cannot be missed
     state = regime_availability(_regime(age=None))
-    assert (
-        state.available is True
-        and state.age_known is False
-        and state.age_seconds is None
-    )
+    assert (state.available, state.reason) == (False, "regime_age_unknown")
+    assert state.age_known is False and state.age_seconds is None
+
+
+def test_a_synthetic_regime_that_never_came_from_data_manager_is_not_judged_by_age():
+    synthetic = _regime(age=None, dm=None)
+    synthetic.primary_signal = "DETERMINISTIC_BYPASS"
+    assert regime_availability(synthetic).available is True
 
 
 def test_the_regime_carries_the_time_data_manager_computed_it():
@@ -504,3 +508,146 @@ def test_regime_freshness_is_monitored(monkeypatch):
     CodeEngine.run(_context(_missing()))
     assert len(ages) == 2 and ages[0] == pytest.approx(5 * 3600, abs=10)
     assert unavailable == ["regime_stale", "regime_missing"]
+
+
+# --- review of #309: the regime override is a cap, never a floor; unknown age; clock skew -------------
+def _sized(context, factor=1.0, state=None):
+    from cio.core.sizing import size_order
+
+    gate = CodeEngine.run(context).net_ev_gate
+    state = state or regime_availability(context.regime)
+    return size_order(context, gate, factor, state.reason, state)
+
+
+def test_a_size_above_the_probe_is_capped_to_it():
+    sizing = _sized(_context(_regime(confidence=ConfidenceLevel.LOW)))
+    assert sizing.final_size_usd == sizing.probe_usd
+    assert sizing.binding == "regime_probe"
+    assert sizing.size_before_regime_usd > sizing.probe_usd
+
+
+def test_a_size_below_the_probe_is_never_raised_by_the_regime(monkeypatch):
+    from cio.core import sizing as sizing_module
+
+    context = _context(_regime(confidence=ConfidenceLevel.LOW))
+    real = sizing_module._size_order
+
+    def smaller(ctx, gate):
+        record = real(ctx, gate)
+        record.final_size_usd = record.probe_usd / 4  # e.g. a smaller cap upstream
+        return record
+
+    monkeypatch.setattr(sizing_module, "_size_order", smaller)
+    sizing = _sized(context)
+    assert sizing.final_size_usd == sizing.probe_usd / 4  # cap, not floor
+    assert sizing.binding != "regime_probe"  # the cap did not bind
+    assert sizing.regime_reason == "regime_low_confidence"  # still recorded
+    assert sizing.size_before_regime_usd is None
+
+
+def test_a_zero_size_stays_zero_under_the_regime_cap(monkeypatch):
+    from cio.core import sizing as sizing_module
+
+    real = sizing_module._size_order
+
+    def zero(ctx, gate):
+        record = real(ctx, gate)
+        record.final_size_usd = 0.0
+        return record
+
+    monkeypatch.setattr(sizing_module, "_size_order", zero)
+    sizing = _sized(_context(_regime(age=timedelta(hours=5))))
+    assert sizing.final_size_usd == 0.0 and sizing.binding != "regime_probe"
+
+
+def test_the_drawdown_reduce_factor_still_applies_under_an_unavailable_regime():
+    context = _context(_regime(confidence=ConfidenceLevel.LOW))
+    sizing = _sized(context, factor=0.5)
+    assert sizing.drawdown_factor == 0.5 and sizing.size_before_drawdown_usd is not None
+    assert (
+        sizing.final_size_usd == sizing.probe_usd
+    )  # the floor of the reduce step, also the cap
+
+
+def test_the_regime_cap_is_the_last_step_of_sizing():
+    import inspect
+
+    from cio.core import sizing as sizing_module
+
+    source = inspect.getsource(sizing_module.size_order)
+    assert source.index("drawdown_factor < 1.0") < source.index(
+        "min(record.final_size_usd"
+    )
+    assert "return record" in source.split("min(record.final_size_usd")[1]
+    assert source.count("return record") == 1  # no early exit that skips a later cap
+
+
+def test_an_unknown_age_is_probe_size_never_a_block_and_is_counted(monkeypatch):
+    from cio.core import engine as engine_module
+
+    counted = []
+    monkeypatch.setattr(
+        engine_module.REGIME_UNAVAILABLE,
+        "add",
+        lambda value, attributes: counted.append(attributes["reason"]),
+    )
+    result = CodeEngine.run(_context(_regime(kind=RegimeEnum.CHOPPY, age=None)))
+    assert (
+        result.hard_blocked is False
+    )  # a confident CHOPPY of unknown age must not block
+    assert (result.sizing.binding, result.sizing.regime_reason) == (
+        "regime_probe",
+        "regime_age_unknown",
+    )
+    assert counted == ["regime_age_unknown"]
+
+
+def test_the_unavailable_count_does_not_depend_on_the_levels_being_known(monkeypatch):
+    from cio.core import engine as engine_module
+
+    counted = []
+    monkeypatch.setattr(
+        engine_module.REGIME_UNAVAILABLE,
+        "add",
+        lambda value, attributes: counted.append(attributes["reason"]),
+    )
+    context = _context(_regime(age=timedelta(hours=5)))
+    context.trigger_payload = {
+        "side": "BUY",
+        "entry_price": 100.0,
+    }  # no stop, no target
+    CodeEngine.run(context)
+    assert counted == ["regime_stale"]
+
+
+def test_a_future_timestamp_warns_once_per_interval(caplog, monkeypatch):
+    from cio.core import regime_policy
+
+    monkeypatch.setattr(regime_policy, "_last_skew_warning", None)
+    future = _regime(age=-timedelta(minutes=20))
+    with caplog.at_level("WARNING", logger="cio.core.regime_policy"):
+        first = regime_availability(future)
+        regime_availability(future)
+    warnings = [r for r in caplog.records if "REGIME_TIMESTAMP_IN_FUTURE" in r.message]
+    assert len(warnings) == 1
+    assert first.age_seconds == 0.0  # clamped, still fresh
+    # a small skew is not worth a warning
+    caplog.clear()
+    monkeypatch.setattr(regime_policy, "_last_skew_warning", None)
+    with caplog.at_level("WARNING", logger="cio.core.regime_policy"):
+        regime_availability(_regime(age=-timedelta(minutes=2)))
+    assert not caplog.records
+
+
+def test_the_warning_returns_after_an_interval(caplog, monkeypatch):
+    from cio.core import regime_policy
+
+    monkeypatch.setattr(regime_policy, "_last_skew_warning", None)
+    ticks = iter([1000.0, 1000.0 + 901.0])
+    monkeypatch.setattr(regime_policy.time, "monotonic", lambda: next(ticks))
+    monkeypatch.delenv("CIO_REGIME_ANALYZER_INTERVAL_SECONDS", raising=False)
+    future = _regime(age=-timedelta(minutes=20))
+    with caplog.at_level("WARNING", logger="cio.core.regime_policy"):
+        regime_availability(future)
+        regime_availability(future)
+    assert len([r for r in caplog.records if "IN_FUTURE" in r.message]) == 2

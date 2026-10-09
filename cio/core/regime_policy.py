@@ -6,6 +6,8 @@
   The age is now minus the time data-manager computed the regime (its ``metadata.timestamp``; a naive time is UTC);
   the interval is ``CIO_REGIME_ANALYZER_INTERVAL_SECONDS`` or its labelled 900 s fallback. An unknown time is not
   called stale.
+* **Unknown age** (data-manager's regime without a computation time): freshness cannot be shown, so it is
+  unavailable too (``regime_age_unknown``): probe size, never a block.
 * **Missing regime** (the fetch failed or data-manager has none for the pair): neutral, probe size only
   (``regime_missing``); never a block and never an error.
 * **turbulent_illiquidity** (decision 21): no block. The cost uplift is the *measured* per-regime slippage of
@@ -22,12 +24,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import time
 from datetime import UTC, datetime
 
 from cio.models.enums import ConfidenceLevel
 from cio.models.net_ev import RegimeAvailability
 from cio.models.regime import RegimeResult, regime_min_confidence
+
+logger = logging.getLogger(__name__)
+
+#: A regime computed more than this far ahead of now is clock skew worth a warning (the age is clamped to 0)
+FUTURE_SKEW_WARN_SECONDS = 300.0
+_last_skew_warning: float | None = None
 
 DEFAULT_ANALYZER_INTERVAL_SECONDS = 900.0  # data-manager ANALYTICS_INTERVAL
 STALE_FLOOR_SECONDS = 3600.0
@@ -61,6 +71,23 @@ def stale_after_seconds() -> float:
     return max(STALE_INTERVALS * analyzer_interval_seconds(), STALE_FLOOR_SECONDS)
 
 
+def _warn_future_timestamp(stamp: datetime, now: datetime) -> None:
+    """Warn at most once per analyzer interval that the regime claims to be computed in the future."""
+    global _last_skew_warning
+    tick = time.monotonic()
+    if (
+        _last_skew_warning is not None
+        and tick - _last_skew_warning < analyzer_interval_seconds()
+    ):
+        return
+    _last_skew_warning = tick
+    logger.warning(
+        "REGIME_TIMESTAMP_IN_FUTURE computed_at=%s now=%s: clock skew between data-manager and cio",
+        stamp.isoformat(),
+        now.isoformat(),
+    )
+
+
 def regime_availability(
     regime: RegimeResult, now: datetime | None = None
 ) -> RegimeAvailability:
@@ -72,7 +99,10 @@ def regime_availability(
     computed_at = regime.computed_at
     if computed_at is not None:
         stamp = computed_at if computed_at.tzinfo else computed_at.replace(tzinfo=UTC)
-        age = max(0.0, (now - stamp).total_seconds())
+        raw_age = (now - stamp).total_seconds()
+        if raw_age < -FUTURE_SKEW_WARN_SECONDS:
+            _warn_future_timestamp(stamp, now)
+        age = max(0.0, raw_age)
     minimum, minimum_source = regime_min_confidence()
     reason = None
     if regime.data_manager_regime is None and regime.primary_signal in MISSING_SIGNALS:
@@ -83,6 +113,10 @@ def regime_availability(
         reason = "regime_low_confidence"
     elif age is not None and age > stale_after:
         reason = "regime_stale"
+    elif age is None and regime.data_manager_regime is not None:
+        # data-manager's regime without a computation time: freshness cannot be shown, so it is not trusted
+        # (a synthetic regime, e.g. the deterministic bypass one, never came from data-manager and has none)
+        reason = "regime_age_unknown"
     return RegimeAvailability(
         available=reason is None,
         reason=reason,
