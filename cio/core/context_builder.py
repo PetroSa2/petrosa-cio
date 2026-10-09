@@ -698,27 +698,20 @@ class ContextBuilder:
         correlation_id: str,
         gaps: list[ContextGap] | None = None,
     ) -> MarketSignals:
-        """#202 — map real signal-producer fields onto the MarketSignals profile.
+        """Build the prompt-facing profile from the explicit market-data boundary.
 
-        The trigger payload carries the fields ta-bot / realtime-strategies
-        actually publish (``confidence``, ``strength``, ``current_price``,
-        ``action``/``side``/``signal_type``, and a ``metadata`` blob). The
-        regime-classifier prompt consumes the four profile fields
-        (signal_summary / volatility_percentile / trend_strength /
-        price_action_character); previously they were static placeholders,
-        so the prompt-contract rule #4 made the model self-report
-        MISSING_INPUT and the loop degraded to ``pause_strategy``.
-
-        This derives the profile from the real producer fields where present
-        (confidence -> volatility percentile, strength -> trend magnitude,
-        action -> price-action character, metadata -> signal summary) and
-        keeps the placeholder only for fields the payload truly does not
-        carry. Every field that still lands on a placeholder is recorded as a
-        degraded field on the model plus a ``ContextGap(surface=
-        'market_signals')`` and a WARNING line — the fallback is explicit,
-        never silent.
+        Signal metadata remains in the trigger payload for audit and routing,
+        but it must not become market context for a later decision cycle.
+        Missing market-data fields remain explicit through degraded fields,
+        context gaps, and a warning rather than silently using signal values.
         """
-        metadata = payload.get("metadata") or {}
+        market_data = payload.get("market_data")
+        if "market_data" in payload and not isinstance(market_data, dict):
+            market_data = {}
+        elif "market_data" not in payload:
+            market_data = payload
+        payload = market_data
+        metadata: dict[str, Any] = {}
 
         signal_summary = payload.get("signal_summary")
         if not signal_summary:

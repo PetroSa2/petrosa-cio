@@ -103,7 +103,14 @@ def test_build_market_signals_maps_real_producer_fields():
         "strength": "strong",
         "action": "buy",
         "current_price": 65000.0,
-        "metadata": {"signal_summary": "EMA alignment bullish"},
+        "metadata": {"signal_summary": "signal metadata must not leak"},
+        "market_data": {
+            "signal_summary": "EMA alignment bullish",
+            "volatility_percentile": 0.82,
+            "trend_strength": 0.75,
+            "price_action_character": "Bullish",
+            "current_price": 65000.0,
+        },
     }
 
     market_signals = builder._build_market_signals(payload, "cid-real", gaps=gaps)
@@ -121,10 +128,12 @@ def test_build_market_signals_maps_real_producer_fields():
 def test_build_market_signals_explicit_fields_win_over_derivation():
     builder = _make_builder()
     payload = {
-        "volatility_percentile": 0.2,
-        "trend_strength": 0.1,
-        "price_action_character": "Choppy",
-        "signal_summary": "Explicit",
+        "market_data": {
+            "volatility_percentile": 0.2,
+            "trend_strength": 0.1,
+            "price_action_character": "Choppy",
+            "signal_summary": "Explicit",
+        },
         "confidence": 0.9,
         "strength": "extreme",
         "action": "buy",
@@ -152,7 +161,14 @@ def test_build_market_signals_derives_summary_from_metadata_reasoning():
         "action": "sell",
         "current_price": 76551.55,
         "metadata": {
-            "reasoning": "Large hidden seller detected at 76546.1 (anchor)",
+            "reasoning": "signal metadata must not become market context",
+        },
+        "market_data": {
+            "signal_summary": "Large hidden seller detected at 76546.1 (anchor)",
+            "volatility_percentile": 0.75,
+            "trend_strength": 0.75,
+            "price_action_character": "Bearish",
+            "current_price": 76551.55,
         },
     }
 
@@ -182,6 +198,12 @@ def test_build_market_signals_derives_summary_from_metadata_reasoning():
                 "strength": "strong",
                 "timeframe": "15m",
                 "metadata": {"ema_fast": 65010.0, "ema_slow": 64950.0},
+                "market_data": {
+                    "signal_summary": "ema alignment bullish buy signal",
+                    "volatility_percentile": 0.82,
+                    "trend_strength": 0.75,
+                    "price_action_character": "Bullish",
+                },
             },
             "ema alignment bullish buy signal",
             id="bot-ta-analysis",
@@ -196,6 +218,12 @@ def test_build_market_signals_derives_summary_from_metadata_reasoning():
                 "strength": "strong",
                 "timeframe": "1m",
                 "metadata": {"spread_ratio": 2.5},
+                "market_data": {
+                    "signal_summary": "spread liquidity sell signal",
+                    "volatility_percentile": 0.7,
+                    "trend_strength": 0.75,
+                    "price_action_character": "Bearish",
+                },
             },
             "spread liquidity sell signal",
             id="realtime-strategies",
@@ -267,7 +295,13 @@ def test_build_market_signals_partial_degradation_keeps_real_fields():
     gaps = []
 
     market_signals = builder._build_market_signals(
-        {"confidence": 0.4, "current_price": 100.0}, "cid-partial", gaps=gaps
+        {
+            "confidence": 0.99,
+            "metadata": {"trend_strength": 0.99},
+            "market_data": {"volatility_percentile": 0.4, "current_price": 100.0},
+        },
+        "cid-partial",
+        gaps=gaps,
     )
 
     assert market_signals.volatility_percentile == 0.4
@@ -288,6 +322,49 @@ def test_build_market_signals_without_gaps_collector_keeps_legacy_contract():
     market_signals = builder._build_market_signals({"symbol": "BTCUSDT"}, "cid-nogaps")
 
     assert market_signals.is_placeholder is True
+
+
+def test_build_market_signals_rejects_signal_metadata_as_market_data():
+    builder = _make_builder()
+    gaps = []
+
+    market_signals = builder._build_market_signals(
+        {
+            "metadata": {
+                "signal_summary": "stale signal",
+                "volatility_percentile": 0.99,
+                "trend_strength": 0.99,
+                "price_action_character": "Bullish",
+                "current_price": 99999.0,
+            }
+        },
+        "cid-isolation",
+        gaps=gaps,
+    )
+
+    assert market_signals.is_placeholder is True
+    assert market_signals.current_price == 0.0
+    assert market_signals.signal_summary == "Manual trigger"
+    assert len(gaps) == 1
+
+
+def test_build_market_signals_handles_malformed_market_data_boundary():
+    builder = _make_builder()
+    gaps = []
+
+    market_signals = builder._build_market_signals(
+        {
+            "market_data": ["not", "a", "mapping"],
+            "signal_summary": "must be ignored",
+            "current_price": 99999.0,
+        },
+        "cid-invalid",
+        gaps=gaps,
+    )
+
+    assert market_signals.is_placeholder is True
+    assert market_signals.current_price == 0.0
+    assert len(gaps) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +409,13 @@ async def test_build_marks_real_market_signals_available_without_gap():
             "action": "sell",
             "current_price": 50000.0,
             "metadata": {"summary": "iceberg persistence"},
+            "market_data": {
+                "signal_summary": "iceberg persistence",
+                "volatility_percentile": 0.7,
+                "trend_strength": 0.5,
+                "price_action_character": "Bearish",
+                "current_price": 50000.0,
+            },
         },
     )
 
@@ -373,6 +457,13 @@ async def test_complete_context_decision_cycle_does_not_pause(monkeypatch):
             "action": "buy",
             "current_price": 65000.0,
             "metadata": {"signal_summary": "EMA alignment bullish"},
+            "market_data": {
+                "signal_summary": "EMA alignment bullish",
+                "volatility_percentile": 0.85,
+                "trend_strength": 1.0,
+                "price_action_character": "Bullish",
+                "current_price": 65000.0,
+            },
         },
     )
     assert context.market_signals.is_placeholder is False
