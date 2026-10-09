@@ -466,20 +466,10 @@ class Orchestrator:
                         position_size_usd=new_position_size_usd,
                         leverage=leverage_decision.decided_leverage,
                     )
-                    # #175 (FR60/P1.4-AC7) — register the admitted position
-                    # with the in-position re-evaluation cadence loop so it
-                    # gets re-reviewed on a schedule after admission, not
-                    # just once at intent time. petrosa_k8s#1127: use the
-                    # synthetic position_id as the key instead of
-                    # strategy_id to avoid (strategy_id, strategy_id)
-                    # key collisions when a strategy has multiple open
-                    # positions.
-                    if self.position_review_loop is not None:
-                        self.position_review_loop.add_position(
-                            context.strategy_id,
-                            context.position_id or context.strategy_id,
-                        )
-
+                    # The position is NOT registered with the in-position review loop here: this runs before the
+                    # final decision, so every sized intent (probe size included) was registered even when the
+                    # decision was skip, pause or block, and nothing ever retired it (no order, no close event).
+                    # ``OutputRouter`` registers it when an EXECUTE is actually dispatched.
             if (
                 code_result.hard_blocked is True
                 and code_result.block_context_fallback is True

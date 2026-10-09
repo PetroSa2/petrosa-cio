@@ -484,10 +484,10 @@ async def main():
             runner=arbiter.run_scheduled_review,
             interval_seconds=reeval_interval,
         )
-        # Orchestrator registers admitted positions with the loop at
-        # admission time (see Orchestrator.run, portfolio_tracker.record_admit
-        # call site).
+        # The router registers a position with the loop only when an EXECUTE is
+        # dispatched (OutputRouter._register_executed_position).
         orchestrator.position_review_loop = position_review_loop
+        router.position_review_loop = position_review_loop
         app.state.position_review_loop = position_review_loop
         logger.info(
             "Position review loop constructed (interval=%.1fs).", reeval_interval

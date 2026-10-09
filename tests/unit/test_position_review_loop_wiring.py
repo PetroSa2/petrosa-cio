@@ -1,4 +1,4 @@
-"""Admission-time wiring between Orchestrator and PositionReviewLoop (#175).
+"""Wiring between Orchestrator and PositionReviewLoop (#175; registration moved to the router).
 
 FR60/P1.4-AC7 was implemented (#135) but the loop was never instantiated and
 had no runner — this is the counterpart AC: once a position is actually
@@ -75,9 +75,11 @@ def _make_context(strategy_id: str = "momentum-v3") -> TriggerContext:
 
 
 @pytest.mark.asyncio
-async def test_admission_registers_position_with_review_loop():
-    """A real admission (kelly_position_usd > 0, within ceiling) must call
-    position_review_loop.add_position with the strategy_id."""
+async def test_a_sized_admitted_intent_is_not_registered_before_the_final_decision():
+    """Admission no longer registers the position: it ran before the final decision, so every sized intent
+    (probe size included) was registered even when it ended skip, pause or block, and nothing ever retired it.
+    ``OutputRouter`` now registers a position only for a really dispatched EXECUTE
+    (``test_review_loop_registration.py``)."""
     with patch.dict(os.environ, {"NURSE_USE_LLM_REASONING": "false"}):
         with (
             patch("cio.core.orchestrator.CodeEngine") as MockEngine,
@@ -87,23 +89,15 @@ async def test_admission_registers_position_with_review_loop():
             mock_code_result.hard_blocked = False
             mock_code_result.kelly_position_usd = 500.0
             MockEngine.run.return_value = mock_code_result
-
-            mock_decision = MagicMock()
-            MockClassifier.return_value.classify = AsyncMock(return_value=mock_decision)
-
+            MockClassifier.return_value.classify = AsyncMock(return_value=MagicMock())
             fresh_tracker = PortfolioTracker()
             position_review_loop = MagicMock()
-
             orchestrator = Orchestrator(
                 portfolio_tracker=fresh_tracker,
                 position_review_loop=position_review_loop,
             )
-
             await orchestrator.run(_make_context("momentum-v3"))
-
-            position_review_loop.add_position.assert_called_once_with(
-                "momentum-v3", "momentum-v3"
-            )
+            position_review_loop.add_position.assert_not_called()
 
 
 @pytest.mark.asyncio
