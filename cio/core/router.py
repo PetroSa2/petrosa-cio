@@ -128,6 +128,7 @@ def _log_final_decision_observability(
 
 if TYPE_CHECKING:
     from cio.core.auto_resume import LLMPauseRegistry
+    from cio.core.position_review_loop import PositionReviewLoop
 
 
 # Lifecycle ActionType values (per #114 P1.2). Kept as a module-level set so the
@@ -180,6 +181,7 @@ class OutputRouter:
         authority_store: Any = None,
         decision_store: "DecisionStore | None" = None,
         pause_registry: "LLMPauseRegistry | None" = None,
+        position_review_loop: "PositionReviewLoop | None" = None,
     ):
         self.nats_client = nats_client
         self.vector_client = vector_client
@@ -199,6 +201,7 @@ class OutputRouter:
         self.realtime_params_mode = self._realtime_mode("CIO_REALTIME_PARAMS_MODE")
         self.cache = cache
         self.pause_registry = pause_registry
+        self.position_review_loop = position_review_loop
 
         if not self.ta_bot_url:
             logger.warning(
@@ -235,6 +238,28 @@ class OutputRouter:
             logger.warning("CONFIG_WARNING: %s=%s is invalid; using shadow", name, mode)
             return "shadow"
         return mode
+
+    def _register_executed_position(
+        self, context: TriggerContext, correlation_id: str
+    ) -> None:
+        """Register a position with the in-position review loop, only for an EXECUTE that is really dispatched
+        (not dry-run, not downgraded by the authority store, translated to a signal). The key is the synthetic
+        ``position_id`` the listener gives every intent (echoed by the trade engine as ``client_order_id``, which
+        retires it on the close event). A context WITHOUT a ``position_id`` is not registered: falling back to the
+        strategy id would merge distinct positions of one strategy under one key."""
+        loop = self.position_review_loop
+        if loop is None:
+            return
+        position_id = getattr(context, "position_id", None)
+        if not position_id:
+            logger.warning(
+                "REVIEW_LOOP_NOT_REGISTERED: EXECUTE for %s has no position_id; the position will not be "
+                "re-reviewed",
+                context.strategy_id,
+                extra={"correlation_id": correlation_id},
+            )
+            return
+        loop.add_position(context.strategy_id, position_id)
 
     async def close(self) -> None:
         """Closes internal resources."""
@@ -513,6 +538,8 @@ class OutputRouter:
                 dispatch_tasks_data.append(
                     (legacy_subject, json.dumps(legacy_data).encode())
                 )
+                if not is_dry_run:
+                    self._register_executed_position(context, correlation_id)
 
         elif action == ActionType.MODIFY_PARAMS:
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:

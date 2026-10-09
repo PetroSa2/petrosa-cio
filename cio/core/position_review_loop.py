@@ -29,11 +29,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+import os
+import time
+import weakref
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from prometheus_client import Counter
+from opentelemetry.metrics import CallbackOptions, Observation
+from prometheus_client import Counter, Gauge
+
+from cio.core.metrics import meter
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +48,44 @@ logger = logging.getLogger(__name__)
 # the ``CIO_REEVAL_INTERVAL_SECONDS`` env var.
 DEFAULT_REEVAL_INTERVAL_SECONDS = 300.0
 
+
+# The registry is bounded (petrosa-cio review-loop leak fix): positions are registered only for a real EXECUTE
+# (see ``OutputRouter``) and retired by the close event; this cap is the last line of defence.
+DEFAULT_MAX_POSITIONS = 200
+
+
+def max_positions_from_env() -> int:
+    """``CIO_REVIEW_LOOP_MAX_POSITIONS`` (default 200); an unreadable or non-positive value is the default."""
+    try:
+        value = int(os.environ["CIO_REVIEW_LOOP_MAX_POSITIONS"])
+    except (KeyError, ValueError):
+        return DEFAULT_MAX_POSITIONS
+    return value if value > 0 else DEFAULT_MAX_POSITIONS
+
+
+cio_review_loop_positions = Gauge(
+    "cio_review_loop_positions",
+    "Positions currently registered with the in-position review loop",
+)
+
+cio_review_loop_evicted = Counter(
+    "cio_review_loop_evicted_total",
+    "Positions evicted from the review loop because the registry was full (oldest first)",
+)
+
+_LOOPS: weakref.WeakSet[PositionReviewLoop] = weakref.WeakSet()
+
+
+def _observe_positions(_options: CallbackOptions) -> Iterable[Observation]:
+    yield Observation(sum(len(loop._positions) for loop in list(_LOOPS)))
+
+
+# The CIO exports metrics over OTLP only, so the gauge is also an OTel observable gauge of the same name.
+meter.create_observable_gauge(
+    "cio_review_loop_positions",
+    callbacks=[_observe_positions],
+    description="Positions currently registered with the in-position review loop",
+)
 
 cio_reeval_fired = Counter(
     "cio_reeval_fired_total",
@@ -110,32 +154,63 @@ class PositionReviewLoop:
         runner: RunnerFn,
         *,
         interval_seconds: float = DEFAULT_REEVAL_INTERVAL_SECONDS,
+        max_positions: int | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError(f"interval_seconds must be > 0, got {interval_seconds!r}")
         self._runner = runner
         self._interval = interval_seconds
-        self._positions: set[PositionKey] = set()
+        self._max_positions = (
+            max_positions
+            if max_positions and max_positions > 0
+            else max_positions_from_env()
+        )
+        # key -> when it was registered (insertion order = oldest first)
+        self._positions: dict[PositionKey, float] = {}
         self._inflight: set[PositionKey] = set()
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
+        _LOOPS.add(self)
+        self._sync_gauge()
+
+    def _sync_gauge(self) -> None:
+        cio_review_loop_positions.set(
+            sum(len(loop._positions) for loop in list(_LOOPS))
+        )
 
     # ----- registry -------------------------------------------------------
 
-    def add_position(self, strategy_id: str, position_id: str) -> None:
-        """Register a position so the cadence tick fires re-evals on it."""
+    def add_position(self, strategy_id: str, position_id: str) -> bool:
+        """Register a position so the cadence tick fires re-evals on it. Idempotent: returns True only when it
+        was not registered yet. When the registry is full the OLDEST registration is evicted (logged, counted)."""
         key = PositionKey(strategy_id=strategy_id, position_id=position_id)
-        self._positions.add(key)
+        if key in self._positions:
+            return False
+        while len(self._positions) >= self._max_positions:
+            oldest = next(iter(self._positions))
+            del self._positions[oldest]
+            cio_review_loop_evicted.inc()
+            logger.warning(
+                "position_review_loop.evicted position=%s max_positions=%d",
+                oldest,
+                self._max_positions,
+            )
+        self._positions[key] = time.monotonic()
+        self._sync_gauge()
         logger.debug("position_review_loop.added position=%s", key)
+        return True
 
-    def remove_position(self, strategy_id: str, position_id: str) -> None:
-        """Drop a position from the cadence cycle (close / liquidation / EXIT_NOW)."""
+    def remove_position(self, strategy_id: str, position_id: str) -> bool:
+        """Drop a position from the cadence cycle (close / liquidation / EXIT_NOW). Idempotent: removing an
+        unknown or already removed position is a no-op that returns False."""
         key = PositionKey(strategy_id=strategy_id, position_id=position_id)
-        self._positions.discard(key)
-        # Don't touch _inflight — the in-flight re-eval should complete
-        # naturally; its result is still useful for audit even if the
-        # position has since closed.
-        logger.debug("position_review_loop.removed position=%s", key)
+        removed = self._positions.pop(key, None) is not None
+        # Don't touch _inflight: the in-flight re-eval should complete naturally; its result is still useful for
+        # audit even if the position has since closed.
+        if removed:
+            self._sync_gauge()
+            logger.debug("position_review_loop.removed position=%s", key)
+        return removed
 
     def active_positions(self) -> list[PositionKey]:
         """Snapshot of currently-registered positions (sorted for stability)."""
