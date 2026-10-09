@@ -112,7 +112,8 @@ async def test_display_name_strategy_routes_to_realtime_strategies():
     """petrosa-cio#200 reported bug: the top-level display name alone
     (no metadata override) still resolves correctly via normalization +
     alias, and routes to realtime_strategies_url, not ta_bot_url."""
-    router = _make_router()
+    with patch.dict(os.environ, {"CIO_REALTIME_PAUSE_MODE": "apply"}):
+        router = _make_router()
     context = _make_context("Iceberg Order Detector")
     decision = _make_decision(ActionType.PAUSE_STRATEGY)
 
@@ -132,7 +133,8 @@ async def test_display_name_strategy_routes_to_realtime_strategies():
 async def test_metadata_strategy_id_preferred_over_display_name():
     """Scope bullet: prefer metadata.strategy_id (canonical) over the
     top-level display name when both are present in trigger_payload."""
-    router = _make_router()
+    with patch.dict(os.environ, {"CIO_REALTIME_PAUSE_MODE": "apply"}):
+        router = _make_router()
     context = _make_context(
         "Iceberg Order Detector",
         trigger_payload={
