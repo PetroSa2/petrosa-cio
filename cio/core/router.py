@@ -193,15 +193,10 @@ class OutputRouter:
         self.realtime_strategies_url = realtime_strategies_url or os.getenv(
             "REALTIME_STRATEGIES_URL", ""
         )
-        self.realtime_pause_mode = (
-            os.getenv("CIO_REALTIME_PAUSE_MODE", "shadow").strip().lower()
-        )
-        if self.realtime_pause_mode not in {"shadow", "apply"}:
-            logger.warning(
-                "CONFIG_WARNING: CIO_REALTIME_PAUSE_MODE=%s is invalid; using shadow",
-                self.realtime_pause_mode,
-            )
-            self.realtime_pause_mode = "shadow"
+        self.realtime_pause_mode = self._realtime_mode("CIO_REALTIME_PAUSE_MODE")
+        # CIO_REALTIME_PARAMS_MODE: the same shadow/apply switch for MODIFY_PARAMS aimed at realtime strategies
+        # (default shadow: log what would change, no HTTP call, no freeze key).
+        self.realtime_params_mode = self._realtime_mode("CIO_REALTIME_PARAMS_MODE")
         self.cache = cache
         self.pause_registry = pause_registry
 
@@ -231,6 +226,15 @@ class OutputRouter:
             },
             timeout=httpx.Timeout(15.0, connect=15.0, read=15.0, write=15.0),
         )
+
+    @staticmethod
+    def _realtime_mode(name: str) -> str:
+        """``shadow`` (default) or ``apply`` from the environment variable ``name``; anything else is shadow."""
+        mode = os.getenv(name, "shadow").strip().lower()
+        if mode not in {"shadow", "apply"}:
+            logger.warning("CONFIG_WARNING: %s=%s is invalid; using shadow", name, mode)
+            return "shadow"
+        return mode
 
     async def close(self) -> None:
         """Closes internal resources."""
@@ -520,6 +524,13 @@ class OutputRouter:
                 action_name="MODIFY_PARAMS",
             )
 
+            routing_target = TargetServiceResolver.resolve(
+                self._resolve_routing_strategy_id(context, strategy_id)
+            )
+            is_realtime_params_shadow = (
+                routing_target == ServiceType.REALTIME_STRATEGIES
+                and self.realtime_params_mode == "shadow"
+            )
             if base_url is not None:
                 # b. Build the payload with parameters, changed_by, reason, validate_only
                 params_dict = {}
@@ -538,7 +549,27 @@ class OutputRouter:
 
                 # c. Await the POST call (unless in DRY_RUN mode)
                 url = f"{base_url}/api/v1/strategies/{strategy_id}/config"
-                if is_dry_run:
+                if is_realtime_params_shadow:
+                    # Shadow mode for realtime strategies: no HTTP call, no freeze key, no registry write.
+                    logger.info(
+                        "SHADOW_PARAMS would change realtime strategy params",
+                        extra={
+                            "strategy_id": strategy_id,
+                            "symbol": context.trigger_payload.get("symbol", ""),
+                            "param": decision.param_change.param
+                            if decision.param_change
+                            else None,
+                            "new_value": decision.param_change.new_value
+                            if decision.param_change
+                            else None,
+                            "proposed_change": payload,
+                            "target_url": url,
+                            "justification": decision.justification,
+                            "decision_id": decision_id,
+                            "correlation_id": correlation_id,
+                        },
+                    )
+                elif is_dry_run:
                     logger.info(
                         f"[SHADOW MODE] Would have applied parameter change via REST to {url}",
                         extra={
