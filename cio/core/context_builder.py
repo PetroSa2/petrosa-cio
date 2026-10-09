@@ -16,7 +16,15 @@ except ImportError:  # pragma: no cover — py310 compatibility
 import httpx
 
 from cio.core.internal_headers import internal_headers
+from cio.core.metrics import REPORT_AGE, REPORT_REFRESH
 from cio.core.order_levels import carried_order_distances
+from cio.core.report_freshness import (
+    backoff_seconds,
+    computed_at_of,
+    report_age_seconds,
+    report_fetch_timeout_seconds,
+    report_max_age_seconds,
+)
 from cio.core.service_resolver import TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
 from cio.models import (
@@ -176,6 +184,15 @@ def _report_budget_s() -> float:
     return value if value > 0 else 2.0
 
 
+#: The cached data-manager reports: name -> (cache attribute, the payload of an empty cache entry). An entry is
+#: ``(expires_at, *payload)``; the last good payload survives a failed refresh while it is young enough.
+_REPORTS: dict[str, tuple[str, tuple[Any, ...]]] = {
+    "slippage": ("_slippage_cache", ({},)),
+    "risk_inputs": ("_risk_inputs_cache", (None,)),
+    "rounds": ("_rounds_cache", ({}, None)),
+}
+
+
 class ContextBuilder:
     """
     Assembles the complete TriggerContext for a reasoning loop iteration.
@@ -208,6 +225,9 @@ class ContextBuilder:
         # report longer than the budget, and one refresh serves every decision that needs it.
         self._refresh_tasks: dict[str, asyncio.Future[None]] = {}
         self._budget_missed: set[str] = set()
+        # per report: when CIO fetched the last good one (self._clock) and when data-manager computed it
+        self._report_meta: dict[str, tuple[float, datetime | None]] = {}
+        self._report_failures: dict[str, int] = {}
         self._report_budget_s = _report_budget_s()
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
@@ -420,6 +440,16 @@ class ContextBuilder:
     async def _ensure_report(
         self, name: str, refresh: Any, correlation_id: str
     ) -> None:
+        """Make the report available (see ``_ensure_report_cached``), never serving one older than the bound:
+        checked before and after, because a refresh that just finished may carry a computation time that is old."""
+        try:
+            await self._ensure_report_cached(name, refresh, correlation_id)
+        finally:
+            self._drop_report_if_too_old(name)
+
+    async def _ensure_report_cached(
+        self, name: str, refresh: Any, correlation_id: str
+    ) -> None:
         """Make sure the ``name`` report is cached, without ever holding a decision for long (#312).
 
         Fresh: nothing to do. Stale: serve it and refresh in the background. Cold: start (or join) the one
@@ -427,7 +457,11 @@ class ContextBuilder:
         fallbacks (the cache fills when the refresh ends). A budget already missed with the refresh still in
         flight is not waited for again.
         """
+        self._drop_report_if_too_old(name)
         cache = getattr(self, f"_{name}_cache")
+        age = self._report_age(name)
+        if age is not None:
+            REPORT_AGE.record(age, {"report": name})
         if cache is not None and self._clock() < cache[0]:
             return
         task = self._refresh_tasks.get(name)
@@ -462,6 +496,76 @@ class ContextBuilder:
         ):  # the refresh logs its own failure and caches the empty result
             pass
 
+    def _report_age(self, name: str) -> float | None:
+        """The age of the last good ``name`` report (None without one): measured from the time data-manager
+        computed it when it says so, never less than the time since CIO fetched it."""
+        meta = self._report_meta.get(name)
+        if meta is None:
+            return None
+        fetched_at, computed_at = meta
+        return report_age_seconds(
+            since_fetch=self._clock() - fetched_at, computed_at=computed_at
+        )
+
+    def _drop_report_if_too_old(self, name: str) -> None:
+        age = self._report_age(name)
+        if age is None or age <= report_max_age_seconds():
+            return
+        attr, empty = _REPORTS[name]
+        current = getattr(self, attr)
+        self._report_meta.pop(name, None)
+        if current is not None and current[1:] != empty:
+            logger.warning(
+                "REPORT_TOO_OLD report=%s age_s=%.0f max_age_s=%.0f: back to the labelled fallbacks",
+                name,
+                age,
+                report_max_age_seconds(),
+            )
+            setattr(self, attr, (current[0], *empty))
+
+    def _commit_report(self, name: str, payload: tuple[Any, ...], body: Any) -> None:
+        """A successful refresh: cache it for an hour and remember when it was fetched and computed."""
+        attr, _ = _REPORTS[name]
+        now = self._clock()
+        setattr(self, attr, (now + 3600.0, *payload))
+        self._report_meta[name] = (now, computed_at_of(body))
+        self._report_failures[name] = 0
+        REPORT_REFRESH.add(1, {"report": name, "outcome": "ok"})
+
+    def _fail_report(
+        self, name: str, label: str, exc: Exception, correlation_id: str
+    ) -> None:
+        """A failed refresh keeps the last good report while it is young enough (else the empty one) and retries
+        after a growing delay (60 s, 2 min, ... 15 min)."""
+        failures = self._report_failures.get(name, 0) + 1
+        self._report_failures[name] = failures
+        delay = backoff_seconds(failures)
+        attr, empty = _REPORTS[name]
+        current = getattr(self, attr)
+        age = self._report_age(name)
+        keep = (
+            current is not None
+            and current[1:] != empty
+            and age is not None
+            and age <= report_max_age_seconds()
+        )
+        if not keep:
+            self._report_meta.pop(name, None)
+        payload = current[1:] if keep else empty
+        setattr(self, attr, (self._clock() + delay, *payload))
+        REPORT_REFRESH.add(1, {"report": name, "outcome": "failed"})
+        logger.warning(
+            "%s: exc_type=%s %s; %s, next attempt in %.0fs",
+            label,
+            type(exc).__name__,
+            exc,
+            f"the last good report (age {age:.0f}s) is kept"
+            if keep and age is not None
+            else "the labelled fallbacks are used",
+            delay,
+            extra={"correlation_id": correlation_id},
+        )
+
     def warm_reports(self) -> None:
         """Start the report refreshes now (at startup), so the first decision finds them cached or in flight.
         Needs the running loop; never waits."""
@@ -475,16 +579,15 @@ class ContextBuilder:
                 self._refresh_tasks[name] = asyncio.ensure_future(refresh("startup"))
 
     async def _refresh_slippage(self, correlation_id: str) -> None:
-        """Read the slippage report and cache it for an hour (a failed read for a minute)."""
-        now = self._clock()
-        table: dict[str, tuple[float, int]] = {}
-        ttl = 3600.0
+        """Read the slippage report in the background and cache it for an hour; a failure keeps the last good one."""
         try:
             response = await self.client.get(
-                f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30"
+                f"{self.data_manager_url}/analysis/slippage-by-regime?window_days=30",
+                timeout=report_fetch_timeout_seconds(),
             )
             response.raise_for_status()
             body = response.json()
+            table: dict[str, tuple[float, int]] = {}
             for name, stats in (body.get("by_regime") or {}).items():
                 table[str(name)] = (float(stats["median_bp"]), int(stats["count"]))
             overall = body.get("overall")
@@ -494,13 +597,9 @@ class ContextBuilder:
                     int(overall["count"]),
                 )
         except Exception as exc:
-            ttl = 60.0
-            logger.warning(
-                "SLIPPAGE_FETCH_FAILED: %s",
-                exc,
-                extra={"correlation_id": correlation_id},
-            )
-        self._slippage_cache = (now + ttl, table)
+            self._fail_report("slippage", "SLIPPAGE_FETCH_FAILED", exc, correlation_id)
+            return
+        self._commit_report("slippage", (table,), body)
 
     async def _fetch_slippage(
         self, regime: RegimeResult, correlation_id: str
@@ -615,13 +714,11 @@ class ContextBuilder:
         return self._risk_inputs_cache[1]
 
     async def _refresh_risk_inputs(self, correlation_id: str) -> None:
-        """Read the risk inputs and cache them for an hour (a failure for a minute)."""
-        now = self._clock()
-        inputs: RiskInputs | None = None
-        ttl = 3600.0
+        """Read the risk inputs in the background and cache them for an hour; a failure keeps the last good ones."""
         try:
             response = await self.client.get(
-                f"{self.data_manager_url}/api/v1/risk/inputs"
+                f"{self.data_manager_url}/api/v1/risk/inputs",
+                timeout=report_fetch_timeout_seconds(),
             )
             response.raise_for_status()
             body = response.json()
@@ -648,24 +745,20 @@ class ContextBuilder:
                 equity_sufficient=bool(equity.get("sufficient")),
             )
         except Exception as exc:
-            ttl = 60.0
-            inputs = None
-            logger.warning(
-                "RISK_INPUTS_FETCH_FAILED: %s",
-                exc,
-                extra={"correlation_id": correlation_id},
+            self._fail_report(
+                "risk_inputs", "RISK_INPUTS_FETCH_FAILED", exc, correlation_id
             )
-        self._risk_inputs_cache = (now + ttl, inputs)
+            return
+        self._commit_report("risk_inputs", (inputs,), body)
 
     async def _refresh_rounds(self, correlation_id: str) -> None:
         """Read the round report and cache it for an hour (a failed read for a minute)."""
-        now = self._clock()
         table: dict[str, StrategyRounds] = {}
         prior: PriorStrength | None = None
-        ttl = 3600.0
         try:
             response = await self.client.get(
-                f"{self.data_manager_url}/analysis/rounds?window_days=30"
+                f"{self.data_manager_url}/analysis/rounds?window_days=30",
+                timeout=report_fetch_timeout_seconds(),
             )
             response.raise_for_status()
             body = response.json()
@@ -690,15 +783,9 @@ class ContextBuilder:
                 [(r.wins, r.wins + r.losses) for r in table.values()]
             )
         except Exception as exc:
-            ttl = 60.0
-            table = {}
-            prior = None
-            logger.warning(
-                "ROUNDS_FETCH_FAILED: %s",
-                exc,
-                extra={"correlation_id": correlation_id},
-            )
-        self._rounds_cache = (now + ttl, table, prior)  # type: ignore[assignment]
+            self._fail_report("rounds", "ROUNDS_FETCH_FAILED", exc, correlation_id)
+            return
+        self._commit_report("rounds", (table, prior), body)
 
     async def _fetch_rounds(
         self, strategy_id: str, correlation_id: str

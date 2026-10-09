@@ -106,6 +106,17 @@ REGIME_UNAVAILABLE = meter.create_counter(
     "cio_regime_unavailable_total",
     description="Decisions whose regime was unavailable (reason: regime_stale, regime_low_confidence, regime_missing)",
 )
+# Data-manager reports refreshed in the background (petrosa-cio#312 follow-up): refresh outcomes and the age of
+# the report a decision used (judged from data-manager's computation time when it says so)
+REPORT_REFRESH = meter.create_counter(
+    "cio_report_refresh_total",
+    description="Background refreshes of a data-manager report (report: slippage, risk_inputs, rounds, calibration)",
+)
+REPORT_AGE = meter.create_histogram(
+    "cio_report_age_seconds",
+    description="Age of the data-manager report a decision used",
+    unit="s",
+)
 # LLM Performance Metrics
 LLM_LATENCY = meter.create_histogram(
     "cio_llm_latency_seconds",

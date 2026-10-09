@@ -419,6 +419,7 @@ async def main():
     # petrosa-cio#312: refresh the data-manager reports now, off the decision path, and watch the loop so a
     # stall leaves a stack in the log instead of a killed pod with nothing in it.
     builder.warm_reports()
+    app.state.confidence_calibration.warm()
     LoopWatchdog(asyncio.get_running_loop()).start()
     orchestrator = Orchestrator(
         llm_client=llm_client,
