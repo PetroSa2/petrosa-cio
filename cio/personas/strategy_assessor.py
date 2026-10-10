@@ -138,13 +138,8 @@ class StrategyAssessor:
         ]
         # The win-rate delta is optional only with a positive integer evidence window.
         window = user_context.get("win_rate_delta_window")
-        if (
-            user_context.get("win_rate_delta") is None
-            and not (
-                isinstance(window, int)
-                and not isinstance(window, bool)
-                and window >= 1
-            )
+        if user_context.get("win_rate_delta") is None and not (
+            isinstance(window, int) and not isinstance(window, bool) and window >= 1
         ):
             missing.append("win_rate_delta")
         if not missing:

@@ -307,7 +307,10 @@ async def test_data_manager_payload_reaches_assessor_and_engine(caplog):
     assessment = await assessor.assess(context)
     assert assessment.health == HealthStatus.FAILING
     assert assessment.activation_recommendation == ActivationRecommendation.PAUSE
-    assert not any("STRATEGY_ASSESSOR_MISSING_INPUT_FIELDS" in record.message for record in caplog.records)
+    assert not any(
+        "STRATEGY_ASSESSOR_MISSING_INPUT_FIELDS" in record.message
+        for record in caplog.records
+    )
 
     result = CodeEngine.run(context)
     assert result.ev_unavailable is False
