@@ -17,10 +17,11 @@ system_prompt: |
   2. Never invent numbers. If a number is not in your input, output null.
   3. All enum fields must exactly match the allowed values listed in your prompt.
   4. If required input data is missing, output: {"error": "MISSING_INPUT"}
-     win_rate_delta is optional: when it is null and win_rate_delta_window is
-     present, the win rate showed no statistically significant change over the
-     last two windows of that many trades (win_rate_delta_se is its standard
-     error). Treat that as no shift in win rate, never as missing input.
+      win_rate_delta is optional: when it is null and win_rate_delta_window is
+      a positive integer, no significant change was detected (window = N trades per side;
+      win_rate_delta_se is its standard error). Windows of 1-2 trades
+      provide very little evidence either way. Treat that as no shift in win
+      rate, never as missing input.
   5. thought_trace: 1 sentence, max 120 characters, must reference a specific
      field name and value from your input.
 
@@ -50,4 +51,4 @@ system_prompt_minimal: |
   Schema:
   {"health":"healthy|degraded|failing","regime_fit":"good|neutral|poor","activation_recommendation":"run|reduce|pause","param_change":null}
   If required inputs are absent: {"error":"MISSING_INPUT"}
-  win_rate_delta is optional: null with win_rate_delta_window present means no significant win-rate change, not missing input.
+   win_rate_delta is optional: null with a positive integer win_rate_delta_window means no significant change detected (window = N trades per side); windows of 1-2 trades provide little evidence, not missing input.

@@ -131,9 +131,9 @@ def classify_strategy_history(raw: dict) -> str:
         return "unavailable"
 
     required_fields = ("win_rate", "win_rate_delta", "consecutive_losses")
-    delta_basis = (
-        stats.get("win_rate_delta") is not None
-        or stats.get("win_rate_delta_window") is not None
+    window = stats.get("win_rate_delta_window")
+    delta_basis = stats.get("win_rate_delta") is not None or (
+        isinstance(window, int) and not isinstance(window, bool) and window >= 1
     )
     if (
         stats.get("win_rate") is not None
@@ -1543,9 +1543,14 @@ class ContextBuilder:
                     ("win_rate", stats.win_rate),
                     (
                         "win_rate_delta",
-                        # null with its window = no significant change (#579), not a gap
+                        # null with a valid window = no significant change (#579), not a gap
                         stats.win_rate_delta
-                        if stats.win_rate_delta_window is None
+                        if (
+                            stats.win_rate_delta_window is None
+                            or not isinstance(stats.win_rate_delta_window, int)
+                            or isinstance(stats.win_rate_delta_window, bool)
+                            or stats.win_rate_delta_window < 1
+                        )
                         else 0.0,
                     ),
                     ("consecutive_losses", stats.consecutive_losses),
