@@ -118,13 +118,28 @@ DM_PERFORMANCE_COMPUTED_SOURCE = "data-manager-pnl-calculator"
 
 
 def classify_strategy_history(raw: dict) -> str:
-    """Classify the completeness and provenance of performance history."""
+    """Classify the completeness and provenance of performance history.
+
+    ``computed`` needs the win rate and the consecutive losses plus a basis for the win-rate change: a delta,
+    or the window it was tested over. A delta of ``null`` with its ``win_rate_delta_window`` present means
+    data-manager found no statistically significant change in the win rate (petrosa-data-manager#579), not
+    that the history is missing. An older data-manager (no window key) with a null delta has too few closed
+    trades for a delta at all, as before.
+    """
     stats = raw.get("stats")
     if not isinstance(stats, dict):
         return "unavailable"
 
     required_fields = ("win_rate", "win_rate_delta", "consecutive_losses")
-    if all(stats.get(field) is not None for field in required_fields):
+    delta_basis = (
+        stats.get("win_rate_delta") is not None
+        or stats.get("win_rate_delta_window") is not None
+    )
+    if (
+        stats.get("win_rate") is not None
+        and stats.get("consecutive_losses") is not None
+        and delta_basis
+    ):
         return "computed"
 
     metadata = raw.get("metadata")
@@ -1493,7 +1508,13 @@ class ContextBuilder:
                 field
                 for field, value in (
                     ("win_rate", stats.win_rate),
-                    ("win_rate_delta", stats.win_rate_delta),
+                    (
+                        "win_rate_delta",
+                        # null with its window = no significant change (#579), not a gap
+                        stats.win_rate_delta
+                        if stats.win_rate_delta_window is None
+                        else 0.0,
+                    ),
                     ("consecutive_losses", stats.consecutive_losses),
                 )
                 if value is None

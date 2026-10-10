@@ -48,7 +48,12 @@ class StrategyStats(BaseModel):
     realized_pnl: float | None = None
     avg_win_usd: float | None = None
     avg_loss_usd: float | None = None
+    # Win rate of the latest window minus the one before it. data-manager returns it only when it is
+    # statistically distinguishable from noise (|delta| > 2 SE); ``None`` with ``win_rate_delta_window``
+    # present means "no significant change", not missing data (petrosa-data-manager#579).
     win_rate_delta: float | None = None
+    win_rate_delta_window: int | None = None
+    win_rate_delta_se: float | None = None
     consecutive_losses: int | None = None
     recent_pnl_trend: PnlTrend | None = None
     history_status: (
