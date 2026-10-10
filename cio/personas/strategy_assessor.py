@@ -136,10 +136,10 @@ class StrategyAssessor:
             for field in REQUIRED_CONTEXT_FIELDS
             if user_context.get(field) is None
         ]
-        # The win-rate delta is optional: null with its window present means "no significant change".
-        if (
-            user_context.get("win_rate_delta") is None
-            and user_context.get("win_rate_delta_window") is None
+        # The win-rate delta is optional only with a positive integer evidence window.
+        window = user_context.get("win_rate_delta_window")
+        if user_context.get("win_rate_delta") is None and not (
+            isinstance(window, int) and not isinstance(window, bool) and window >= 1
         ):
             missing.append("win_rate_delta")
         if not missing:

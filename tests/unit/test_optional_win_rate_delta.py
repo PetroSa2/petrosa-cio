@@ -14,7 +14,7 @@ from test_engine import build_test_context
 from cio.clients.llm_client import MockLLMClient
 from cio.core.context_builder import ContextBuilder, classify_strategy_history
 from cio.core.engine import CodeEngine
-from cio.models import SAFE_DEFAULTS, ContextGap, PnlTrend, StrategyStats
+from cio.models import SAFE_DEFAULTS, ContextGap, PnlTrend, StrategyStats, TriggerType
 from cio.models.enums import ActivationRecommendation, HealthStatus
 from cio.personas.strategy_assessor import COLD_START_TRACE, StrategyAssessor
 
@@ -82,6 +82,11 @@ def _raw(stats: dict, metadata: dict | None = CALC) -> dict:
         ),
         # a window but no losses figure: not computed
         (_stats(consecutive_losses=None), "insufficient_history"),
+        # a zero or invalid window is not evidence for a null delta
+        (_stats(win_rate_delta_window=0), "insufficient_history"),
+        (_stats(win_rate_delta_window=-1), "insufficient_history"),
+        (_stats(win_rate_delta_window=True), "insufficient_history"),
+        (_stats(win_rate_delta_window=1.5), "insufficient_history"),
     ],
 )
 def test_classification_with_an_optional_delta(stats, expected):
@@ -204,9 +209,9 @@ async def test_established_strategy_with_a_null_delta_and_losses_reaches_the_llm
 
 
 @pytest.mark.asyncio
-async def test_a_null_delta_without_a_window_is_still_reported_missing(caplog):
+async def test_a_null_delta_with_a_zero_window_is_reported_missing(caplog):
     assessor, client = _assessor()
-    context = _established_context(win_rate_delta_window=None, win_rate_delta_se=None)
+    context = _established_context(win_rate_delta_window=0, win_rate_delta_se=None)
     caplog.set_level(logging.WARNING, logger="cio.personas.strategy_assessor")
 
     await assessor.assess(context)
@@ -237,8 +242,76 @@ async def test_no_closed_trades_is_still_cold_start():
     assert result.thought_trace == COLD_START_TRACE
 
 
-def test_engine_keeps_the_win_rate_of_an_established_strategy_with_a_null_delta():
-    context = _established_context()
+@pytest.mark.asyncio
+async def test_data_manager_payload_reaches_assessor_and_engine(caplog):
+    """The real performance response stays established through every decision stage."""
+    source_context = build_test_context(portfolio_state_available=True)
+    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
+    builder.client.get = AsyncMock(
+        return_value=MagicMock(
+            status_code=200,
+            raise_for_status=lambda: None,
+            json=lambda: _raw(
+                _stats(
+                    win_rate=0.5,
+                    win_rate_delta=None,
+                    win_rate_delta_window=20,
+                    consecutive_losses=5,
+                )
+            ),
+        )
+    )
+    builder._fetch_regime = AsyncMock(return_value=source_context.regime)
+    builder._fetch_portfolio_and_risk = AsyncMock(
+        return_value=(
+            source_context.portfolio,
+            source_context.risk_limits,
+            {
+                "global_drawdown_pct": 0.0,
+                "open_orders_global": 0,
+                "open_orders_symbol": 0,
+                "available_capital_usd": 10000.0,
+            },
+        )
+    )
+    builder._fetch_strategy_defaults = AsyncMock(
+        return_value=source_context.strategy_defaults
+    )
+    builder._fetch_slippage = AsyncMock(return_value=None)
+    builder._fetch_rounds = AsyncMock(return_value=(None, None))
+    builder._fetch_risk_inputs = AsyncMock(return_value=None)
+    builder._fetch_characterization_ref = AsyncMock(return_value=None)
+
+    context = await builder.build(
+        correlation_id="cid",
+        source_subject="test",
+        trigger_type=TriggerType.TRADE_INTENT,
+        payload={
+            "strategy_id": "established",
+            "symbol": "BTCUSDT",
+            "current_price": 50000.0,
+            "signal_summary": "test signal",
+            "volatility_percentile": 0.5,
+            "trend_strength": 0.0,
+            "side": "BUY",
+        },
+    )
+    await builder.close()
+
+    assert context.strategy_stats.history_status == "computed"
+    assert context.strategy_stats.win_rate == 0.5
+    assert context.strategy_stats.win_rate_delta_window == 20
+
+    caplog.set_level(logging.WARNING, logger="cio.personas.strategy_assessor")
+    assessor = StrategyAssessor(MockLLMClient())
+    assessment = await assessor.assess(context)
+    assert assessment.health == HealthStatus.FAILING
+    assert assessment.activation_recommendation == ActivationRecommendation.PAUSE
+    assert not any(
+        "STRATEGY_ASSESSOR_MISSING_INPUT_FIELDS" in record.message
+        for record in caplog.records
+    )
+
     result = CodeEngine.run(context)
     assert result.ev_unavailable is False
     assert result.gross_ev is not None
@@ -293,4 +366,7 @@ def test_the_prompt_makes_the_delta_optional():
     assert "win_rate_delta" not in data["required_context_fields"]
     assert "win_rate_delta_window" in data["system_prompt"]
     assert "never as missing input" in data["system_prompt"]
+    assert "window = N trades per side" in data["system_prompt"]
+    assert "1-2" in data["system_prompt"]
     assert "win_rate_delta_window" in data["system_prompt_minimal"]
+    assert "window = N trades per side" in data["system_prompt_minimal"]
