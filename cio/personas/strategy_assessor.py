@@ -29,7 +29,6 @@ COLD_START_ENV = "CIO_COLD_START_ENABLED"
 REQUIRED_CONTEXT_FIELDS = (
     "strategy_id",
     "win_rate",
-    "win_rate_delta",
     "consecutive_losses",
     "recent_pnl_trend",
     "regime",
@@ -107,7 +106,10 @@ class StrategyAssessor:
         return {
             "strategy_id": context.strategy_id,
             "win_rate": stats.win_rate,
+            # null with a window = no statistically significant change in win rate (petrosa-data-manager#579)
             "win_rate_delta": stats.win_rate_delta,
+            "win_rate_delta_window": stats.win_rate_delta_window,
+            "win_rate_delta_se": stats.win_rate_delta_se,
             "consecutive_losses": stats.consecutive_losses,
             "recent_pnl_trend": (
                 stats.recent_pnl_trend.value if stats.recent_pnl_trend else None
@@ -134,6 +136,12 @@ class StrategyAssessor:
             for field in REQUIRED_CONTEXT_FIELDS
             if user_context.get(field) is None
         ]
+        # The win-rate delta is optional: null with its window present means "no significant change".
+        if (
+            user_context.get("win_rate_delta") is None
+            and user_context.get("win_rate_delta_window") is None
+        ):
+            missing.append("win_rate_delta")
         if not missing:
             return
 
