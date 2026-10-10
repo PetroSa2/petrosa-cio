@@ -1436,6 +1436,39 @@ class ContextBuilder:
             f"Failed to fetch portfolio/risk: {e}",
             extra={"correlation_id": correlation_id},
         )
+        if os.getenv("QA_SHADOW_MODE", "false").lower() == "true":
+            logger.warning(
+                "QA_SHADOW_MODE: using isolated neutral portfolio/risk context; "
+                "no execution service is contacted",
+                extra={"correlation_id": correlation_id},
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="portfolio",
+                        reason="qa_shadow_neutral_context",
+                    )
+                )
+            if availability is not None:
+                availability["portfolio"] = True
+            return (
+                PortfolioSummary(
+                    gross_exposure=0.0,
+                    same_asset_pct=0.0,
+                    open_positions_count=0,
+                ),
+                RiskLimits(
+                    max_drawdown_pct=1.0,
+                    max_orders_global=50,
+                    max_orders_per_symbol=10,
+                    max_position_size_usd=5000.0,
+                ),
+                {
+                    "global_drawdown_pct": 0.0,
+                    "open_orders_global": 0,
+                    "available_capital_usd": 100000.0,
+                },
+            )
         if gaps is not None:
             gaps.append(
                 ContextGap(
