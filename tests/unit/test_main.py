@@ -18,22 +18,39 @@ def test_litellm_logger_silenced_at_import_time():
 
 
 @pytest.mark.asyncio
-async def test_qa_shadow_flag_without_qa_intent_prefix_rejects_startup(
-    monkeypatch, caplog
+@pytest.mark.parametrize(
+    ("intent_subject", "refuses_startup"),
+    [
+        ("quantum.x", True),
+        ("cio.qa.x", True),
+        ("QA.x", True),
+        ("qa.x", False),
+    ],
+)
+async def test_qa_shadow_flag_requires_exact_qa_intent_prefix(
+    monkeypatch, caplog, intent_subject, refuses_startup
 ):
     monkeypatch.setenv("QA_SHADOW_MODE", "true")
-    monkeypatch.setenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", intent_subject)
     monkeypatch.setenv("ENABLE_OTEL", "false")
     monkeypatch.setattr("cio.main._enforce_prompt_context_contract", lambda: None)
+    mock_nc = MagicMock()
+    mock_nc.connect = AsyncMock(side_effect=RuntimeError("stop after validation"))
+    monkeypatch.setattr("cio.main.NATS", lambda: mock_nc)
 
     with pytest.raises(SystemExit) as exc_info:
         await main()
 
     assert exc_info.value.code == 1
-    assert (
-        "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'"
-        in caplog.text
-    )
+    if refuses_startup:
+        mock_nc.connect.assert_not_awaited()
+        assert (
+            "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'"
+            in caplog.text
+        )
+    else:
+        mock_nc.connect.assert_awaited_once()
+        assert "Invalid QA shadow configuration" not in caplog.text
 
 
 @pytest.mark.asyncio

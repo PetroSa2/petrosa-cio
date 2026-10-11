@@ -302,6 +302,28 @@ async def test_qa_shadow_mode_uses_neutral_context_without_execution_service(
 
 
 @pytest.mark.asyncio
+async def test_qa_shadow_mode_with_non_qa_intent_keeps_fail_safe_defaults(monkeypatch):
+    monkeypatch.setenv("QA_SHADOW_MODE", "true")
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
+    builder = _make_builder()
+    builder.client.get = AsyncMock(
+        side_effect=httpx.ConnectError("execution service unavailable")
+    )
+
+    portfolio, risk, env_stats = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-shadow-production-subject"
+    )
+
+    assert portfolio.gross_exposure == 1.0
+    assert portfolio.open_positions_count == 999
+    assert risk.max_orders_global == 0
+    assert env_stats["open_orders_global"] == 999
+    builder.client.get.assert_awaited_once()
+    await builder.close()
+
+
+@pytest.mark.asyncio
 async def test_intent_prefix_without_qa_shadow_mode_keeps_fail_safe_defaults(
     monkeypatch,
 ):

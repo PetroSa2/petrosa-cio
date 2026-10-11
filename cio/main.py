@@ -184,15 +184,14 @@ def _enforce_prompt_context_contract() -> None:
     logger.info("Prompt-context contract validated for action_classifier_v1.yaml")
 
 
-def _validate_qa_shadow_configuration(intent_subject: str) -> bool:
-    """Return whether the isolated QA neutral-context fallback is allowed."""
+def _validate_qa_shadow_configuration(intent_subject: str) -> None:
+    """Reject QA shadow mode when the intent subject is not isolated."""
     qa_shadow_mode = os.getenv("QA_SHADOW_MODE", "false").lower() == "true"
     qa_intent_subject = intent_subject.startswith("qa.")
     if qa_shadow_mode and not qa_intent_subject:
         raise ValueError(
             "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'"
         )
-    return qa_shadow_mode and qa_intent_subject
 
 
 async def main():
