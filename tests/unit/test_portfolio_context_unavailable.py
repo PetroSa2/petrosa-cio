@@ -270,7 +270,6 @@ async def test_router_audit_copy_carries_qa_shadow_neutral_context():
 async def test_http_failure_flows_through_build_orchestrator_and_router(qa_shadow_mode):
     """The production and QA HTTP-failure paths preserve distinct audit provenance."""
     base = build_test_context(portfolio_state_available=True)
-    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
     nats_client = AsyncMock()
     vector_client = AsyncMock()
     router = OutputRouter(nats_client=nats_client, vector_client=vector_client)
@@ -278,64 +277,73 @@ async def test_http_failure_flows_through_build_orchestrator_and_router(qa_shado
     async def fail_state(*_args, **_kwargs):
         raise httpx.ConnectError("tradeengine unavailable")
 
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "QA_SHADOW_MODE": "true" if qa_shadow_mode else "false",
-                "NURSE_USE_LLM_REASONING": "false",
-                "DRY_RUN": "false",
-                "NATS_TOPIC_INTENTS": (
-                    "qa.cio.intent" if qa_shadow_mode else "cio.intent"
-                ),
-            },
-        ),
-        patch.object(builder.client, "get", new=fail_state),
-        patch("cio.core.context_builder.asyncio.sleep", new=AsyncMock()),
-        patch.object(builder, "_fetch_regime", new=AsyncMock(return_value=base.regime)),
-        patch.object(
-            builder,
-            "_fetch_strategy_data",
-            new=AsyncMock(return_value=(base.strategy_stats, base.strategy_defaults)),
-        ),
-        patch.object(
-            builder,
-            "_fetch_slippage",
-            new=AsyncMock(return_value=base.slippage),
-        ),
-        patch.object(
-            builder,
-            "_fetch_rounds",
-            new=AsyncMock(return_value=(base.prior_strength, base.strategy_rounds)),
-        ),
-        patch.object(
-            builder,
-            "_fetch_risk_inputs",
-            new=AsyncMock(return_value=base.risk_inputs),
-        ),
-        patch.object(
-            builder,
-            "_build_market_signals",
-            return_value=base.market_signals,
-        ),
-        patch.object(
-            builder,
-            "assemble_pre_decision_context",
-            new=AsyncMock(
-                return_value=base.pre_decision_context.model_copy(
-                    update={"portfolio_state_available": qa_shadow_mode}
-                )
+    env_patch = patch.dict(
+        os.environ,
+        {
+            "QA_SHADOW_MODE": "true" if qa_shadow_mode else "false",
+            "NURSE_USE_LLM_REASONING": "false",
+            "DRY_RUN": "false",
+            "NATS_TOPIC_INTENTS": (
+                "qa.cio.intent.trading" if qa_shadow_mode else "cio.intent"
             ),
-        ),
-    ):
-        context = await builder.build(
-            correlation_id="http-failure-e2e",
-            source_subject="qa.cio.intent" if qa_shadow_mode else "cio.intent",
-            trigger_type=TriggerType.STRATEGY_DEGRADED,
-            payload={"symbol": "BTCUSDT", "strategy_id": "test"},
-        )
-        decision = await Orchestrator(llm_client=MagicMock()).run(context)
-        await router.route(context, decision)
+        },
+    )
+    env_patch.start()
+    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
+    try:
+        with (
+            patch.object(builder.client, "get", new=fail_state),
+            patch("cio.core.context_builder.asyncio.sleep", new=AsyncMock()),
+            patch.object(
+                builder, "_fetch_regime", new=AsyncMock(return_value=base.regime)
+            ),
+            patch.object(
+                builder,
+                "_fetch_strategy_data",
+                new=AsyncMock(
+                    return_value=(base.strategy_stats, base.strategy_defaults)
+                ),
+            ),
+            patch.object(
+                builder,
+                "_fetch_slippage",
+                new=AsyncMock(return_value=base.slippage),
+            ),
+            patch.object(
+                builder,
+                "_fetch_rounds",
+                new=AsyncMock(return_value=(base.prior_strength, base.strategy_rounds)),
+            ),
+            patch.object(
+                builder,
+                "_fetch_risk_inputs",
+                new=AsyncMock(return_value=base.risk_inputs),
+            ),
+            patch.object(
+                builder,
+                "_build_market_signals",
+                return_value=base.market_signals,
+            ),
+            patch.object(
+                builder,
+                "assemble_pre_decision_context",
+                new=AsyncMock(
+                    return_value=base.pre_decision_context.model_copy(
+                        update={"portfolio_state_available": qa_shadow_mode}
+                    )
+                ),
+            ),
+        ):
+            context = await builder.build(
+                correlation_id="http-failure-e2e",
+                source_subject="qa.cio.intent" if qa_shadow_mode else "cio.intent",
+                trigger_type=TriggerType.STRATEGY_DEGRADED,
+                payload={"symbol": "BTCUSDT", "strategy_id": "test"},
+            )
+            decision = await Orchestrator(llm_client=MagicMock()).run(context)
+            await router.route(context, decision)
+    finally:
+        env_patch.stop()
 
     audit_payload = next(
         payload
@@ -364,7 +372,6 @@ async def test_http_failure_flows_through_build_orchestrator_and_router(qa_shado
 @pytest.mark.asyncio
 async def test_concurrent_builds_keep_qa_shadow_marker_on_failing_call_only():
     base = build_test_context(portfolio_state_available=True)
-    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
     state_payload = {
         "portfolio": {
             "gross_exposure": 0.2,
@@ -397,46 +404,58 @@ async def test_concurrent_builds_keep_qa_shadow_marker_on_failing_call_only():
             payload={"symbol": symbol, "strategy_id": "test"},
         )
 
-    with (
-        patch.dict(
-            os.environ,
-            {
-                "QA_SHADOW_MODE": "true",
-                "NURSE_USE_LLM_REASONING": "false",
-                "DRY_RUN": "false",
-            },
-        ),
-        patch.object(builder.client, "get", new=get_state),
-        patch("cio.core.context_builder._PORTFOLIO_FETCH_MAX_RETRIES", 0),
-        patch.object(builder, "_fetch_regime", new=AsyncMock(return_value=base.regime)),
-        patch.object(
-            builder,
-            "_fetch_strategy_data",
-            new=AsyncMock(return_value=(base.strategy_stats, base.strategy_defaults)),
-        ),
-        patch.object(
-            builder, "_fetch_slippage", new=AsyncMock(return_value=base.slippage)
-        ),
-        patch.object(
-            builder,
-            "_fetch_rounds",
-            new=AsyncMock(return_value=(base.prior_strength, base.strategy_rounds)),
-        ),
-        patch.object(
-            builder, "_fetch_risk_inputs", new=AsyncMock(return_value=base.risk_inputs)
-        ),
-        patch.object(
-            builder, "_build_market_signals", return_value=base.market_signals
-        ),
-        patch.object(
-            builder,
-            "assemble_pre_decision_context",
-            new=AsyncMock(return_value=base.pre_decision_context),
-        ),
-    ):
-        failing_context, successful_context = await asyncio.gather(
-            build_context("BTCUSDT"), build_context("ETHUSDT")
-        )
+    env_patch = patch.dict(
+        os.environ,
+        {
+            "QA_SHADOW_MODE": "true",
+            "NATS_TOPIC_INTENTS": "qa.cio.intent.trading",
+            "NURSE_USE_LLM_REASONING": "false",
+            "DRY_RUN": "false",
+        },
+    )
+    env_patch.start()
+    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
+    try:
+        with (
+            patch.object(builder.client, "get", new=get_state),
+            patch("cio.core.context_builder._PORTFOLIO_FETCH_MAX_RETRIES", 0),
+            patch.object(
+                builder, "_fetch_regime", new=AsyncMock(return_value=base.regime)
+            ),
+            patch.object(
+                builder,
+                "_fetch_strategy_data",
+                new=AsyncMock(
+                    return_value=(base.strategy_stats, base.strategy_defaults)
+                ),
+            ),
+            patch.object(
+                builder, "_fetch_slippage", new=AsyncMock(return_value=base.slippage)
+            ),
+            patch.object(
+                builder,
+                "_fetch_rounds",
+                new=AsyncMock(return_value=(base.prior_strength, base.strategy_rounds)),
+            ),
+            patch.object(
+                builder,
+                "_fetch_risk_inputs",
+                new=AsyncMock(return_value=base.risk_inputs),
+            ),
+            patch.object(
+                builder, "_build_market_signals", return_value=base.market_signals
+            ),
+            patch.object(
+                builder,
+                "assemble_pre_decision_context",
+                new=AsyncMock(return_value=base.pre_decision_context),
+            ),
+        ):
+            failing_context, successful_context = await asyncio.gather(
+                build_context("BTCUSDT"), build_context("ETHUSDT")
+            )
+    finally:
+        env_patch.stop()
 
     assert failing_context.context_mode == "qa_shadow_neutral_portfolio"
     assert failing_context.execution_service_contacted is False
