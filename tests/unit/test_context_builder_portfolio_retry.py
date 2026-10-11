@@ -282,6 +282,7 @@ async def test_qa_shadow_mode_uses_neutral_context_without_execution_service(
     monkeypatch,
 ):
     monkeypatch.setenv("QA_SHADOW_MODE", "true")
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", "qa.cio.intent.trading")
     monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
     builder = _make_builder()
     builder.client.get = AsyncMock(
@@ -297,4 +298,27 @@ async def test_qa_shadow_mode_uses_neutral_context_without_execution_service(
     assert risk.max_orders_global == 50
     assert env_stats["open_orders_global"] == 0
     builder.client.get.assert_awaited_once()
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_intent_prefix_without_qa_shadow_mode_keeps_fail_safe_defaults(
+    monkeypatch,
+):
+    monkeypatch.delenv("QA_SHADOW_MODE", raising=False)
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", "qa.cio.intent.trading")
+    monkeypatch.setattr(context_builder_module, "_PORTFOLIO_FETCH_MAX_RETRIES", 0)
+    builder = _make_builder()
+    builder.client.get = AsyncMock(
+        side_effect=httpx.ConnectError("execution service unavailable")
+    )
+
+    portfolio, risk, env_stats = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-prefix-only"
+    )
+
+    assert portfolio.gross_exposure == 1.0
+    assert portfolio.open_positions_count == 999
+    assert risk.max_orders_global == 0
+    assert env_stats["open_orders_global"] == 999
     await builder.close()
