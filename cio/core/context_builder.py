@@ -228,10 +228,9 @@ class ContextBuilder:
         self.intent_subject = intent_subject or os.getenv(
             "NATS_TOPIC_INTENTS", "cio.intent.trading"
         )
-        self.qa_shadow_fallback_enabled = (
-            os.getenv("QA_SHADOW_MODE", "false").lower() == "true"
-            and self.intent_subject.startswith("qa.")
-        )
+        self.qa_shadow_fallback_enabled = os.getenv(
+            "QA_SHADOW_MODE", "false"
+        ).lower() == "true" and self.intent_subject.startswith("qa.")
         self.vector_client = vector_client
         self._clock = clock or time.monotonic
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})

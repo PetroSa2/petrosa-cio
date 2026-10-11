@@ -30,7 +30,10 @@ async def test_qa_shadow_flag_without_qa_intent_prefix_rejects_startup(
         await main()
 
     assert exc_info.value.code == 1
-    assert "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'" in caplog.text
+    assert (
+        "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'"
+        in caplog.text
+    )
 
 
 @pytest.mark.asyncio
