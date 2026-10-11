@@ -514,6 +514,16 @@ class OutputRouter:
         }
         if authority_was_disabled:
             audit_payload["authority_fallback_from"] = original_action.value
+        context_mode = getattr(context, "context_mode", None)
+        execution_service_contacted = getattr(
+            context, "execution_service_contacted", None
+        )
+        if isinstance(context_mode, str) and context_mode:
+            audit_payload["context_mode"] = context_mode
+            if isinstance(execution_service_contacted, bool):
+                audit_payload["execution_service_contacted"] = (
+                    execution_service_contacted
+                )
         _log_final_decision_observability(context, decision, action)
         audit_task = self.vector_client.upsert(
             strategy_id=strategy_id,
@@ -1030,6 +1040,12 @@ class OutputRouter:
         }
         if authority_was_disabled:
             audit_copy_payload["authority_fallback_from"] = original_action.value
+        if isinstance(context_mode, str) and context_mode:
+            audit_copy_payload["context_mode"] = context_mode
+            if isinstance(execution_service_contacted, bool):
+                audit_copy_payload["execution_service_contacted"] = (
+                    execution_service_contacted
+                )
         audit_base = os.getenv("NATS_TOPIC_DECISION_AUDIT")
         if not audit_base:
             audit_base = "qa.cio.decision.audit" if qa_intents else "cio.decision.audit"

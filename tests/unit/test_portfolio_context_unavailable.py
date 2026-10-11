@@ -1,6 +1,7 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from test_engine import build_test_context
 
@@ -8,6 +9,7 @@ from cio.core.assembler import (
     PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE,
     DecisionAssembler,
 )
+from cio.core.context_builder import ContextBuilder
 from cio.core.engine import CodeEngine
 from cio.core.health_evaluator import (
     FALLBACK_TRACE_MARKERS,
@@ -19,6 +21,7 @@ from cio.core.health_evaluator import (
     PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE as HEALTH_PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE,
 )
 from cio.core.orchestrator import Orchestrator
+from cio.core.router import OutputRouter
 from cio.models import (
     ActionType,
     ActivationRecommendation,
@@ -27,6 +30,7 @@ from cio.models import (
     DecisionResult,
     HealthStatus,
     RegimeFit,
+    TriggerType,
 )
 from cio.models.enums import RejectionSource
 
@@ -174,6 +178,8 @@ async def test_router_audit_copy_carries_rejection_source():
     context.decision_id = "decision"
     context.correlation_id = "correlation"
     context.trigger_payload = {}
+    context.context_mode = None
+    context.execution_service_contacted = None
     decision = DecisionResult(
         hard_blocked=True,
         hard_block_reason="PORTFOLIO_CONTEXT_UNAVAILABLE: outage",
@@ -203,6 +209,155 @@ async def test_router_audit_copy_carries_rejection_source():
     assert b'"hard_block_reason": "PORTFOLIO_CONTEXT_UNAVAILABLE: outage"' in (
         audit_payload
     )
+    assert b'"context_mode"' not in audit_payload
+    assert b'"execution_service_contacted"' not in audit_payload
+
+
+@pytest.mark.asyncio
+async def test_router_audit_copy_carries_qa_shadow_neutral_context():
+    from cio.core.router import OutputRouter
+
+    nats_client = AsyncMock()
+    vector_client = AsyncMock()
+    router = OutputRouter(nats_client=nats_client, vector_client=vector_client)
+    context = MagicMock()
+    context.strategy_id = "strategy"
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    context.trigger_payload = {}
+    context.context_mode = "qa_shadow_neutral_portfolio"
+    context.execution_service_contacted = False
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=False,
+        cost_viable=False,
+        action=ActionType.BLOCK,
+        justification="shadow fallback",
+        thought_trace="shadow fallback",
+        regime_confidence=ConfidenceLevel.LOW,
+        regime_fit=RegimeFit.NEUTRAL,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+    )
+
+    with patch.dict(
+        os.environ,
+        {"DRY_RUN": "false", "NATS_TOPIC_INTENTS": "qa.cio.intent"},
+    ):
+        await router.route(context, decision)
+    await router.close()
+
+    audit_payload = next(
+        payload
+        for call in nats_client.publish.call_args_list
+        if call.args[0] == "qa.cio.decision.audit.block"
+        for payload in [call.args[1]]
+    )
+    assert b'"context_mode": "qa_shadow_neutral_portfolio"' in audit_payload
+    assert b'"execution_service_contacted": false' in audit_payload
+    assert vector_client.upsert.call_args.kwargs["payload"]["context_mode"] == (
+        "qa_shadow_neutral_portfolio"
+    )
+    assert (
+        vector_client.upsert.call_args.kwargs["payload"]["execution_service_contacted"]
+        is False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("qa_shadow_mode", [False, True])
+async def test_http_failure_flows_through_build_orchestrator_and_router(qa_shadow_mode):
+    """The production and QA HTTP-failure paths preserve distinct audit provenance."""
+    base = build_test_context(portfolio_state_available=True)
+    builder = ContextBuilder(data_manager_url="http://dm", tradeengine_url="http://te")
+    nats_client = AsyncMock()
+    vector_client = AsyncMock()
+    router = OutputRouter(nats_client=nats_client, vector_client=vector_client)
+
+    async def fail_state(*_args, **_kwargs):
+        raise httpx.ConnectError("tradeengine unavailable")
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "QA_SHADOW_MODE": "true" if qa_shadow_mode else "false",
+                "NURSE_USE_LLM_REASONING": "false",
+                "DRY_RUN": "false",
+                "NATS_TOPIC_INTENTS": (
+                    "qa.cio.intent" if qa_shadow_mode else "cio.intent"
+                ),
+            },
+        ),
+        patch.object(builder.client, "get", new=fail_state),
+        patch("cio.core.context_builder.asyncio.sleep", new=AsyncMock()),
+        patch.object(builder, "_fetch_regime", new=AsyncMock(return_value=base.regime)),
+        patch.object(
+            builder,
+            "_fetch_strategy_data",
+            new=AsyncMock(return_value=(base.strategy_stats, base.strategy_defaults)),
+        ),
+        patch.object(
+            builder,
+            "_fetch_slippage",
+            new=AsyncMock(return_value=base.slippage),
+        ),
+        patch.object(
+            builder,
+            "_fetch_rounds",
+            new=AsyncMock(return_value=(base.prior_strength, base.strategy_rounds)),
+        ),
+        patch.object(
+            builder,
+            "_fetch_risk_inputs",
+            new=AsyncMock(return_value=base.risk_inputs),
+        ),
+        patch.object(
+            builder,
+            "_build_market_signals",
+            return_value=base.market_signals,
+        ),
+        patch.object(
+            builder,
+            "assemble_pre_decision_context",
+            new=AsyncMock(
+                return_value=base.pre_decision_context.model_copy(
+                    update={"portfolio_state_available": qa_shadow_mode}
+                )
+            ),
+        ),
+    ):
+        context = await builder.build(
+            correlation_id="http-failure-e2e",
+            source_subject="qa.cio.intent" if qa_shadow_mode else "cio.intent",
+            trigger_type=TriggerType.STRATEGY_DEGRADED,
+            payload={"symbol": "BTCUSDT", "strategy_id": "test"},
+        )
+        decision = await Orchestrator(llm_client=MagicMock()).run(context)
+        await router.route(context, decision)
+
+    audit_payload = next(
+        payload
+        for call in nats_client.publish.call_args_list
+        if ".decision.audit." in call.args[0]
+        for payload in [call.args[1]]
+    )
+    vector_payload = vector_client.upsert.call_args.kwargs["payload"]
+    if qa_shadow_mode:
+        assert decision.action == ActionType.EXECUTE
+        assert b'"context_mode": "qa_shadow_neutral_portfolio"' in audit_payload
+        assert b'"execution_service_contacted": false' in audit_payload
+        assert vector_payload["context_mode"] == "qa_shadow_neutral_portfolio"
+        assert vector_payload["execution_service_contacted"] is False
+    else:
+        assert decision.action == ActionType.BLOCK
+        assert b'"context_mode"' not in audit_payload
+        assert b'"execution_service_contacted"' not in audit_payload
+        assert "context_mode" not in vector_payload
+        assert "execution_service_contacted" not in vector_payload
+
+    await router.close()
+    await builder.close()
 
 
 @pytest.mark.asyncio

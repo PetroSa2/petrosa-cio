@@ -247,6 +247,8 @@ class ContextBuilder:
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
         ] = {}
+        self._context_mode: str | None = None
+        self._execution_service_contacted: bool | None = None
         # P1.4-AC1 (#131): wired in by main.py at startup so the
         # PreDecisionContext bundle can read live evaluator verdicts
         # without coupling to NATS in this layer. ``None`` is the legacy
@@ -289,6 +291,8 @@ class ContextBuilder:
                 "trigger_type": trigger_type.value,
             },
         )
+        self._context_mode = None
+        self._execution_service_contacted = None
 
         symbol = payload.get("symbol", "BTCUSDT")
         # petrosa-cio#212: the raw payload value may be a human display name
@@ -346,6 +350,8 @@ class ContextBuilder:
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
+        context_mode = self._context_mode
+        execution_service_contacted = self._execution_service_contacted
 
         commission = self._commission_from(env_stats.get("commission"))
         drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
@@ -431,6 +437,8 @@ class ContextBuilder:
             available_capital_usd=env_stats.get("available_capital_usd", 0.0),
             portfolio=portfolio,
             risk_limits=risk,
+            context_mode=context_mode,
+            execution_service_contacted=execution_service_contacted,
             commission=commission,
             slippage=slippage,
             prior_strength=prior_strength,
@@ -1451,6 +1459,8 @@ class ContextBuilder:
                 )
             if availability is not None:
                 availability["portfolio"] = True
+            self._context_mode = "qa_shadow_neutral_portfolio"
+            self._execution_service_contacted = False
             return (
                 PortfolioSummary(
                     gross_exposure=0.0,
