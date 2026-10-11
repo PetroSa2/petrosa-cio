@@ -18,6 +18,22 @@ def test_litellm_logger_silenced_at_import_time():
 
 
 @pytest.mark.asyncio
+async def test_qa_shadow_flag_without_qa_intent_prefix_rejects_startup(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("QA_SHADOW_MODE", "true")
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    monkeypatch.setenv("ENABLE_OTEL", "false")
+    monkeypatch.setattr("cio.main._enforce_prompt_context_contract", lambda: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 1
+    assert "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_nats_subscription_with_wildcard():
     """Verify that the NATS listener subscribes to the correct subject with a wildcard."""
     # Create a mock for the NATS client that supports connect()

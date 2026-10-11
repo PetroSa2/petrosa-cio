@@ -221,9 +221,17 @@ class ContextBuilder:
         vector_client: VectorClientProtocol | None = None,
         evaluator_subscriber: Any | None = None,
         clock: Callable[[], float] | None = None,
+        intent_subject: str | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
+        self.intent_subject = intent_subject or os.getenv(
+            "NATS_TOPIC_INTENTS", "cio.intent.trading"
+        )
+        self.qa_shadow_fallback_enabled = (
+            os.getenv("QA_SHADOW_MODE", "false").lower() == "true"
+            and self.intent_subject.startswith("qa.")
+        )
         self.vector_client = vector_client
         self._clock = clock or time.monotonic
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
@@ -1436,7 +1444,7 @@ class ContextBuilder:
             f"Failed to fetch portfolio/risk: {e}",
             extra={"correlation_id": correlation_id},
         )
-        if os.getenv("QA_SHADOW_MODE", "false").lower() == "true":
+        if self.qa_shadow_fallback_enabled:
             logger.warning(
                 "QA_SHADOW_MODE: using isolated neutral portfolio/risk context; "
                 "no execution service is contacted",
