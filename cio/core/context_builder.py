@@ -247,8 +247,6 @@ class ContextBuilder:
         self._portfolio_cache: dict[
             str, tuple[float, PortfolioSummary, RiskLimits, dict[str, Any]]
         ] = {}
-        self._context_mode: str | None = None
-        self._execution_service_contacted: bool | None = None
         # P1.4-AC1 (#131): wired in by main.py at startup so the
         # PreDecisionContext bundle can read live evaluator verdicts
         # without coupling to NATS in this layer. ``None`` is the legacy
@@ -291,9 +289,6 @@ class ContextBuilder:
                 "trigger_type": trigger_type.value,
             },
         )
-        self._context_mode = None
-        self._execution_service_contacted = None
-
         symbol = payload.get("symbol", "BTCUSDT")
         # petrosa-cio#212: the raw payload value may be a human display name
         # ("Spread Liquidity Monitor" instead of "spread_liquidity") — the
@@ -322,12 +317,17 @@ class ContextBuilder:
             "characterization": True,
             "market_signals": True,
         }
+        provenance: dict[str, str | bool] = {}
         fetch_tasks = [
             self._fetch_regime(
                 symbol, correlation_id, gaps=gaps, availability=availability
             ),
             self._fetch_portfolio_and_risk(
-                symbol, correlation_id, gaps=gaps, availability=availability
+                symbol,
+                correlation_id,
+                gaps=gaps,
+                availability=availability,
+                provenance=provenance,
             ),
             self._fetch_strategy_data(strategy_id, correlation_id, gaps=gaps),
         ]
@@ -350,8 +350,8 @@ class ContextBuilder:
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
-        context_mode = self._context_mode
-        execution_service_contacted = self._execution_service_contacted
+        context_mode = provenance.get("context_mode")
+        execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
         drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
@@ -1356,6 +1356,7 @@ class ContextBuilder:
         correlation_id: str,
         gaps: list[ContextGap] | None = None,
         availability: dict[str, bool] | None = None,
+        provenance: dict[str, str | bool] | None = None,
     ) -> tuple[PortfolioSummary, RiskLimits, dict[str, Any]]:
         """Fetches portfolio and risk data from tradeengine.
 
@@ -1459,8 +1460,9 @@ class ContextBuilder:
                 )
             if availability is not None:
                 availability["portfolio"] = True
-            self._context_mode = "qa_shadow_neutral_portfolio"
-            self._execution_service_contacted = False
+            if provenance is not None:
+                provenance["context_mode"] = "qa_shadow_neutral_portfolio"
+                provenance["execution_service_contacted"] = False
             return (
                 PortfolioSummary(
                     gross_exposure=0.0,
