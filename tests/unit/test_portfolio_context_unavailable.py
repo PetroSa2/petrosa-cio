@@ -174,6 +174,8 @@ async def test_router_audit_copy_carries_rejection_source():
     context.decision_id = "decision"
     context.correlation_id = "correlation"
     context.trigger_payload = {}
+    context.context_mode = None
+    context.execution_service_contacted = None
     decision = DecisionResult(
         hard_blocked=True,
         hard_block_reason="PORTFOLIO_CONTEXT_UNAVAILABLE: outage",
@@ -202,6 +204,59 @@ async def test_router_audit_copy_carries_rejection_source():
     assert b'"rejection_source": "portfolio_context_unavailable"' in audit_payload
     assert b'"hard_block_reason": "PORTFOLIO_CONTEXT_UNAVAILABLE: outage"' in (
         audit_payload
+    )
+    assert b'"context_mode"' not in audit_payload
+    assert b'"execution_service_contacted"' not in audit_payload
+
+
+@pytest.mark.asyncio
+async def test_router_audit_copy_carries_qa_shadow_neutral_context():
+    from cio.core.router import OutputRouter
+
+    nats_client = AsyncMock()
+    vector_client = AsyncMock()
+    router = OutputRouter(nats_client=nats_client, vector_client=vector_client)
+    context = MagicMock()
+    context.strategy_id = "strategy"
+    context.decision_id = "decision"
+    context.correlation_id = "correlation"
+    context.trigger_payload = {}
+    context.context_mode = "qa_shadow_neutral_portfolio"
+    context.execution_service_contacted = False
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=False,
+        cost_viable=False,
+        action=ActionType.BLOCK,
+        justification="shadow fallback",
+        thought_trace="shadow fallback",
+        regime_confidence=ConfidenceLevel.LOW,
+        regime_fit=RegimeFit.NEUTRAL,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+    )
+
+    with patch.dict(
+        os.environ,
+        {"DRY_RUN": "false", "NATS_TOPIC_INTENTS": "qa.cio.intent"},
+    ):
+        await router.route(context, decision)
+    await router.close()
+
+    audit_payload = next(
+        payload
+        for call in nats_client.publish.call_args_list
+        if call.args[0] == "qa.cio.decision.audit.block"
+        for payload in [call.args[1]]
+    )
+    assert b'"context_mode": "qa_shadow_neutral_portfolio"' in audit_payload
+    assert b'"execution_service_contacted": false' in audit_payload
+    assert vector_client.upsert.call_args.kwargs["payload"]["context_mode"] == (
+        "qa_shadow_neutral_portfolio"
+    )
+    assert (
+        vector_client.upsert.call_args.kwargs["payload"]["execution_service_contacted"]
+        is False
     )
 
 

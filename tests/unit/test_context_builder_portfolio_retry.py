@@ -296,5 +296,7 @@ async def test_qa_shadow_mode_uses_neutral_context_without_execution_service(
     assert portfolio.open_positions_count == 0
     assert risk.max_orders_global == 50
     assert env_stats["open_orders_global"] == 0
+    assert env_stats["_context_mode"] == "qa_shadow_neutral_portfolio"
+    assert env_stats["_execution_service_contacted"] is False
     builder.client.get.assert_awaited_once()
     await builder.close()

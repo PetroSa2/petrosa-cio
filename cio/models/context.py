@@ -191,6 +191,10 @@ class TriggerContext(BaseModel):
     available_capital_usd: float
     portfolio: PortfolioSummary
     risk_limits: RiskLimits
+    # QA shadow fallback provenance; None keeps legacy production contexts
+    # and audit payloads unchanged.
+    context_mode: str | None = None
+    execution_service_contacted: bool | None = None
 
     # Market Constants for calculations
     # Measured costs for the net-EV gate (petrosa-cio#296); None means unavailable (labelled fallbacks).

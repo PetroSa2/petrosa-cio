@@ -346,6 +346,8 @@ class ContextBuilder:
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
+        context_mode = env_stats.get("_context_mode")
+        execution_service_contacted = env_stats.get("_execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
         drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
@@ -431,6 +433,8 @@ class ContextBuilder:
             available_capital_usd=env_stats.get("available_capital_usd", 0.0),
             portfolio=portfolio,
             risk_limits=risk,
+            context_mode=context_mode,
+            execution_service_contacted=execution_service_contacted,
             commission=commission,
             slippage=slippage,
             prior_strength=prior_strength,
@@ -1467,6 +1471,8 @@ class ContextBuilder:
                     "global_drawdown_pct": 0.0,
                     "open_orders_global": 0,
                     "available_capital_usd": 100000.0,
+                    "_context_mode": "qa_shadow_neutral_portfolio",
+                    "_execution_service_contacted": False,
                 },
             )
         if gaps is not None:
