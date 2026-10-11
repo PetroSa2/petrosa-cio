@@ -184,6 +184,17 @@ def _enforce_prompt_context_contract() -> None:
     logger.info("Prompt-context contract validated for action_classifier_v1.yaml")
 
 
+def _validate_qa_shadow_configuration(intent_subject: str) -> bool:
+    """Return whether the isolated QA neutral-context fallback is allowed."""
+    qa_shadow_mode = os.getenv("QA_SHADOW_MODE", "false").lower() == "true"
+    qa_intent_subject = intent_subject.startswith("qa.")
+    if qa_shadow_mode and not qa_intent_subject:
+        raise ValueError(
+            "QA_SHADOW_MODE=true requires NATS_TOPIC_INTENTS to start with 'qa.'"
+        )
+    return qa_shadow_mode and qa_intent_subject
+
+
 async def main():
     # 0. Enforce prompt-context contract before any service wiring (P1.4-AC3).
     _enforce_prompt_context_contract()
@@ -229,6 +240,11 @@ async def main():
     # NATS reconnect-and-resubscribe supervisor added below can replay the
     # exact same subject after a permanent-closure reconnect.
     intents_subject = os.getenv("NATS_TOPIC_INTENTS", "cio.intent.trading")
+    try:
+        _validate_qa_shadow_configuration(intents_subject)
+    except ValueError as exc:
+        logger.critical("Invalid QA shadow configuration: %s", exc)
+        raise SystemExit(1) from exc
     if not intents_subject.endswith(">"):
         _base_subject = intents_subject.rstrip(".*")
         subscribe_subject = f"{_base_subject}.>"
@@ -414,6 +430,7 @@ async def main():
         data_manager_url=data_manager_url,
         tradeengine_url=tradeengine_url,
         vector_client=vector_client,
+        intent_subject=intents_subject,
     )
 
     # petrosa-cio#312: refresh the data-manager reports now, off the decision path, and watch the loop so a
