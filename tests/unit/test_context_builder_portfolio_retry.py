@@ -290,13 +290,15 @@ async def test_qa_shadow_mode_uses_neutral_context_without_execution_service(
     )
 
     portfolio, risk, env_stats = await builder._fetch_portfolio_and_risk(
-        "BTCUSDT", "cid-shadow"
+        "BTCUSDT", "cid-shadow", provenance={}
     )
 
     assert portfolio.gross_exposure == 0.0
     assert portfolio.open_positions_count == 0
     assert risk.max_orders_global == 50
     assert env_stats["open_orders_global"] == 0
+    assert "_context_mode" not in env_stats
+    assert "_execution_service_contacted" not in env_stats
     builder.client.get.assert_awaited_once()
     await builder.close()
 

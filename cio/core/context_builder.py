@@ -296,7 +296,6 @@ class ContextBuilder:
                 "trigger_type": trigger_type.value,
             },
         )
-
         symbol = payload.get("symbol", "BTCUSDT")
         # petrosa-cio#212: the raw payload value may be a human display name
         # ("Spread Liquidity Monitor" instead of "spread_liquidity") — the
@@ -325,12 +324,17 @@ class ContextBuilder:
             "characterization": True,
             "market_signals": True,
         }
+        provenance: dict[str, str | bool] = {}
         fetch_tasks = [
             self._fetch_regime(
                 symbol, correlation_id, gaps=gaps, availability=availability
             ),
             self._fetch_portfolio_and_risk(
-                symbol, correlation_id, gaps=gaps, availability=availability
+                symbol,
+                correlation_id,
+                gaps=gaps,
+                availability=availability,
+                provenance=provenance,
             ),
             self._fetch_strategy_data(strategy_id, correlation_id, gaps=gaps),
         ]
@@ -353,6 +357,8 @@ class ContextBuilder:
         portfolio, risk, env_stats = results[1]
         stats, defaults = results[2]
         historical_context = results[3] if vector_task else None
+        context_mode = provenance.get("context_mode")
+        execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
         drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
@@ -438,6 +444,8 @@ class ContextBuilder:
             available_capital_usd=env_stats.get("available_capital_usd", 0.0),
             portfolio=portfolio,
             risk_limits=risk,
+            context_mode=context_mode,
+            execution_service_contacted=execution_service_contacted,
             commission=commission,
             slippage=slippage,
             prior_strength=prior_strength,
@@ -1355,6 +1363,7 @@ class ContextBuilder:
         correlation_id: str,
         gaps: list[ContextGap] | None = None,
         availability: dict[str, bool] | None = None,
+        provenance: dict[str, str | bool] | None = None,
     ) -> tuple[PortfolioSummary, RiskLimits, dict[str, Any]]:
         """Fetches portfolio and risk data from tradeengine.
 
@@ -1458,6 +1467,9 @@ class ContextBuilder:
                 )
             if availability is not None:
                 availability["portfolio"] = True
+            if provenance is not None:
+                provenance["context_mode"] = "qa_shadow_neutral_portfolio"
+                provenance["execution_service_contacted"] = False
             return (
                 PortfolioSummary(
                     gross_exposure=0.0,
