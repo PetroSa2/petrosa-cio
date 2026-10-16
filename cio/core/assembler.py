@@ -335,7 +335,7 @@ class DecisionAssembler:
                     decision.sizing = decision.sizing.model_copy(
                         update={
                             "final_size_usd": decision.computed_position_size_usd,
-                            "binding": "deterministic_fallback_probe",
+                            "binding": "probe",
                         }
                     )
             decision.arbiter = "deterministic_fallback"

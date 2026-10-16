@@ -7,11 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cio.clients.llm_client import CIO_LLM_Client
+from cio.core.assembler import DecisionAssembler
 from cio.core.llm_fallback import llm_fallback_mode
 from cio.core.orchestrator import Orchestrator
 from cio.models import (
     SAFE_DEFAULTS,
     ActionType,
+    CodeEngineResult,
     ConfidenceLevel,
     MarketSignals,
     PnlTrend,
@@ -21,6 +23,7 @@ from cio.models import (
     RegimeFit,
     RegimeResult,
     RiskLimits,
+    SizingRecord,
     StrategyDefaults,
     StrategyStats,
     TriggerContext,
@@ -374,6 +377,50 @@ async def test_deterministic_fallback_metric_uses_outage_reason():
         1,
         {"reason": "llm_unavailable"},
     )
+
+
+def test_deterministic_fallback_skips_a_hard_gate():
+    context = _make_context()
+    decision = DecisionAssembler.assemble_llm_unavailable(
+        context=context,
+        code_result=CodeEngineResult(
+            hard_blocked=True,
+            block_reason="exposure gate failed",
+        ),
+        regime_result=SAFE_DEFAULTS[REGIME_PROMPT_ID],
+        strategy_result=SAFE_DEFAULTS[STRATEGY_PROMPT_ID],
+        failed_stages=[ACTION_PROMPT_ID],
+    )
+
+    assert decision.action == ActionType.SKIP
+    assert decision.justification == "exposure gate failed"
+    assert decision.arbiter == "deterministic_fallback"
+
+
+def test_deterministic_fallback_updates_probe_sizing_record():
+    context = _make_context()
+    decision = DecisionAssembler.assemble_llm_unavailable(
+        context=context,
+        code_result=CodeEngineResult(
+            kelly_position_usd=500.0,
+            recommended_sl_pct=0.02,
+            recommended_tp_pct=0.04,
+            sizing=SizingRecord(
+                f_q=0.1,
+                equity_usd=1000.0,
+                probe_usd=100.0,
+                final_size_usd=500.0,
+            ),
+        ),
+        regime_result=SAFE_DEFAULTS[REGIME_PROMPT_ID],
+        strategy_result=SAFE_DEFAULTS[STRATEGY_PROMPT_ID],
+        failed_stages=[ACTION_PROMPT_ID],
+    )
+
+    assert decision.action == ActionType.EXECUTE
+    assert decision.sizing is not None
+    assert decision.sizing.final_size_usd == decision.computed_position_size_usd
+    assert decision.sizing.binding == "probe"
 
 
 def test_is_safe_default_is_identity_not_equality():
