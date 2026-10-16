@@ -82,6 +82,7 @@ class DecisionResult(BaseModel):
     action: ActionType | None = None
     justification: str | None = None
     thought_trace: str | None = None
+    arbiter: str | None = None
 
     # 8. Structured rejection metadata (FR53 / P3.4, #130).
     # When `action` is a refusal (REJECT / BLOCK / FAIL_SAFE), `rejection_source`

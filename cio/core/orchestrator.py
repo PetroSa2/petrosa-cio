@@ -16,6 +16,7 @@ from cio.core.confidence_calibration import (
 from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.llm_fallback import llm_fallback_mode
 from cio.core.net_ev import gate_enforced, prefilter_mode
 from cio.core.portfolio_tracker import PortfolioTracker
 from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
@@ -647,6 +648,10 @@ class Orchestrator:
                     regime_result=regime,
                     strategy_result=strategy,
                     failed_stages=failed,
+                    fallback_mode=llm_fallback_mode(),
+                    calibration_status=(
+                        calibration_status if calibration_mode() == "enforce" else None
+                    ),
                 )
                 await self._check_spend_ceiling(context.correlation_id)
                 self._emit_decision_action(decision.action)

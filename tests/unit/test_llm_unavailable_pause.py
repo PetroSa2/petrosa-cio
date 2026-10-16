@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cio.clients.llm_client import CIO_LLM_Client
+from cio.core.llm_fallback import llm_fallback_mode
 from cio.core.orchestrator import Orchestrator
 from cio.models import (
     SAFE_DEFAULTS,
@@ -185,7 +186,8 @@ class ScriptedClient(CIO_LLM_Client):
     "failure", ["transport", "circuit_breaker", "missing_input", "validation"]
 )
 @pytest.mark.asyncio
-async def test_classifier_outage_pauses_strategy(failure):
+async def test_classifier_outage_pauses_strategy(monkeypatch, failure):
+    monkeypatch.setenv("CIO_LLM_FALLBACK_MODE", "pause")
     client = ScriptedClient({ACTION_PROMPT_ID: failure})
     orchestrator = Orchestrator(client, _mock_cache(None, None))
 
@@ -208,7 +210,7 @@ async def test_upstream_outage_pauses_without_classifier_call():
 
     decision = await orchestrator.run(_make_context())
 
-    assert decision.action == ActionType.PAUSE_STRATEGY
+    assert decision.action == ActionType.EXECUTE
     assert REGIME_PROMPT_ID in decision.justification
     assert ACTION_PROMPT_ID not in client.calls
 
@@ -221,7 +223,7 @@ async def test_each_upstream_outage_skips_classifier(failed_prompt):
 
     decision = await orchestrator.run(_make_context())
 
-    assert decision.action == ActionType.PAUSE_STRATEGY
+    assert decision.action == ActionType.EXECUTE
     assert failed_prompt in decision.justification
     assert ACTION_PROMPT_ID not in client.calls
 
@@ -270,7 +272,8 @@ async def test_unresolvable_strategy_id_outage_skips(strategy_id, caplog):
 
 
 @pytest.mark.asyncio
-async def test_llm_unavailable_metric_emitted():
+async def test_llm_unavailable_metric_emitted(monkeypatch):
+    monkeypatch.setenv("CIO_LLM_FALLBACK_MODE", "pause")
     client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
     orchestrator = Orchestrator(client, _mock_cache(None, None))
     metric = MagicMock()
@@ -315,7 +318,8 @@ async def test_deterministic_bypass_is_not_an_outage(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_llm_unavailable_pause_log_line_in_message_text(caplog):
+async def test_llm_unavailable_pause_log_line_in_message_text(monkeypatch, caplog):
+    monkeypatch.setenv("CIO_LLM_FALLBACK_MODE", "pause")
     client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
     orchestrator = Orchestrator(client, _mock_cache(None, None))
 
@@ -344,8 +348,44 @@ async def test_legitimate_classifier_skip_is_not_converted():
     assert decision.thought_trace != "LLM_UNAVAILABLE"
 
 
+@pytest.mark.asyncio
+async def test_deterministic_fallback_executes_at_probe_size_and_records_arbiter():
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+
+    decision = await orchestrator.run(_make_context())
+
+    assert decision.action == ActionType.EXECUTE
+    assert decision.computed_position_size_usd == 100.0
+    assert decision.arbiter == "deterministic_fallback"
+    assert decision.rejection_source == RejectionSource.LLM_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_deterministic_fallback_metric_uses_outage_reason():
+    client = ScriptedClient({ACTION_PROMPT_ID: "transport"})
+    orchestrator = Orchestrator(client, _mock_cache(None, None))
+    metric = MagicMock()
+
+    with patch("cio.core.metrics.ARBITER_FALLBACK_TOTAL", metric):
+        await orchestrator.run(_make_context())
+
+    metric.add.assert_called_once_with(
+        1,
+        {"reason": "llm_unavailable"},
+    )
+
+
 def test_is_safe_default_is_identity_not_equality():
     fallback = SAFE_DEFAULTS[ACTION_PROMPT_ID]
     assert is_safe_default(ACTION_PROMPT_ID, fallback)
     assert not is_safe_default(ACTION_PROMPT_ID, fallback.model_copy())
     assert not is_safe_default("unknown", fallback)
+
+
+def test_llm_fallback_mode_defaults_to_deterministic_and_rejects_unknown(monkeypatch):
+    monkeypatch.delenv("CIO_LLM_FALLBACK_MODE", raising=False)
+    assert llm_fallback_mode() == "deterministic"
+
+    monkeypatch.setenv("CIO_LLM_FALLBACK_MODE", "unsupported")
+    assert llm_fallback_mode() == "deterministic"

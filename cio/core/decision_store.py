@@ -26,6 +26,7 @@ class DecisionRecord:
     action: str
     reasoning_trace: str
     confidence: float
+    arbiter: str | None = None
     decision_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=lambda: datetime.now(_UTC))
     # FR53 / P3.4 (#130) — structured refusal source. None on accepts and on
