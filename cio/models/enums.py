@@ -149,6 +149,7 @@ class RejectionSource(StrEnum):
     # back to SAFE_DEFAULTS and cio paused the strategy. Only this source is
     # eligible for automatic resume.
     LLM_UNAVAILABLE = "llm_unavailable"
+    CONCENTRATION_CAP = "concentration_cap"
 
 
 class TriggerType(StrEnum):

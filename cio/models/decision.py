@@ -88,6 +88,7 @@ class DecisionResult(BaseModel):
     # records the structured reason so audit-trail consumers and the operator
     # dashboard can group refusals without parsing `hard_block_reason`.
     rejection_source: RejectionSource | None = None
+    concentration_cap: dict[str, object] | None = None
 
 
 # SAFE_DEFAULTS: Authoritative source for parse failure fallbacks
