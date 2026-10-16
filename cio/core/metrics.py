@@ -237,6 +237,11 @@ LLM_UNAVAILABLE_DECISIONS = meter.create_counter(
     description="Decisions forced by an LLM outage (a persona stage returned SAFE_DEFAULTS)",
 )
 
+ARBITER_FALLBACK_TOTAL = meter.create_counter(
+    "cio_arbiter_fallback_total",
+    description="Deterministic arbiter fallbacks caused by LLM unavailability (attribute: reason)",
+)
+
 AUTO_RESUME_EVENTS = meter.create_counter(
     "cio_auto_resume_events_total",
     description="Auto-resume outcomes for LLM_UNAVAILABLE pauses (attribute: result)",

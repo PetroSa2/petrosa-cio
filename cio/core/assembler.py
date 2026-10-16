@@ -2,6 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from cio.core.confidence_calibration import effective_confidence
+from cio.core.llm_fallback import llm_fallback_mode
 from cio.core.net_ev import evaluate as evaluate_net_ev
 from cio.core.net_ev import gate_enforced, log_gate, probe_notional
 from cio.models import (
@@ -250,8 +251,97 @@ class DecisionAssembler:
         regime_result: RegimeResult,
         strategy_result: StrategyResult,
         failed_stages: list[str],
+        fallback_mode: str | None = None,
+        calibration_status: dict | None = None,
     ) -> DecisionResult:
         stages = ",".join(failed_stages)
+        if (fallback_mode or llm_fallback_mode()) == "deterministic":
+            resolvable = bool(context.strategy_id) and context.strategy_id != "unknown"
+            if not resolvable:
+                decision = DecisionResult(
+                    hard_blocked=False,
+                    ev_passes=False,
+                    cost_viable=False,
+                    regime_confidence=context.regime.regime_confidence,
+                    regime_fit=RegimeFit.NEUTRAL,
+                    strategy_health=HealthStatus.HEALTHY,
+                    activation_recommendation=ActivationRecommendation.RUN,
+                    action=ActionType.SKIP,
+                    justification=(
+                        f"LLM_UNAVAILABLE: {stages} unavailable; "
+                        "strategy_id unresolvable"
+                    ),
+                    thought_trace=LLM_UNAVAILABLE_TRACE,
+                    rejection_source=RejectionSource.LLM_UNAVAILABLE,
+                    arbiter="deterministic_fallback",
+                )
+                from cio.core.metrics import ARBITER_FALLBACK_TOTAL
+
+                ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
+                logger.error(
+                    "LLM_UNAVAILABLE_UNRESOLVABLE_STRATEGY strategy_id=%r stages=%s "
+                    "correlation_id=%s",
+                    context.strategy_id,
+                    stages,
+                    context.correlation_id,
+                )
+                return decision
+            fallback_strategy = strategy_result.model_copy(
+                update={
+                    "activation_recommendation": ActivationRecommendation.RUN,
+                    "health": HealthStatus.HEALTHY,
+                    "regime_fit": RegimeFit.NEUTRAL,
+                    "thought_trace": "DETERMINISTIC_FALLBACK",
+                }
+            )
+            decision = DecisionAssembler.assemble(
+                context=context,
+                code_result=code_result,
+                regime_result=context.regime,
+                strategy_result=fallback_strategy,
+                llm_action=ActionType.EXECUTE,
+                llm_justification=(
+                    f"LLM_UNAVAILABLE: {stages} unavailable; deterministic gates only"
+                ),
+                calibration_status=calibration_status,
+            )
+            gate_reason = (
+                decision.hard_block_reason
+                or (decision.net_ev_gate.reason if decision.net_ev_gate else None)
+                or "deterministic_gate_failed"
+            )
+            if (
+                decision.action != ActionType.EXECUTE
+                or decision.hard_blocked
+                or (
+                    decision.net_ev_gate is not None
+                    and decision.net_ev_gate.result == "fail"
+                    and decision.net_ev_gate.outcome != "probe"
+                )
+            ):
+                decision.action = ActionType.SKIP
+                decision.justification = gate_reason
+                decision.computed_position_size_usd = 0.0
+            else:
+                decision.computed_position_size_usd = probe_notional(context)
+                decision.justification = (
+                    f"LLM_UNAVAILABLE: {stages} unavailable; deterministic gates passed; "
+                    "executing at probe size"
+                )
+                if decision.sizing is not None:
+                    decision.sizing = decision.sizing.model_copy(
+                        update={
+                            "final_size_usd": decision.computed_position_size_usd,
+                            "binding": "probe",
+                        }
+                    )
+            decision.arbiter = "deterministic_fallback"
+            decision.rejection_source = RejectionSource.LLM_UNAVAILABLE
+            from cio.core.metrics import ARBITER_FALLBACK_TOTAL
+
+            ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
+            return decision
+
         resolvable = bool(context.strategy_id) and context.strategy_id != "unknown"
 
         if resolvable:
@@ -298,4 +388,5 @@ class DecisionAssembler:
             justification=justification,
             thought_trace=LLM_UNAVAILABLE_TRACE,
             rejection_source=RejectionSource.LLM_UNAVAILABLE,
+            arbiter="llm_pause_fallback",
         )

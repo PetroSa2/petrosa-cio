@@ -1062,6 +1062,7 @@ class OutputRouter:
                 else None
             ),
             "hard_block_reason": decision.hard_block_reason,
+            "arbiter": decision.arbiter,
         }
         if authority_was_disabled:
             audit_copy_payload["authority_fallback_from"] = original_action.value
@@ -1173,6 +1174,7 @@ class OutputRouter:
                     confidence=_confidence_map.get(
                         getattr(decision.regime_confidence, "value", "").upper(), 0.5
                     ),
+                    arbiter=decision.arbiter,
                     decision_id=decision_id,
                     rejection_source=rejection_source_value,
                     strategy_revision_id=getattr(context, "strategy_revision_id", None),
