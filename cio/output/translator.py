@@ -2,6 +2,8 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from petrosa_contracts import Signal
+
 from cio.models import DecisionResult, TriggerContext
 
 logger = logging.getLogger(__name__)
@@ -45,7 +47,7 @@ def resolve_direction_token(token: Any) -> tuple[str, str | None] | None:
 
 class TradeEngineTranslator:
     """
-    Translates CIO DecisionResult into the legacy Signal model
+    Translates CIO DecisionResult into the shared Signal contract
     expected by petrosa-tradeengine.
     """
 
@@ -54,7 +56,7 @@ class TradeEngineTranslator:
         context: TriggerContext, decision: DecisionResult
     ) -> dict[str, Any] | None:
         """
-        Maps new domain models to legacy Signal JSON structure.
+        Maps new domain models to the shared Signal JSON structure.
 
         Mapping Rules:
         - action: Maps to 'buy'/'sell'/'close' via an explicit closed lookup
@@ -131,7 +133,7 @@ class TradeEngineTranslator:
             # signal_aggregator.py scored EVERY CIO-routed signal a
             # constant 0.9*0.7=0.63 regardless of the strategy's actual
             # timeframe, making per-timeframe weighting inert.
-            # `contracts.signal.Signal.confidence` is a REQUIRED float
+            # `petrosa_contracts.Signal.confidence` is a REQUIRED float
             # (0<=v<=1, no default) — unlike the arbiter's own tolerant
             # default (`listener.py`'s `payload.get("confidence", 0.5)`),
             # we must always emit a concrete, in-range value here or the
@@ -151,14 +153,14 @@ class TradeEngineTranslator:
             # trust an upstream contract to hold forever — Signal(**result)
             # would otherwise raise ValueError on an out-of-range value.
             confidence = max(0.0, min(1.0, confidence))
-            # "1h" mirrors contracts/signal.py's own default so a payload
+            # "1h" mirrors petrosa_contracts.Signal's own default so a payload
             # that genuinely omits timeframe behaves exactly as before
             # (silent fallback, not a new hardcode) — only the previous
             # unconditional omission is fixed.
             timeframe = context.trigger_payload.get("timeframe") or "1h"
 
-            # 3. Build Legacy Payload
-            # Matching petrosa-tradeengine/contracts/signal.py Signal model
+            # 3. Build the shared contract payload
+            # Matching petrosa_contracts.Signal
             # petrosa_k8s#1127: include position_id as client_order_id so
             # the trade engine can echo it back on position updates.
             legacy_signal = {
@@ -209,6 +211,7 @@ class TradeEngineTranslator:
                 },
             }
 
+            Signal.model_validate(legacy_signal)
             return legacy_signal
 
         except Exception as e:
