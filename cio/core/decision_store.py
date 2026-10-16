@@ -50,6 +50,7 @@ class DecisionRecord:
     sizing: SizingRecord | None = None
     drawdown: DrawdownDecision | None = None
     net_ev_gate: NetEvGate | None = None
+    new_notional_usd: float = 0.0
 
 
 class DecisionStore:

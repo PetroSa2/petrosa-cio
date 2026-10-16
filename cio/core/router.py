@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
@@ -14,6 +15,7 @@ from cio.core.alerting.fr66_alerts import (
     publish_fr66_alert,
 )
 from cio.core.cache import AsyncRedisCache
+from cio.core.concentration_cap import evaluate as evaluate_concentration
 from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.pause_payload import build_ta_bot_pause_payload
@@ -360,6 +362,29 @@ class OutputRouter:
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
         qa_intents = os.getenv("NATS_TOPIC_INTENTS", "").startswith("qa.")
+
+        if action == ActionType.EXECUTE:
+            concentration_at = datetime.now(UTC)
+            prior_records = (
+                self.decision_store.recent(concentration_at - timedelta(hours=1))
+                if self.decision_store is not None
+                else []
+            )
+            concentration = evaluate_concentration(
+                strategy_id=strategy_id,
+                proposed_notional_usd=decision.computed_position_size_usd or 0.0,
+                records=prior_records,
+                at=concentration_at,
+            )
+            decision.concentration_cap = concentration.as_reason()
+            if concentration.exceeded and concentration.mode == "enforce":
+                action = ActionType.SKIP
+                decision.action = action
+                decision.rejection_source = RejectionSource.CONCENTRATION_CAP
+                decision.justification = (
+                    "Concentration cap rejected execute: "
+                    f"{json.dumps(concentration.as_reason(), sort_keys=True)}"
+                )
 
         # P1.5-AC3 (#137) / #174 — resolve the admission-time leverage
         # decision ONCE per routed decision so the SAME `decided_leverage`
@@ -1162,6 +1187,11 @@ class OutputRouter:
                     net_ev_gate=decision.net_ev_gate
                     if isinstance(decision.net_ev_gate, BaseModel)
                     else None,
+                    new_notional_usd=(
+                        decision.computed_position_size_usd or 0.0
+                        if action == ActionType.EXECUTE
+                        else 0.0
+                    ),
                 )
             )
 

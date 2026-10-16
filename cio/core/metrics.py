@@ -6,6 +6,7 @@ from collections import Counter
 from threading import Lock
 
 from opentelemetry import metrics
+from opentelemetry.metrics import CallbackOptions, Observation
 
 meter = metrics.get_meter("cio")
 
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 DECISION_LABELS = frozenset({"action", "reason", "outcome"})
 LLM_CALL_LABELS = frozenset({"route", "outcome", "provider"})
 LLM_LATENCY_LABELS = frozenset({"route", "provider"})
+_concentration_shares: dict[str, float] = {}
 PETROSA_CIO_DECISIONS_NAME = "petrosa_cio_decisions_total"
 PETROSA_CIO_LLM_CALLS_NAME = "petrosa_cio_llm_calls_total"
 PETROSA_CIO_LLM_LATENCY_NAME = "petrosa_cio_llm_latency_seconds"
@@ -138,6 +140,30 @@ LLM_CALLS = meter.create_counter(
 DECISION_ACTIONS = meter.create_counter(
     "cio_decision_actions_total",
     description="Total number of final decisions by action type",
+)
+
+CONCENTRATION_CAP_TOTAL = meter.create_counter(
+    "cio_concentration_cap_total",
+    description="Per-strategy rolling-hour concentration cap results",
+    unit="1",
+)
+
+
+def record_concentration_share(strategy_id: str, share: float) -> None:
+    _concentration_shares[strategy_id] = share
+
+
+def _observe_concentration_shares(_options: CallbackOptions):
+    return [
+        Observation(share, {"strategy_id": strategy_id})
+        for strategy_id, share in _concentration_shares.items()
+    ]
+
+
+meter.create_observable_gauge(
+    "cio_concentration_share",
+    callbacks=[_observe_concentration_shares],
+    description="Current rolling-hour new-notional share by strategy",
 )
 
 NON_ACTIONABLE_INTENTS = meter.create_counter(
