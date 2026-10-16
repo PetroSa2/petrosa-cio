@@ -95,6 +95,24 @@ def test_over_cap_records_enforce_and_shadow_modes():
     assert shadow.as_reason()["type"] == "concentration_cap"
 
 
+def test_concentration_metrics_record_share_and_result():
+    now = datetime(2026, 10, 16, 12, tzinfo=UTC)
+    with patch("cio.core.metrics.CONCENTRATION_CAP_TOTAL") as counter:
+        result = evaluate(
+            strategy_id="target",
+            proposed_notional_usd=100,
+            records=[],
+            at=now,
+            config=ConcentrationConfig(0.5, "test", "shadow", "test"),
+        )
+
+    from cio.core import metrics
+
+    assert metrics._concentration_shares["target"] == pytest.approx(1.0)
+    counter.add.assert_called_once_with(1, {"mode": "shadow", "result": "over_cap"})
+    assert result.result == "over_cap"
+
+
 def test_invalid_configuration_uses_labelled_shadow_fallback(monkeypatch):
     monkeypatch.setenv("CIO_CONCENTRATION_CAP_PCT", "not-a-percent")
     monkeypatch.setenv("CIO_CONCENTRATION_CAP_MODE", "apply")
