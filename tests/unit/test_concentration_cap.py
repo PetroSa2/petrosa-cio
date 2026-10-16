@@ -36,6 +36,7 @@ def test_under_cap_and_exact_hour_boundary_are_included():
         config=ConcentrationConfig(0.25, "test", "shadow", "test"),
     )
     assert result.share == 0.25
+    assert not result.exceeded
     assert result.result == "under_cap"
 
 
@@ -168,3 +169,24 @@ async def test_router_enforce_skips_and_persists_structured_reason():
         if str(call.args[0]).startswith("signals.trading.")
     ]
     assert signal_calls == []
+
+    shadow_nats = AsyncMock()
+    shadow_router = OutputRouter(
+        nats_client=shadow_nats,
+        vector_client=AsyncMock(),
+        decision_store=store,
+    )
+    shadow_decision = decision.model_copy(update={"action": ActionType.EXECUTE})
+    with patch.dict(
+        "os.environ",
+        {
+            "CIO_CONCENTRATION_CAP_PCT": "0.5",
+            "CIO_CONCENTRATION_CAP_MODE": "shadow",
+            "DRY_RUN": "false",
+        },
+    ):
+        await shadow_router.route(context, shadow_decision)
+
+    assert shadow_decision.action == ActionType.EXECUTE
+    assert shadow_decision.concentration_cap["mode"] == "shadow"
+    assert shadow_decision.concentration_cap["type"] == "concentration_cap"
