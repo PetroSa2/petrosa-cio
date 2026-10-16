@@ -275,12 +275,9 @@ class DecisionAssembler:
                     rejection_source=RejectionSource.LLM_UNAVAILABLE,
                     arbiter="deterministic_fallback",
                 )
-                try:
-                    from cio.core.metrics import ARBITER_FALLBACK_TOTAL
+                from cio.core.metrics import ARBITER_FALLBACK_TOTAL
 
-                    ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
-                except ImportError:
-                    pass
+                ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
                 logger.error(
                     "LLM_UNAVAILABLE_UNRESOLVABLE_STRATEGY strategy_id=%r stages=%s "
                     "correlation_id=%s",
@@ -340,12 +337,9 @@ class DecisionAssembler:
                     )
             decision.arbiter = "deterministic_fallback"
             decision.rejection_source = RejectionSource.LLM_UNAVAILABLE
-            try:
-                from cio.core.metrics import ARBITER_FALLBACK_TOTAL
+            from cio.core.metrics import ARBITER_FALLBACK_TOTAL
 
-                ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
-            except ImportError:
-                pass
+            ARBITER_FALLBACK_TOTAL.add(1, {"reason": "llm_unavailable"})
             return decision
 
         resolvable = bool(context.strategy_id) and context.strategy_id != "unknown"
