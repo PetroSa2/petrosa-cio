@@ -24,7 +24,6 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
       - name: Run real producer-consumer contract
-        env:
         run: pytest -q tests/test_contract_ci.py --no-cov
 
   pipeline:
