@@ -9,6 +9,40 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
+  cross-service-contract:
+    name: Real CIO to tradeengine Contract
+    runs-on: petrosa-org-runners
+    steps:
+      - name: Checkout CIO producer
+        uses: actions/checkout@v4
+      - name: Checkout contracts tests
+        uses: actions/checkout@v4
+        with:
+          repository: PetroSa2/petrosa_k8s
+          ref: main
+          path: ci-k8s
+      - name: Checkout tradeengine consumer
+        uses: actions/checkout@v4
+        with:
+          repository: PetroSa2/petrosa-tradeengine
+          ref: main
+          path: ci-tradeengine
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pinned contract and service dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt -r ci-tradeengine/requirements.txt
+      - name: Run real producer-consumer contract
+        env:
+          PETROSA_CIO_ROOT: ${{ github.workspace }}
+          PETROSA_TRADEENGINE_ROOT: ${{ github.workspace }}/ci-tradeengine
+        run: >-
+          pytest -q ci-k8s/petrosa-contracts/tests/producer_consumer_contract.py
+          --no-cov
+
   pipeline:
     name: CI Pipeline
     uses: PetroSa2/petrosa-shared-workflows/.github/workflows/ci-pipeline.yml@6aebf4f0a2d3829dc0b507f6c2ef0a464dcda01c  # yamllint disable-line rule:line-length
