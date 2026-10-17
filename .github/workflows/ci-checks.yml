@@ -15,18 +15,6 @@ jobs:
     steps:
       - name: Checkout CIO producer
         uses: actions/checkout@v4
-      - name: Checkout contracts tests
-        uses: actions/checkout@v4
-        with:
-          repository: PetroSa2/petrosa_k8s
-          ref: main
-          path: ci-k8s
-      - name: Checkout tradeengine consumer
-        uses: actions/checkout@v4
-        with:
-          repository: PetroSa2/petrosa-tradeengine
-          ref: main
-          path: ci-tradeengine
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -34,14 +22,10 @@ jobs:
       - name: Install pinned contract and service dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt -r ci-tradeengine/requirements.txt
+          pip install -r requirements.txt
       - name: Run real producer-consumer contract
         env:
-          PETROSA_CIO_ROOT: ${{ github.workspace }}
-          PETROSA_TRADEENGINE_ROOT: ${{ github.workspace }}/ci-tradeengine
-        run: >-
-          pytest -q ci-k8s/petrosa-contracts/tests/producer_consumer_contract.py
-          --no-cov
+        run: pytest -q tests/test_contract_ci.py --no-cov
 
   pipeline:
     name: CI Pipeline
