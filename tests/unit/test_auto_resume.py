@@ -284,6 +284,36 @@ async def test_registry_records_expiry_and_next_recheck_for_every_pause():
 
 
 @pytest.mark.asyncio
+async def test_registry_retries_failed_writes_and_surfaces_final_failure(caplog):
+    class FlakyStore(FakeCache):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        async def put(self, key, value):
+            self.calls += 1
+            if self.calls < 3:
+                raise RuntimeError("temporary outage")
+            await super().put(key, value)
+
+    store = FlakyStore()
+    registry = LLMPauseRegistry(store)
+
+    assert await registry.put(PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800))
+    assert store.calls == 3
+
+    class BrokenStore(FakeCache):
+        async def put(self, key, value):
+            raise RuntimeError("permanent outage")
+
+    caplog.set_level("ERROR")
+    assert not await LLMPauseRegistry(BrokenStore()).put(
+        PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800)
+    )
+    assert "AUTO_RESUME_REGISTRY_ERROR op=put" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_expired_pause_renews_when_guarded_evidence_persists():
     clock = FakeClock()
     cache = FakeCache()

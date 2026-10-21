@@ -51,6 +51,55 @@ async def test_state_store_round_trips_and_lists_entries():
 
 
 @pytest.mark.asyncio
+async def test_state_store_put_matches_data_manager_pause_entry_contract():
+    requests: list[httpx.Request] = []
+    allowed = {
+        "strategy_id",
+        "service",
+        "status",
+        "paused_at",
+        "last_unavailable_at",
+        "min_pause_seconds",
+        "flap_count",
+        "attempts",
+        "next_attempt_at",
+        "resumed_at",
+        "gave_up_at",
+        "gave_up_reason",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        body = json.loads(request.content)
+        if set(body) - allowed:
+            return httpx.Response(422, json={"detail": "invalid CioPauseEntry"})
+        return httpx.Response(200, json=body)
+
+    store = DataManagerStateStore("http://data-manager", "cio_auto_resume")
+    await store._client.aclose()
+    store._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    entry = PauseEntry(
+        "doji",
+        "ta-bot",
+        "paused",
+        1000.25,
+        1001.5,
+        1800,
+        expires_at=2800.25,
+        next_recheck_at=2800.25,
+        pause_reason="guarded evaluator unhealthy",
+        guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+        renewal_count=2,
+    )
+
+    await store.put("doji", entry.to_json())
+
+    assert len(requests) == 1
+    assert "expires_at" not in json.loads(requests[0].content)
+    await store.close()
+
+
+@pytest.mark.asyncio
 async def test_state_store_missing_entry_returns_none():
     store = DataManagerStateStore("http://data-manager", "cio_auto_resume")
     await store._client.aclose()
@@ -88,6 +137,7 @@ class FakeStore:
 
 @pytest.mark.asyncio
 async def test_migration_preserves_existing_and_deletes_legacy_hash(caplog):
+    caplog.set_level("INFO")
     redis = FakeRedis({"doji": entry_json("doji"), "rsi": entry_json("rsi")})
     store = FakeStore({"doji": entry_json("doji")})
     await migrate_redis_registry(redis, store)

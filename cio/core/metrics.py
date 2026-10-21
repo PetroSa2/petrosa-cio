@@ -247,6 +247,11 @@ AUTO_RESUME_EVENTS = meter.create_counter(
     description="Auto-resume outcomes for LLM_UNAVAILABLE pauses (attribute: result)",
 )
 
+AUTO_RESUME_REGISTRY_WRITES = meter.create_counter(
+    "cio_auto_resume_registry_writes_total",
+    description="Durable auto-resume registry write outcomes (attribute: result)",
+)
+
 LLM_HEALTH_PROBES = meter.create_counter(
     "cio_llm_health_probes_total",
     description="Active LLM health probes sent by the auto-resume loop (attribute: result)",
