@@ -183,6 +183,7 @@ class OutputRouter:
         authority_store: Any = None,
         decision_store: "DecisionStore | None" = None,
         pause_registry: "LLMPauseRegistry | None" = None,
+        evaluator_subscriber: Any = None,
         position_review_loop: "PositionReviewLoop | None" = None,
     ):
         self.nats_client = nats_client
@@ -203,6 +204,7 @@ class OutputRouter:
         self.realtime_params_mode = self._realtime_mode("CIO_REALTIME_PARAMS_MODE")
         self.cache = cache
         self.pause_registry = pause_registry
+        self.evaluator_subscriber = evaluator_subscriber
         self.position_review_loop = position_review_loop
 
         if not self.ta_bot_url:
@@ -907,15 +909,39 @@ class OutputRouter:
                                     strategy_id,
                                     extra={"correlation_id": correlation_id},
                                 )
-                            if is_llm_unavailable and self.pause_registry is not None:
+                            if self.pause_registry is not None:
                                 service = TargetServiceResolver.resolve(
                                     self._resolve_routing_strategy_id(
                                         context, strategy_id
                                     )
                                 ).value
-                                await self.pause_registry.record_pause(
-                                    strategy_id, service
+                                evidence = (
+                                    self.evaluator_subscriber.pause_evidence()
+                                    if self.evaluator_subscriber is not None
+                                    else {}
                                 )
+                                entry = await self.pause_registry.record_pause(
+                                    strategy_id,
+                                    service,
+                                    reason=decision.justification or "automated pause",
+                                    guarded_evidence=evidence,
+                                )
+                                if entry is not None:
+                                    await self.nats_client.publish(
+                                        f"cio.lifecycle.pause.paused.{strategy_id}",
+                                        json.dumps(
+                                            {
+                                                "event": "paused",
+                                                "strategy_id": strategy_id,
+                                                "service": service,
+                                                "status": entry.status,
+                                                "expires_at": entry.expires_at,
+                                                "next_recheck_at": entry.next_recheck_at,
+                                                "reason": entry.pause_reason,
+                                                "guarded_evidence": entry.guarded_evidence,
+                                            }
+                                        ).encode(),
+                                    )
                     except Exception as e:
                         # #209 (AC4): several httpx exceptions (and some
                         # connection-reset errors) stringify to "" — logging

@@ -459,6 +459,7 @@ async def main():
     # is live.
     evaluator_subscriber = EvaluatorSubscriber(nats_client=nc)
     app.state.evaluator_subscriber = evaluator_subscriber
+    router.evaluator_subscriber = evaluator_subscriber
 
     arbiter = None
     if os.getenv("SIGNAL_ARBITRATION_ENABLED", "true").lower() in ("true", "1", "yes"):
@@ -643,6 +644,7 @@ async def main():
             },
             cache=cache,
             nats_client=nc,
+            evaluator_subscriber=evaluator_subscriber,
             interval_seconds=float(os.getenv("CIO_AUTO_RESUME_INTERVAL_SECONDS", "60")),
         )
         app.state.auto_resume_loop = auto_resume_loop

@@ -265,6 +265,67 @@ async def test_registry_records_pause_and_counts_flap():
 
 
 @pytest.mark.asyncio
+async def test_registry_records_expiry_and_next_recheck_for_every_pause():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+
+    entry = await registry.record_pause(
+        "iceberg_detector",
+        "realtime-strategies",
+        reason="guarded evaluator unhealthy",
+        guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+    )
+
+    assert entry is not None
+    assert entry.expires_at == 2800
+    assert entry.next_recheck_at == 2800
+    assert entry.guarded_evidence == {"ingest": {"verdict": "unhealthy"}}
+
+
+@pytest.mark.asyncio
+async def test_expired_pause_renews_when_guarded_evidence_persists():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(
+        PauseEntry(
+            "iceberg_detector",
+            "realtime-strategies",
+            "paused",
+            0,
+            0,
+            1800,
+            expires_at=0,
+            guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+        )
+    )
+    subscriber = MagicMock()
+    subscriber.pause_evidence.return_value = {
+        "ingest": {"verdict": "unhealthy", "reason": "still stale"}
+    }
+    loop = AutoResumeLoop(
+        registry,
+        healthy_tracker(clock),
+        MagicMock(),
+        MagicMock(),
+        {"realtime-strategies": "http://strategies"},
+        cache,
+        AsyncMock(),
+        evaluator_subscriber=subscriber,
+        clock=clock,
+    )
+
+    await loop.tick()
+
+    saved = await registry.get("iceberg_detector")
+    assert saved is not None
+    assert saved.renewal_count == 1
+    assert saved.expires_at == 2800
+    assert saved.guarded_evidence["ingest"]["reason"] == "still stale"
+
+
+@pytest.mark.asyncio
 async def test_instrument_llm_health_is_idempotent():
     clock = FakeClock()
     tracker = LLMHealthTracker(clock=clock)

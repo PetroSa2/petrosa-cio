@@ -59,6 +59,23 @@ async def test_subscriber_tracks_per_subsystem_verdict(subscriber):
 
 
 @pytest.mark.asyncio
+async def test_pause_evidence_excludes_non_guard_subsystems(subscriber):
+    await subscriber._handle_message(
+        _msg("evaluator.ingest.verdict", {"verdict": UNHEALTHY, "reason": "stale"})
+    )
+    await subscriber._handle_message(
+        _msg(
+            "evaluator.bot-ta-analysis.verdict",
+            {"verdict": UNHEALTHY, "reason": "missing candles"},
+        )
+    )
+
+    evidence = subscriber.pause_evidence()
+
+    assert set(evidence) == {"ingest"}
+
+
+@pytest.mark.asyncio
 async def test_subscriber_resume_on_healthy_verdict(subscriber):
     await subscriber._handle_message(
         _msg("evaluator.ingest.verdict", {"verdict": UNHEALTHY, "reason": "stale"})
