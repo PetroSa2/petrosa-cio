@@ -1,4 +1,4 @@
-"""Safe automatic recovery for strategies paused during an LLM outage."""
+"""Safe automatic recovery for strategies paused by CIO."""
 
 from __future__ import annotations
 
@@ -139,6 +139,11 @@ class PauseEntry:
     flap_count: int = 0
     attempts: int = 0
     next_attempt_at: float = 0.0
+    expires_at: float | None = None
+    next_recheck_at: float | None = None
+    pause_reason: str = ""
+    guarded_evidence: dict[str, Any] = dataclasses.field(default_factory=dict)
+    renewal_count: int = 0
     resumed_at: float | None = None
     gave_up_at: float | None = None
     gave_up_reason: str | None = None
@@ -154,6 +159,11 @@ class PauseEntry:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return None
+            data.setdefault("expires_at", None)
+            data.setdefault("next_recheck_at", None)
+            data.setdefault("pause_reason", "")
+            data.setdefault("guarded_evidence", {})
+            data.setdefault("renewal_count", 0)
             return cls(**data)
         except Exception:
             return None
@@ -219,7 +229,14 @@ class LLMPauseRegistry:
         except Exception as exc:
             self._log_error("touch_unavailable", strategy_id, exc)
 
-    async def record_pause(self, strategy_id: str, service: str) -> None:
+    async def record_pause(
+        self,
+        strategy_id: str,
+        service: str,
+        *,
+        reason: str = "",
+        guarded_evidence: dict[str, Any] | None = None,
+    ) -> PauseEntry | None:
         try:
             now = self.clock()
             entry = await self.get(strategy_id)
@@ -236,6 +253,10 @@ class LLMPauseRegistry:
                     paused_at=now,
                     last_unavailable_at=now,
                     min_pause_seconds=MIN_PAUSE_SECONDS,
+                    expires_at=now + MIN_PAUSE_SECONDS,
+                    next_recheck_at=now + MIN_PAUSE_SECONDS,
+                    pause_reason=reason,
+                    guarded_evidence=dict(guarded_evidence or {}),
                 )
             elif entry.status == "resumed":
                 entry.flap_count += 1
@@ -249,19 +270,55 @@ class LLMPauseRegistry:
                 entry.attempts = 0
                 entry.next_attempt_at = 0.0
                 entry.resumed_at = None
+                entry.expires_at = now + entry.min_pause_seconds
+                entry.next_recheck_at = entry.expires_at
+                entry.pause_reason = reason
+                entry.guarded_evidence = dict(guarded_evidence or {})
             elif entry.status == "paused":
                 entry.last_unavailable_at = now
                 entry.service = service
+                entry.pause_reason = reason or entry.pause_reason
+                if guarded_evidence:
+                    entry.guarded_evidence = dict(guarded_evidence)
+                if entry.expires_at is None:
+                    entry.expires_at = now + entry.min_pause_seconds
+                if entry.next_recheck_at is None:
+                    entry.next_recheck_at = entry.expires_at
             elif entry.status == "gave_up":
                 entry.last_unavailable_at = now
+            entry.expires_at = entry.expires_at or now + entry.min_pause_seconds
+            entry.next_recheck_at = entry.next_recheck_at or entry.expires_at
             await self.put(entry)
             logger.info(
                 f"AUTO_RESUME_REGISTERED strategy_id={strategy_id} service={service} "
                 f"status={entry.status} min_pause_s={entry.min_pause_seconds} "
                 f"flap_count={entry.flap_count}"
             )
+            return entry
         except Exception as exc:
             self._log_error("record_pause", strategy_id, exc)
+            return None
+
+    async def renew_pause(
+        self,
+        entry: PauseEntry,
+        *,
+        reason: str,
+        guarded_evidence: dict[str, Any],
+    ) -> PauseEntry:
+        now = self.clock()
+        entry.status = "paused"
+        entry.paused_at = now
+        entry.last_unavailable_at = now
+        entry.expires_at = now + entry.min_pause_seconds
+        entry.next_recheck_at = entry.expires_at
+        entry.pause_reason = reason
+        entry.guarded_evidence = dict(guarded_evidence)
+        entry.renewal_count += 1
+        entry.attempts = 0
+        entry.next_attempt_at = 0.0
+        await self.put(entry)
+        return entry
 
 
 async def migrate_redis_registry(cache: AsyncRedisCache, store: Any) -> None:
@@ -326,6 +383,7 @@ class AutoResumeLoop:
         cache: Any,
         nats_client: Any,
         *,
+        evaluator_subscriber: Any = None,
         interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -336,6 +394,7 @@ class AutoResumeLoop:
         self.service_urls = service_urls
         self.cache = cache
         self.nats_client = nats_client
+        self.evaluator_subscriber = evaluator_subscriber
         self.interval = interval_seconds
         self.clock = clock
         self._task: asyncio.Task[None] | None = None
@@ -397,12 +456,63 @@ class AutoResumeLoop:
             pass
 
     def _eligible(self, entry: PauseEntry, now: float) -> bool:
+        expires_at = (
+            entry.expires_at
+            if entry.expires_at is not None
+            else entry.paused_at + entry.min_pause_seconds
+        )
         return (
             entry.status == "paused"
-            and now - entry.paused_at >= entry.min_pause_seconds
+            and now >= expires_at
             and now - entry.last_unavailable_at >= QUIET_PERIOD_SECONDS
             and now >= entry.next_attempt_at
         )
+
+    async def _publish_lifecycle_event(
+        self, event: str, entry: PauseEntry, *, evidence: dict[str, Any] | None = None
+    ) -> None:
+        payload = {
+            "event": event,
+            "strategy_id": entry.strategy_id,
+            "service": entry.service,
+            "status": entry.status,
+            "expires_at": entry.expires_at,
+            "next_recheck_at": entry.next_recheck_at,
+            "reason": entry.pause_reason,
+            "guarded_evidence": evidence
+            if evidence is not None
+            else entry.guarded_evidence,
+            "renewal_count": entry.renewal_count,
+        }
+        try:
+            await self.nats_client.publish(
+                f"cio.lifecycle.pause.{event}.{entry.strategy_id}",
+                json.dumps(payload).encode(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "PAUSE_LIFECYCLE_EVENT_FAILED strategy_id=%s event=%s exc_type=%s",
+                entry.strategy_id,
+                event,
+                type(exc).__name__,
+            )
+
+    async def _recheck_guarded_reasons(self, entry: PauseEntry) -> bool:
+        if self.evaluator_subscriber is None or not entry.guarded_evidence:
+            return False
+        current = self.evaluator_subscriber.pause_evidence(
+            tuple(entry.guarded_evidence)
+        )
+        if not current:
+            return False
+        await self.registry.renew_pause(
+            entry,
+            reason="guarded evaluator verdict remains unhealthy",
+            guarded_evidence=current,
+        )
+        await self._publish_lifecycle_event("renewed", entry, evidence=current)
+        self._metric("renewed")
+        return True
 
     async def tick(self) -> None:
         now = self.clock()
@@ -463,6 +573,8 @@ class AutoResumeLoop:
         for entry in eligible:
             if resumed >= MAX_RESUMES_PER_TICK:
                 break
+            if await self._recheck_guarded_reasons(entry):
+                continue
             strategy_id = entry.strategy_id
             if entry.service == "ta-bot" and await self.cache.get(
                 FREEZE_KEY_PREFIX + strategy_id
@@ -500,8 +612,7 @@ class AutoResumeLoop:
             if (
                 not isinstance(body, dict)
                 or body.get("success") is not True
-                or not isinstance(body.get("data"), list)
-                or not body["data"]
+                or "data" not in body
             ):
                 raise ValueError("audit response is not verifiable")
             if entry.service == "realtime-strategies":
@@ -517,6 +628,8 @@ class AutoResumeLoop:
                     )
                 items = []
             else:
+                if not isinstance(body["data"], list) or not body["data"]:
+                    raise ValueError("audit response is not verifiable")
                 items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:
@@ -607,6 +720,7 @@ class AutoResumeLoop:
             f"paused_for_s={int(now - entry.paused_at)} flap_count={entry.flap_count}"
         )
         self._metric("succeeded")
+        await self._publish_lifecycle_event("resumed", entry)
 
     async def _record_failure(self, entry: PauseEntry, detail: str) -> None:
         entry.attempts += 1

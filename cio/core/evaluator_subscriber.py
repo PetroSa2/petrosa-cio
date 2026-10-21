@@ -61,6 +61,9 @@ HEALTHY = "healthy"
 UNHEALTHY = "unhealthy"
 UNKNOWN = "unknown"
 
+# Only these verdicts are allowed to justify a strategy pause.
+PAUSE_GUARD_SUBSYSTEMS = ("ingest", "execution", "strategy-fidelity", "audit")
+
 
 def _normalise_scope(raw: Any) -> dict[str, list[str]] | None:
     """Validate + normalise an incoming ``scope`` payload field (#193).
@@ -335,6 +338,22 @@ class EvaluatorSubscriber:
                 }
             )
         return result
+
+    def pause_evidence(
+        self, allowed_subsystems: tuple[str, ...] = PAUSE_GUARD_SUBSYSTEMS
+    ) -> dict[str, dict[str, Any]]:
+        """Return structured unhealthy evidence from pause-guard subsystems only."""
+        allowed = set(allowed_subsystems)
+        evidence: dict[str, dict[str, Any]] = {}
+        for subsystem, (verdict, reason, observed_at, scope) in self._verdicts.items():
+            if subsystem in allowed and verdict == UNHEALTHY:
+                evidence[subsystem] = {
+                    "verdict": verdict,
+                    "reason": reason,
+                    "observed_at": observed_at.isoformat(),
+                    "scope": scope,
+                }
+        return evidence
 
     def set_override(self, subsystem: str, verdict: str | None) -> None:
         """Operator override — set to None to clear.

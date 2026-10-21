@@ -5,6 +5,7 @@ import uuid
 from typing import TYPE_CHECKING, Protocol
 
 from cio.core.cache import AsyncRedisCache
+from cio.core.evaluator_subscriber import PAUSE_GUARD_SUBSYSTEMS
 from cio.models import TriggerType
 
 if TYPE_CHECKING:
@@ -30,12 +31,7 @@ _CONFLICT_TTL_SECONDS = 300  # 5 minutes
 # P2.6 (#597) + P2.6-EXT (#123): subsystems whose unhealthy verdict triggers
 # pause behavior on every incoming signal. `ingest` was the first wired source
 # (#593); execution, strategy-fidelity, and audit added by #123 (FR45 → GREEN).
-_PAUSE_GUARD_SUBSYSTEMS: tuple[str, ...] = (
-    "ingest",
-    "execution",
-    "strategy-fidelity",
-    "audit",
-)
+_PAUSE_GUARD_SUBSYSTEMS: tuple[str, ...] = PAUSE_GUARD_SUBSYSTEMS
 
 # P2.6-EXT (#123): per-subsystem pause policy.
 # "strict" = suppress the signal entirely (safe default for data-integrity subsystems).

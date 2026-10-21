@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from cio.core.auto_resume import PauseEntry
 from cio.core.router import OutputRouter
 from cio.models import (
     ActionType,
@@ -1423,6 +1424,45 @@ async def test_apply_mode_keeps_todays_realtime_pause_put_and_registry():
     )
     assert put.await_args.kwargs["json"]["state"] == "paused"
     registry.remove.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_successful_pause_registers_expiry_evidence_and_lifecycle_event():
+    registry = AsyncMock()
+    registry.record_pause.return_value = PauseEntry(
+        "iceberg_detector",
+        "realtime-strategies",
+        "paused",
+        1000,
+        1000,
+        1800,
+        expires_at=2800,
+        next_recheck_at=2800,
+        pause_reason="pause it",
+        guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+    )
+    evaluator = MagicMock()
+    evaluator.pause_evidence.return_value = {"ingest": {"verdict": "unhealthy"}}
+    router = _pause_router("apply", pause_registry=registry)
+    router.evaluator_subscriber = evaluator
+
+    put_response = MagicMock(status_code=200, text="")
+    put_response.json.return_value = {"success": True}
+    with patch.object(
+        router.http_client,
+        "put",
+        new_callable=AsyncMock,
+        return_value=put_response,
+    ):
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+
+    registry.record_pause.assert_awaited_once()
+    assert registry.record_pause.await_args.kwargs["guarded_evidence"] == {
+        "ingest": {"verdict": "unhealthy"}
+    }
+    assert registry.record_pause.await_args.kwargs["reason"] == "ingest: unhealthy"
+    subjects = [call.args[0] for call in router.nats_client.publish.await_args_list]
+    assert "cio.lifecycle.pause.paused.iceberg_detector" in subjects
 
 
 @pytest.mark.asyncio
