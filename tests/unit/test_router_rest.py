@@ -1460,6 +1460,7 @@ async def test_successful_pause_registers_expiry_evidence_and_lifecycle_event():
     assert registry.record_pause.await_args.kwargs["guarded_evidence"] == {
         "ingest": {"verdict": "unhealthy"}
     }
+    assert registry.record_pause.await_args.kwargs["reason"] == "ingest: unhealthy"
     subjects = [call.args[0] for call in router.nats_client.publish.await_args_list]
     assert "cio.lifecycle.pause.paused.iceberg_detector" in subjects
 

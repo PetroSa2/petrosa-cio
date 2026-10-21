@@ -920,10 +920,16 @@ class OutputRouter:
                                     if self.evaluator_subscriber is not None
                                     else {}
                                 )
+                                pause_reason = "automated pause"
+                                if evidence:
+                                    pause_reason = "; ".join(
+                                        f"{subsystem}: {details.get('reason') or details.get('verdict', 'unhealthy')}"
+                                        for subsystem, details in evidence.items()
+                                    )
                                 entry = await self.pause_registry.record_pause(
                                     strategy_id,
                                     service,
-                                    reason=decision.justification or "automated pause",
+                                    reason=pause_reason,
                                     guarded_evidence=evidence,
                                 )
                                 if entry is not None:
