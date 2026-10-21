@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+import cio.core.auto_resume as auto_resume_module
 from cio.core.auto_resume import (
     HEALTH_PROBE_PROMPT_ID,
     HEALTH_PROBE_SYSTEM_PROMPT,
@@ -284,7 +285,9 @@ async def test_registry_records_expiry_and_next_recheck_for_every_pause():
 
 
 @pytest.mark.asyncio
-async def test_registry_retries_failed_writes_and_surfaces_final_failure(caplog):
+async def test_registry_retries_failed_writes_and_surfaces_final_failure(
+    caplog, monkeypatch
+):
     class FlakyStore(FakeCache):
         def __init__(self):
             super().__init__()
@@ -311,6 +314,11 @@ async def test_registry_retries_failed_writes_and_surfaces_final_failure(caplog)
         PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800)
     )
     assert "AUTO_RESUME_REGISTRY_ERROR op=put" in caplog.text
+
+    monkeypatch.setattr(auto_resume_module, "REGISTRY_WRITE_MAX_ATTEMPTS", 0)
+    assert not await LLMPauseRegistry(FlakyStore()).put(
+        PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800)
+    )
 
 
 @pytest.mark.asyncio
