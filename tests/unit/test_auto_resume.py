@@ -320,6 +320,50 @@ async def test_registry_retries_failed_writes_and_surfaces_final_failure(
         PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800)
     )
 
+    monkeypatch.setattr(auto_resume_module, "REGISTRY_WRITE_MAX_ATTEMPTS", 3)
+    broken_registry = LLMPauseRegistry(BrokenStore())
+    assert await broken_registry.record_pause("doji", "ta-bot") is None
+    assert not await broken_registry.renew_pause(
+        PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800),
+        reason="still unhealthy",
+        guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_expired_pause_does_not_emit_renewal_when_registry_write_fails():
+    clock = FakeClock()
+    registry = AsyncMock()
+    registry.renew_pause.return_value = False
+    evaluator = MagicMock()
+    evaluator.pause_evidence.return_value = {
+        "ingest": {"verdict": "unhealthy"},
+    }
+    loop = AutoResumeLoop(
+        registry,
+        healthy_tracker(clock),
+        MagicMock(),
+        MagicMock(),
+        {"realtime-strategies": "http://realtime"},
+        MagicMock(),
+        AsyncMock(),
+        evaluator_subscriber=evaluator,
+        clock=clock,
+    )
+
+    assert not await loop._recheck_guarded_reasons(
+        PauseEntry(
+            "iceberg_detector",
+            "realtime-strategies",
+            "paused",
+            0,
+            0,
+            1800,
+            guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+        )
+    )
+    loop.nats_client.publish.assert_not_awaited()
+
 
 @pytest.mark.asyncio
 async def test_expired_pause_renews_when_guarded_evidence_persists():
