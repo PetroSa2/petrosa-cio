@@ -612,8 +612,7 @@ class AutoResumeLoop:
             if (
                 not isinstance(body, dict)
                 or body.get("success") is not True
-                or not isinstance(body.get("data"), list)
-                or not body["data"]
+                or "data" not in body
             ):
                 raise ValueError("audit response is not verifiable")
             if entry.service == "realtime-strategies":
@@ -629,6 +628,8 @@ class AutoResumeLoop:
                     )
                 items = []
             else:
+                if not isinstance(body["data"], list) or not body["data"]:
+                    raise ValueError("audit response is not verifiable")
                 items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:

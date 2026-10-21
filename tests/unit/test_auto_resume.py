@@ -326,6 +326,76 @@ async def test_expired_pause_renews_when_guarded_evidence_persists():
 
 
 @pytest.mark.asyncio
+async def test_expired_pause_resumes_when_guarded_evidence_clears():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(
+        PauseEntry(
+            "iceberg_detector",
+            "realtime-strategies",
+            "paused",
+            0,
+            0,
+            0,
+            expires_at=0,
+            guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+        )
+    )
+    subscriber = MagicMock()
+    subscriber.pause_evidence.return_value = {}
+    http = MagicMock()
+    http.get = AsyncMock(
+        return_value=response(
+            200,
+            {
+                "success": True,
+                "data": {
+                    "state": "paused",
+                    "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
+                },
+            },
+        )
+    )
+    http.request = AsyncMock(return_value=response(200, {"success": True}))
+    nats = AsyncMock()
+    loop = AutoResumeLoop(
+        registry,
+        healthy_tracker(clock),
+        MagicMock(),
+        http,
+        {"realtime-strategies": "http://strategies"},
+        cache,
+        nats,
+        evaluator_subscriber=subscriber,
+        clock=clock,
+    )
+
+    await loop.tick()
+
+    saved = await registry.get("iceberg_detector")
+    assert saved is not None and saved.status == "resumed"
+    assert http.request.await_count == 1
+    assert nats.publish.await_args.args[0] == (
+        "cio.lifecycle.pause.resumed.iceberg_detector"
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_pause_refreshes_legacy_paused_entry_expiry():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(PauseEntry("doji", "ta-bot", "paused", 0, 0, 1800))
+
+    entry = await registry.record_pause("doji", "ta-bot")
+
+    assert entry is not None
+    assert entry.expires_at == 2800
+    assert entry.next_recheck_at == 2800
+
+
+@pytest.mark.asyncio
 async def test_instrument_llm_health_is_idempotent():
     clock = FakeClock()
     tracker = LLMHealthTracker(clock=clock)
