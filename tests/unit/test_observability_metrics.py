@@ -1,5 +1,6 @@
 import json
 import logging
+from unittest.mock import Mock, patch
 
 from cio.core.metrics import (
     DECISION_LABELS,
@@ -13,6 +14,7 @@ from cio.core.metrics import (
     PETROSA_CIO_LLM_LATENCY_SECONDS,
     SummaryLog,
 )
+from cio.models.enums import ActionType
 
 
 def test_cio_metric_catalog_has_bounded_labels():
@@ -51,3 +53,22 @@ def test_summary_record_is_bounded_and_uses_300_second_window(caplog):
         "llm_calls",
         "latency_seconds",
     }
+
+
+def test_decision_action_metric_requires_strategy_id():
+    from cio.core.orchestrator import Orchestrator
+
+    counter = Mock()
+    summary = Mock()
+    with (
+        patch("cio.core.metrics.DECISION_ACTIONS", counter),
+        patch("cio.core.metrics.PETROSA_CIO_DECISIONS_TOTAL"),
+        patch("cio.core.metrics.SUMMARY", summary),
+    ):
+        Orchestrator.__new__(Orchestrator)._emit_decision_action(
+            ActionType.EXECUTE, "momentum-v3"
+        )
+
+    counter.add.assert_called_once_with(
+        1, {"action": "execute", "strategy_id": "momentum-v3"}
+    )
