@@ -66,7 +66,10 @@ def _context(action: str) -> TriggerContext:
 async def test_hold_short_circuits_llm_and_increments_counter():
     client = MagicMock()
     client.complete = AsyncMock()
-    with patch("cio.core.metrics.NON_ACTIONABLE_INTENTS") as counter:
+    with (
+        patch("cio.core.metrics.NON_ACTIONABLE_INTENTS") as counter,
+        patch("cio.core.metrics.DECISION_ACTIONS") as decision_actions,
+    ):
         decision = await Orchestrator(llm_client=client).run(_context("hold"))
 
     assert decision.action == ActionType.SKIP
@@ -74,6 +77,9 @@ async def test_hold_short_circuits_llm_and_increments_counter():
     client.complete.assert_not_called()
     counter.add.assert_called_once_with(
         1, {"strategy_id": "test-strategy", "token": "hold"}
+    )
+    decision_actions.add.assert_called_once_with(
+        1, {"action": "skip", "strategy_id": "test-strategy"}
     )
 
 

@@ -446,13 +446,6 @@ class OutputRouter:
                 )
                 decision.decided_leverage = _capped_leverage
 
-        # 0. Record Metrics
-        from cio.core.metrics import DECISION_ACTIONS
-
-        DECISION_ACTIONS.add(
-            1, {"action_type": action.value, "strategy_id": strategy_id}
-        )
-
         # Set OTel decision context attributes on the current span
         try:
             from opentelemetry import trace as _trace
