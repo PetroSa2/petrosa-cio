@@ -400,6 +400,7 @@ async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
     )
     response = MagicMock(status_code=200, text="")
     response.json.return_value = {"success": True}
+    pause_started_at = datetime.now(UTC).timestamp()
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
             put.return_value = response
@@ -413,7 +414,7 @@ async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
     assert payload["state"] == "paused"
     assert payload["reason"] == "CIO_PAUSE: pause it"
     assert payload["changed_by"] == "petrosa-cio:lifecycle:iceberg_detector"
-    assert payload["expires_at"] > 0
+    assert payload["expires_at"] >= pause_started_at + 1799
     mock_cache.set.assert_not_called()
 
 
