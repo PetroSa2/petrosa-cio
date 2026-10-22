@@ -490,7 +490,9 @@ class Orchestrator:
                         calibration_status if calibration_mode() == "enforce" else None
                     ),
                 )
-                self._emit_decision_action(_fallback_decision.action, context.strategy_id)
+                self._emit_decision_action(
+                    _fallback_decision.action, context.strategy_id
+                )
                 return _fallback_decision
 
             if code_result.hard_blocked:
@@ -517,7 +519,9 @@ class Orchestrator:
                         calibration_status if calibration_mode() == "enforce" else None
                     ),
                 )
-                self._emit_decision_action(_blocked_decision.action, context.strategy_id)
+                self._emit_decision_action(
+                    _blocked_decision.action, context.strategy_id
+                )
                 return _blocked_decision
 
             # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
