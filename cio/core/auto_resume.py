@@ -37,6 +37,8 @@ REPAUSE_WINDOW_SECONDS = 3600
 MAX_FLAPS = 3
 MAX_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 300
+REGISTRY_WRITE_MAX_ATTEMPTS = 3
+REGISTRY_WRITE_RETRY_SECONDS = 0.1
 RATE_LIMIT_MIN_SECONDS, RATE_LIMIT_MAX_SECONDS, RATE_LIMIT_DEFAULT_SECONDS = (
     60,
     3600,
@@ -180,6 +182,12 @@ class LLMPauseRegistry:
             f"exc_type={type(exc).__name__}"
         )
 
+    @staticmethod
+    def _write_metric(result: str) -> None:
+        from cio.core.metrics import AUTO_RESUME_REGISTRY_WRITES
+
+        AUTO_RESUME_REGISTRY_WRITES.add(1, {"result": result})
+
     async def get(self, strategy_id: str) -> PauseEntry | None:
         try:
             raw = await self.store.get(strategy_id)
@@ -203,11 +211,28 @@ class LLMPauseRegistry:
             self._log_error("all", "*", exc)
             return []
 
-    async def put(self, entry: PauseEntry) -> None:
-        try:
-            await self.store.put(entry.strategy_id, entry.to_json())
-        except Exception as exc:
-            self._log_error("put", entry.strategy_id, exc)
+    async def put(self, entry: PauseEntry) -> bool:
+        for attempt in range(1, REGISTRY_WRITE_MAX_ATTEMPTS + 1):
+            try:
+                await self.store.put(entry.strategy_id, entry.to_json())
+                self._write_metric("success")
+                return True
+            except Exception as exc:
+                if attempt == REGISTRY_WRITE_MAX_ATTEMPTS:
+                    self._log_error("put", entry.strategy_id, exc)
+                    self._write_metric("failed")
+                    return False
+                logger.warning(
+                    "AUTO_RESUME_REGISTRY_RETRY op=put strategy_id=%s attempt=%s "
+                    "next_attempt_in_s=%s exc_type=%s",
+                    entry.strategy_id,
+                    attempt,
+                    REGISTRY_WRITE_RETRY_SECONDS,
+                    type(exc).__name__,
+                )
+                self._write_metric("retry")
+                await asyncio.sleep(REGISTRY_WRITE_RETRY_SECONDS)
+        return False
 
     async def remove(self, strategy_id: str, reason: str) -> None:
         try:
@@ -288,7 +313,8 @@ class LLMPauseRegistry:
                 entry.last_unavailable_at = now
             entry.expires_at = entry.expires_at or now + entry.min_pause_seconds
             entry.next_recheck_at = entry.next_recheck_at or entry.expires_at
-            await self.put(entry)
+            if not await self.put(entry):
+                return None
             logger.info(
                 f"AUTO_RESUME_REGISTERED strategy_id={strategy_id} service={service} "
                 f"status={entry.status} min_pause_s={entry.min_pause_seconds} "
@@ -305,7 +331,7 @@ class LLMPauseRegistry:
         *,
         reason: str,
         guarded_evidence: dict[str, Any],
-    ) -> PauseEntry:
+    ) -> bool:
         now = self.clock()
         entry.status = "paused"
         entry.paused_at = now
@@ -317,8 +343,7 @@ class LLMPauseRegistry:
         entry.renewal_count += 1
         entry.attempts = 0
         entry.next_attempt_at = 0.0
-        await self.put(entry)
-        return entry
+        return await self.put(entry)
 
 
 async def migrate_redis_registry(cache: AsyncRedisCache, store: Any) -> None:
@@ -505,11 +530,13 @@ class AutoResumeLoop:
         )
         if not current:
             return False
-        await self.registry.renew_pause(
+        renewed = await self.registry.renew_pause(
             entry,
             reason="guarded evaluator verdict remains unhealthy",
             guarded_evidence=current,
         )
+        if not renewed:
+            return False
         await self._publish_lifecycle_event("renewed", entry, evidence=current)
         self._metric("renewed")
         return True

@@ -23,6 +23,22 @@ logger = logging.getLogger(__name__)
 STORE_TIMEOUT_ENV = "CIO_AUTO_RESUME_STORE_TIMEOUT_S"
 DEFAULT_STORE_TIMEOUT_SECONDS = 10.0
 STORE_CONNECT_TIMEOUT_SECONDS = 2.0
+CIO_PAUSE_ENTRY_FIELDS = frozenset(
+    {
+        "strategy_id",
+        "service",
+        "status",
+        "paused_at",
+        "last_unavailable_at",
+        "min_pause_seconds",
+        "flap_count",
+        "attempts",
+        "next_attempt_at",
+        "resumed_at",
+        "gave_up_at",
+        "gave_up_reason",
+    }
+)
 
 
 def resolve_store_timeout_seconds() -> float:
@@ -68,6 +84,12 @@ class DataManagerStateStore:
         entry.pop("_id", None)
         return json.dumps(entry)
 
+    @staticmethod
+    def _contract_payload(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value for key, value in entry.items() if key in CIO_PAUSE_ENTRY_FIELDS
+        }
+
     def _headers(self) -> dict[str, str]:
         return internal_headers(namespace=self.namespace)
 
@@ -92,7 +114,9 @@ class DataManagerStateStore:
         entry = json.loads(value)
         entry["strategy_id"] = key
         response = await self._client.put(
-            f"{self._entries_url}/{key}", json=entry, headers=self._headers()
+            f"{self._entries_url}/{key}",
+            json=self._contract_payload(entry),
+            headers=self._headers(),
         )
         response.raise_for_status()
 

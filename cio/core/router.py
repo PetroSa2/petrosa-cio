@@ -770,6 +770,7 @@ class OutputRouter:
                         "reason": "CIO_PAUSE: "
                         + (decision.justification or "automated pause"),
                         "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
+                        "expires_at": datetime.now(UTC).timestamp() + 1800,
                     }
                     url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
                 elif use_application_config:

@@ -400,19 +400,21 @@ async def test_realtime_pause_uses_lifecycle_state_even_when_tuning_frozen():
     )
     response = MagicMock(status_code=200, text="")
     response.json.return_value = {"success": True}
+    pause_started_at = datetime.now(UTC).timestamp()
     with patch.dict(os.environ, {"DRY_RUN": "false"}):
         with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
             put.return_value = response
             await router.route(context, decision)
 
-    put.assert_awaited_once_with(
-        "http://realtime/api/v1/strategies/iceberg_detector/state",
-        json={
-            "state": "paused",
-            "reason": "CIO_PAUSE: pause it",
-            "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
-        },
+    put.assert_awaited_once()
+    assert put.await_args.args[0] == (
+        "http://realtime/api/v1/strategies/iceberg_detector/state"
     )
+    payload = put.await_args.kwargs["json"]
+    assert payload["state"] == "paused"
+    assert payload["reason"] == "CIO_PAUSE: pause it"
+    assert payload["changed_by"] == "petrosa-cio:lifecycle:iceberg_detector"
+    assert payload["expires_at"] >= pause_started_at + 1799
     mock_cache.set.assert_not_called()
 
 
@@ -1453,7 +1455,7 @@ async def test_successful_pause_registers_expiry_evidence_and_lifecycle_event():
         "put",
         new_callable=AsyncMock,
         return_value=put_response,
-    ):
+    ) as put:
         await router.route(_pause_context("iceberg_detector"), _pause_decision())
 
     registry.record_pause.assert_awaited_once()
@@ -1461,6 +1463,8 @@ async def test_successful_pause_registers_expiry_evidence_and_lifecycle_event():
         "ingest": {"verdict": "unhealthy"}
     }
     assert registry.record_pause.await_args.kwargs["reason"] == "ingest: unhealthy"
+    payload = put.await_args.kwargs["json"]
+    assert payload["expires_at"] > 0
     subjects = [call.args[0] for call in router.nats_client.publish.await_args_list]
     assert "cio.lifecycle.pause.paused.iceberg_detector" in subjects
 
