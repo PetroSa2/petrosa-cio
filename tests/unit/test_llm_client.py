@@ -31,6 +31,10 @@ class _FakeResponse(BaseModel):
     value: str
 
 
+class _NotFound404(Exception):
+    status_code = 404
+
+
 # ---------------------------------------------------------------------------
 # Helpers to build RawLLMResponse fixtures
 # ---------------------------------------------------------------------------
@@ -427,6 +431,55 @@ async def test_primary_and_fallback_failure_logs_error(monkeypatch, caplog):
     assert any(record.levelno >= logging.ERROR for record in caplog.records)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "prompt_id",
+    ["PETROSA_PROMPT_REGIME_CLASSIFIER", "PETROSA_PROMPT_STRATEGY_ASSESSOR"],
+)
+async def test_timeout_then_404_is_sanitized_and_bounded(prompt_id, monkeypatch):
+    client = LiteLLMClient()
+    litellm_patch, fake_litellm = _mock_litellm_runtime(
+        acompletion_side_effect=[TimeoutError("provider detail"), _NotFound404()]
+    )
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {"LLM_MODEL": "primary-model", "LLM_FALLBACK_MODEL": "fallback-model"},
+        ),
+        litellm_patch,
+    ):
+        result = await client.complete(prompt_id, "system", {})
+
+    assert fake_litellm.acompletion.await_count == 2
+    assert result.error is not None
+    assert "error_class=timeout" in result.error
+    assert "error_class=missing_endpoint" in result.error
+    assert "status=404" in result.error
+    assert "provider detail" not in result.error
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_cooldown_allows_one_recovery_probe(monkeypatch):
+    client = LiteLLMClient()
+    client._failure_count = llm_client_module.CIRCUIT_BREAKER_FAILURE_THRESHOLD
+    client._last_failure_time = 100.0
+    client._breaker_open_until = 160.0
+    clock = 161.0
+    monkeypatch.setattr(llm_client_module.time, "time", lambda: clock)
+    response = _mock_litellm_response('{"ok": true}')
+    litellm_patch, fake_litellm = _mock_litellm_runtime(acompletion_return=response)
+
+    with litellm_patch:
+        result = await client.complete("recovery", "system", {})
+
+    assert result.error is None
+    assert client._failure_count == 0
+    assert client._breaker_open_until == 0.0
+    fake_litellm.acompletion.assert_awaited_once()
+
+
 def test_litellm_debug_info_suppression_is_enabled():
     fake_litellm = SimpleNamespace()
     with patch.dict(sys.modules, {"litellm": fake_litellm}):
@@ -476,7 +529,7 @@ async def test_non_transient_primary_error_not_retried(monkeypatch):
 
     assert fake_litellm.acompletion.await_count == 1
     assert result.error is not None
-    assert "ValueError: bad request" in result.error
+    assert "error_class=unavailable exception=ValueError" in result.error
 
 
 @pytest.mark.asyncio
@@ -1046,7 +1099,10 @@ async def test_duplicate_route_skip_logged_as_warning_with_primary_error(
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
     assert "prompt_id=test" in warnings[0].getMessage()
-    assert "primary_error=TimeoutError" in warnings[0].getMessage()
+    assert (
+        "primary_error=error_class=timeout exception=TimeoutError"
+        in warnings[0].getMessage()
+    )
 
 
 def test_init_warns_fallback_disabled_on_duplicate_route(caplog, monkeypatch):
@@ -1622,7 +1678,10 @@ async def test_fallback_timeout_not_retried(monkeypatch):
         result = await client.complete("test", "system", {})
 
     assert fake_litellm.acompletion.await_count == 2
-    assert result.error == "Primary: TimeoutError | Fallback: TimeoutError"
+    assert result.error == (
+        "Primary: error_class=timeout exception=TimeoutError | "
+        "Fallback: error_class=timeout exception=TimeoutError"
+    )
 
 
 @pytest.mark.asyncio
