@@ -576,6 +576,48 @@ async def test_gave_up_pause_is_retried_after_backoff():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config_response",
+    [
+        response(500, {}),
+        response(200, {"success": True, "data": {"enabled_strategies": "bad"}}),
+        response(200, {"success": True, "data": None}),
+    ],
+)
+async def test_ta_resume_config_failures_backoff(config_response):
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(PauseEntry("doji", "ta-bot", "paused", 0, 0, 0))
+    http = MagicMock()
+    http.get = AsyncMock(
+        side_effect=[
+            response(
+                200,
+                {
+                    "success": True,
+                    "data": [
+                        {
+                            "changed_by": "petrosa-cio:doji",
+                            "changed_at": datetime.fromtimestamp(0, UTC).isoformat(),
+                        }
+                    ],
+                },
+            ),
+            config_response,
+        ]
+    )
+    http.request = AsyncMock()
+    loop = build_loop(clock, cache, registry, http=http)
+
+    await loop.tick()
+
+    saved = await registry.get("doji")
+    assert saved is not None and saved.attempts == 1
+    http.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_record_pause_refreshes_legacy_paused_entry_expiry():
     clock = FakeClock()
     cache = FakeCache()
