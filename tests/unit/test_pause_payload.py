@@ -67,3 +67,12 @@ def test_ta_bot_resume_payload_does_not_duplicate_strategy():
     )
 
     assert payload["enabled_strategies"] == ["fox_trap_reversal"]
+
+
+def test_ta_bot_resume_payload_rejects_invalid_target_schema():
+    with pytest.raises(ValueError, match="enabled_strategies"):
+        build_ta_bot_resume_payload(
+            {"enabled_strategies": "not-a-list"},
+            "fox_trap_reversal",
+            "CIO_AUTO_RESUME: guarded pause expired",
+        )
