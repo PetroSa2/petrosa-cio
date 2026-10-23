@@ -333,11 +333,17 @@ class ContextBuilder:
             self._fetch_portfolio_and_risk(
                 symbol,
                 correlation_id,
-                side=("LONG" if payload.get("action") in ("buy", "BUY", "long", "LONG") else
-                      "SHORT" if payload.get("action") in ("sell", "SELL", "short", "SHORT") else None),
+                side=(
+                    "LONG"
+                    if payload.get("action") in ("buy", "BUY", "long", "LONG")
+                    else "SHORT"
+                    if payload.get("action") in ("sell", "SELL", "short", "SHORT")
+                    else None
+                ),
                 stop_loss=payload.get("stop_loss"),
                 stop_loss_pct=payload.get("stop_loss_pct"),
-                reference_price=payload.get("entry_price") or payload.get("current_price"),
+                reference_price=payload.get("entry_price")
+                or payload.get("current_price"),
                 timeframe=payload.get("timeframe"),
                 strategy_id=strategy_id,
                 gaps=gaps,

@@ -303,7 +303,11 @@ def _evaluate(
         fallbacks.append("stop_floor_unavailable")
     elif limits.min_sl_distance_source == "fallback":
         fallbacks.append("stop_floor_fallback")  # tradeengine's fixed placeholder
-    s_eff = contract_stop if contract_stop is not None else (max(stop_pct, floor) if floor else stop_pct)
+    s_eff = (
+        contract_stop
+        if contract_stop is not None
+        else (max(stop_pct, floor) if floor else stop_pct)
+    )
     reward_risk = take_profit_pct / s_eff
 
     commission, commission_fallbacks = commission_components(context.commission)
