@@ -464,6 +464,164 @@ async def test_expired_pause_resumes_when_guarded_evidence_clears():
 
 
 @pytest.mark.asyncio
+async def test_expired_ta_pause_restores_runtime_allowlist():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(
+        PauseEntry(
+            "hammer_reversal_pattern",
+            "ta-bot",
+            "paused",
+            0,
+            0,
+            0,
+            expires_at=0,
+            guarded_evidence={"ingest": {"verdict": "unhealthy"}},
+        )
+    )
+    subscriber = MagicMock()
+    subscriber.pause_evidence.return_value = {}
+    http = MagicMock()
+    http.get = AsyncMock(
+        side_effect=[
+            response(
+                200,
+                {
+                    "success": True,
+                    "data": [
+                        {
+                            "changed_by": "petrosa-cio:hammer_reversal_pattern",
+                            "changed_at": datetime.fromtimestamp(0, UTC).isoformat(),
+                        }
+                    ],
+                },
+            ),
+            response(
+                200,
+                {"success": True, "data": {"enabled_strategies": ["momentum_pulse"]}},
+            ),
+        ]
+    )
+    http.request = AsyncMock(return_value=response(200, {"success": True}))
+    loop = AutoResumeLoop(
+        registry,
+        healthy_tracker(clock),
+        MagicMock(),
+        http,
+        {"ta-bot": "http://ta-bot"},
+        cache,
+        AsyncMock(),
+        evaluator_subscriber=subscriber,
+        clock=clock,
+    )
+
+    await loop.tick()
+
+    saved = await registry.get("hammer_reversal_pattern")
+    assert saved is not None and saved.status == "resumed"
+    http.request.assert_awaited_once()
+    assert http.request.await_args.args[:2] == (
+        "POST",
+        "http://ta-bot/api/v1/config/application",
+    )
+    assert http.request.await_args.kwargs["json"]["enabled_strategies"] == [
+        "momentum_pulse",
+        "hammer_reversal_pattern",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gave_up_pause_is_retried_after_backoff():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    entry = PauseEntry(
+        "inside_bar_breakout",
+        "ta-bot",
+        "gave_up",
+        0,
+        0,
+        0,
+        gave_up_at=0,
+        next_attempt_at=1300,
+    )
+    await registry.put(entry)
+    http = MagicMock()
+    http.get = AsyncMock(
+        side_effect=[
+            response(
+                200,
+                {
+                    "success": True,
+                    "data": [
+                        {
+                            "changed_by": "petrosa-cio:inside_bar_breakout",
+                            "changed_at": datetime.fromtimestamp(0, UTC).isoformat(),
+                        }
+                    ],
+                },
+            ),
+            response(
+                200,
+                {"success": True, "data": {"enabled_strategies": []}},
+            ),
+        ]
+    )
+    http.request = AsyncMock(return_value=response(200, {"success": True}))
+    loop = build_loop(clock, cache, registry, http=http)
+
+    await loop.tick()
+    assert http.request.await_count == 0
+    clock.now = 1301
+    await loop.tick()
+    assert http.request.await_count == 1
+    assert (await registry.get("inside_bar_breakout")).status == "resumed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config_response",
+    [
+        response(500, {}),
+        response(200, {"success": True, "data": {"enabled_strategies": "bad"}}),
+        response(200, {"success": True, "data": None}),
+    ],
+)
+async def test_ta_resume_config_failures_backoff(config_response):
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.put(PauseEntry("doji", "ta-bot", "paused", 0, 0, 0))
+    http = MagicMock()
+    http.get = AsyncMock(
+        side_effect=[
+            response(
+                200,
+                {
+                    "success": True,
+                    "data": [
+                        {
+                            "changed_by": "petrosa-cio:doji",
+                            "changed_at": datetime.fromtimestamp(0, UTC).isoformat(),
+                        }
+                    ],
+                },
+            ),
+            config_response,
+        ]
+    )
+    http.request = AsyncMock()
+    loop = build_loop(clock, cache, registry, http=http)
+
+    await loop.tick()
+
+    saved = await registry.get("doji")
+    assert saved is not None and saved.attempts == 1
+    http.request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_record_pause_refreshes_legacy_paused_entry_expiry():
     clock = FakeClock()
     cache = FakeCache()

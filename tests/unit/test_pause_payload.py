@@ -1,6 +1,9 @@
 import pytest
 
-from cio.core.pause_payload import build_ta_bot_pause_payload
+from cio.core.pause_payload import (
+    build_ta_bot_pause_payload,
+    build_ta_bot_resume_payload,
+)
 
 
 @pytest.mark.parametrize(
@@ -36,6 +39,42 @@ def test_ta_bot_pause_payload_rejects_invalid_target_schema():
             {"enabled_strategies": "not-a-list"},
             "fox_trap_reversal",
             "CIO_PAUSE: test",
+        )
+
+    assert "enabled_strategies" in str(exc_info.value)
+
+
+def test_ta_bot_resume_payload_restores_only_missing_strategy():
+    payload = build_ta_bot_resume_payload(
+        {"enabled_strategies": ["momentum_pulse"], "symbols": ["BTCUSDT"]},
+        "fox_trap_reversal",
+        "CIO_AUTO_RESUME: guarded pause expired",
+    )
+
+    assert payload == {
+        "enabled_strategies": ["momentum_pulse", "fox_trap_reversal"],
+        "changed_by": "petrosa-cio:resume:fox_trap_reversal",
+        "reason": "CIO_AUTO_RESUME: guarded pause expired",
+        "validate_only": False,
+    }
+
+
+def test_ta_bot_resume_payload_does_not_duplicate_strategy():
+    payload = build_ta_bot_resume_payload(
+        {"enabled_strategies": ["fox_trap_reversal"]},
+        "fox_trap_reversal",
+        "CIO_AUTO_RESUME: guarded pause expired",
+    )
+
+    assert payload["enabled_strategies"] == ["fox_trap_reversal"]
+
+
+def test_ta_bot_resume_payload_rejects_invalid_target_schema():
+    with pytest.raises(ValueError, match="enabled_strategies") as exc_info:
+        build_ta_bot_resume_payload(
+            {"enabled_strategies": "not-a-list"},
+            "fox_trap_reversal",
+            "CIO_AUTO_RESUME: guarded pause expired",
         )
 
     assert "enabled_strategies" in str(exc_info.value)

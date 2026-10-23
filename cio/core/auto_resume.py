@@ -22,6 +22,7 @@ from cio.core.alerting.fr66_alerts import (
     publish_fr66_alert,
 )
 from cio.core.cache import AsyncRedisCache
+from cio.core.pause_payload import build_ta_bot_resume_payload
 from cio.core.router import OutputRouter
 
 logger = logging.getLogger(__name__)
@@ -487,7 +488,7 @@ class AutoResumeLoop:
             else entry.paused_at + entry.min_pause_seconds
         )
         return (
-            entry.status == "paused"
+            entry.status in {"paused", "gave_up"}
             and now >= expires_at
             and now - entry.last_unavailable_at >= QUIET_PERIOD_SECONDS
             and now >= entry.next_attempt_at
@@ -552,6 +553,8 @@ class AutoResumeLoop:
             elif entry.status == "gave_up" and entry.gave_up_at is not None:
                 if now - entry.gave_up_at >= GAVE_UP_RETENTION_SECONDS:
                     await self.registry.remove(entry.strategy_id, "gave_up_expired")
+                elif self._eligible(entry, now):
+                    eligible.append(entry)
             elif entry.status == "paused":
                 if entry.flap_count >= MAX_FLAPS:
                     await self._give_up(entry, "flapping")
@@ -698,9 +701,39 @@ class AutoResumeLoop:
             await self._record_failure(entry, detail)
             return
 
-        method, url, payload = build_resume_request(
-            base_url, entry.strategy_id, entry.paused_at, entry.service
-        )
+        if entry.service == "ta-bot":
+            try:
+                response = await self.http_client.get(
+                    f"{base_url}/api/v1/config/application"
+                )
+                if not 200 <= response.status_code < 300:
+                    raise ValueError(f"status={response.status_code}")
+                body = response.json()
+                current_config = body.get("data") if isinstance(body, dict) else None
+                if isinstance(current_config, dict):
+                    method = "POST"
+                    url = f"{base_url}/api/v1/config/application"
+                    payload = build_ta_bot_resume_payload(
+                        current_config,
+                        entry.strategy_id,
+                        "CIO_AUTO_RESUME: guarded pause expired",
+                    )
+                elif isinstance(current_config, list):
+                    method, url, payload = build_resume_request(
+                        base_url, entry.strategy_id, entry.paused_at, entry.service
+                    )
+                else:
+                    raise ValueError("application config is not verifiable")
+            except Exception as exc:
+                await self._record_failure(
+                    entry,
+                    f"config_read_type={type(exc).__name__} detail={str(exc) or '<empty>'}",
+                )
+                return
+        else:
+            method, url, payload = build_resume_request(
+                base_url, entry.strategy_id, entry.paused_at, entry.service
+            )
         try:
             response = await self.http_client.request(method, url, json=payload)
             if response.status_code == 429:
@@ -766,6 +799,7 @@ class AutoResumeLoop:
         entry.status = "gave_up"
         entry.gave_up_at = self.clock()
         entry.gave_up_reason = reason
+        entry.next_attempt_at = entry.gave_up_at + RETRY_BASE_SECONDS
         justification = (
             f"AUTO_RESUME_GAVE_UP strategy_id={entry.strategy_id} reason={reason} "
             f"attempts={entry.attempts} flap_count={entry.flap_count} — strategy left paused, "
