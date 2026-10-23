@@ -521,6 +521,10 @@ async def test_expired_ta_pause_restores_runtime_allowlist():
     saved = await registry.get("hammer_reversal_pattern")
     assert saved is not None and saved.status == "resumed"
     http.request.assert_awaited_once()
+    assert http.request.await_args.args[:2] == (
+        "POST",
+        "http://ta-bot/api/v1/config/application",
+    )
     assert http.request.await_args.kwargs["json"]["enabled_strategies"] == [
         "momentum_pulse",
         "hammer_reversal_pattern",
