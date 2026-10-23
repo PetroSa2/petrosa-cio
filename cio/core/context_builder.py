@@ -5,6 +5,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
 try:
     from datetime import UTC
@@ -332,6 +333,19 @@ class ContextBuilder:
             self._fetch_portfolio_and_risk(
                 symbol,
                 correlation_id,
+                side=(
+                    "LONG"
+                    if payload.get("action") in ("buy", "BUY", "long", "LONG")
+                    else "SHORT"
+                    if payload.get("action") in ("sell", "SELL", "short", "SHORT")
+                    else None
+                ),
+                stop_loss=payload.get("stop_loss"),
+                stop_loss_pct=payload.get("stop_loss_pct"),
+                reference_price=payload.get("entry_price")
+                or payload.get("current_price"),
+                timeframe=payload.get("timeframe"),
+                strategy_id=strategy_id,
                 gaps=gaps,
                 availability=availability,
                 provenance=provenance,
@@ -1361,6 +1375,12 @@ class ContextBuilder:
         self,
         symbol: str,
         correlation_id: str,
+        side: str | None = None,
+        stop_loss: float | None = None,
+        stop_loss_pct: float | None = None,
+        reference_price: float | None = None,
+        timeframe: str | None = None,
+        strategy_id: str | None = None,
         gaps: list[ContextGap] | None = None,
         availability: dict[str, bool] | None = None,
         provenance: dict[str, str | bool] | None = None,
@@ -1374,7 +1394,21 @@ class ContextBuilder:
         Code Engine's gross_exposure=1.0 / orders=999 trigger-block path
         continues to fire — AC2 is record-not-block.
         """
-        url = f"{self.tradeengine_url}/state?symbol={symbol}"
+        params: dict[str, Any] = {"symbol": symbol}
+        if side is not None:
+            params["side"] = side
+            params["stop_contract_version"] = 1
+        if stop_loss is not None:
+            params["stop_loss"] = stop_loss
+        if stop_loss_pct is not None:
+            params["stop_loss_pct"] = stop_loss_pct
+        if reference_price is not None:
+            params["reference_price"] = reference_price
+        if timeframe is not None:
+            params["timeframe"] = timeframe
+        if strategy_id is not None:
+            params["strategy_id"] = strategy_id
+        url = f"{self.tradeengine_url}/state?{urlencode(params)}"
         last_exc: Exception = RuntimeError("unreachable")
         for attempt in range(_PORTFOLIO_FETCH_MAX_RETRIES + 1):
             try:

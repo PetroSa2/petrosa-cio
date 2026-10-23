@@ -3,6 +3,8 @@ Nurse-specific safety models for the Petrosa CIO.
 Changes to this file require MFA approval via GitHub branch protection.
 """
 
+from typing import Any
+
 from pydantic import BaseModel, Field, model_validator
 
 from cio.core.safety_constants import (
@@ -64,6 +66,10 @@ class RiskLimits(BaseModel):
     min_sl_distance_frac: float | None = Field(
         None,
         description="min_sl_distance_pct / 100: the floor as a fraction of the entry.",
+    )
+    stop_contract: dict[str, Any] | None = Field(
+        None,
+        description="The stop contract resolved by tradeengine for this signal.",
     )
     probe_mode: bool = Field(
         False,

@@ -94,6 +94,45 @@ async def test_transient_connect_error_recovers_within_retry_budget():
 
 
 @pytest.mark.asyncio
+async def test_signal_stop_contract_is_requested_with_state_context():
+    builder = _make_builder()
+    response = _success_response()
+    response.json = lambda: {
+        **_PORTFOLIO_SUCCESS_PAYLOAD,
+        "risk_limits": {
+            **_PORTFOLIO_SUCCESS_PAYLOAD["risk_limits"],
+            "stop_contract": {
+                "version": 1,
+                "stop_pct": 0.03,
+                "source": "derived",
+                "placeable": True,
+            },
+        },
+    }
+    builder.client.get = AsyncMock(return_value=response)
+
+    _, risk, _ = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT",
+        "cid-contract",
+        side="LONG",
+        stop_loss_pct=0.02,
+        reference_price=50_000.0,
+        timeframe="5m",
+        strategy_id="strategy-a",
+    )
+
+    request_url = builder.client.get.await_args.args[0]
+    assert "stop_contract_version=1" in request_url
+    assert "stop_loss_pct=0.02" in request_url
+    assert "reference_price=50000.0" in request_url
+    assert "timeframe=5m" in request_url
+    assert "strategy_id=strategy-a" in request_url
+    assert risk.stop_contract["stop_pct"] == pytest.approx(0.03)
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
 async def test_persistent_connect_error_exhausts_retries_then_falls_back(caplog):
     import logging
 
