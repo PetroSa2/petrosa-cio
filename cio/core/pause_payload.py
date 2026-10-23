@@ -23,3 +23,21 @@ def build_ta_bot_pause_payload(
         "reason": reason,
         "validate_only": False,
     }
+
+
+def build_ta_bot_resume_payload(
+    current_config: dict[str, Any], strategy_id: str, reason: str
+) -> dict[str, Any]:
+    """Build an application-config request that restores one strategy."""
+    enabled = current_config.get("enabled_strategies", [])
+    if not isinstance(enabled, list):
+        raise ValueError("target application config has invalid enabled_strategies")
+
+    return {
+        "enabled_strategies": [*enabled, strategy_id]
+        if strategy_id not in enabled
+        else enabled,
+        "changed_by": f"petrosa-cio:resume:{strategy_id}",
+        "reason": reason,
+        "validate_only": False,
+    }
