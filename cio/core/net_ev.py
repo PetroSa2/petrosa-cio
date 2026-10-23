@@ -269,8 +269,8 @@ def _evaluate(
 ) -> NetEvGate:
     """Run the gate for the stop and take-profit the order will carry.
 
-    ``stop_pct`` is the carried or configured stop distance; the effective stop is the larger of it and
-    tradeengine's floor (rule 23). The take-profit is unchanged by the floor.
+    ``stop_pct`` is the carried or configured stop distance. When tradeengine
+    returns a stop contract, its resolved distance is authoritative.
     """
     limits = context.risk_limits
     alpha = net_ev_alpha()
@@ -291,12 +291,19 @@ def _evaluate(
         )
 
     fallbacks: list[str] = []
-    floor = limits.min_sl_distance_frac
-    if floor is None:
+    contract = limits.stop_contract
+    contract_stop = _as_float(contract.get("stop_pct")) if contract else None
+    floor = limits.min_sl_distance_frac if contract_stop is None else None
+    stop_source = (
+        str(contract.get("source"))
+        if contract and contract.get("source")
+        else limits.min_sl_distance_source
+    )
+    if floor is None and contract_stop is None:
         fallbacks.append("stop_floor_unavailable")
     elif limits.min_sl_distance_source == "fallback":
         fallbacks.append("stop_floor_fallback")  # tradeengine's fixed placeholder
-    s_eff = max(stop_pct, floor) if floor else stop_pct
+    s_eff = contract_stop if contract_stop is not None else (max(stop_pct, floor) if floor else stop_pct)
     reward_risk = take_profit_pct / s_eff
 
     commission, commission_fallbacks = commission_components(context.commission)
@@ -325,7 +332,7 @@ def _evaluate(
         stop_pct=stop_pct,
         stop_floor_frac=floor,
         stop_floor_reported_pct=limits.min_sl_distance_pct,
-        stop_floor_source=limits.min_sl_distance_source,
+        stop_floor_source=stop_source,
         s_eff=s_eff,
         take_profit_pct=take_profit_pct,
         reward_risk=reward_risk,

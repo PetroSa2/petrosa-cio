@@ -175,6 +175,23 @@ def test_effective_stop_is_the_floor_and_take_profit_is_unchanged():
     assert gate.p_be == pytest.approx((0.06 + c) / (0.06 + 0.04))
 
 
+def test_tradeengine_stop_contract_is_authoritative_over_legacy_floor():
+    context = _context()
+    context.risk_limits.stop_contract = {
+        "version": 1,
+        "stop_pct": 0.03,
+        "source": "derived",
+        "placeable": True,
+    }
+
+    gate = evaluate(context, 0.02, 0.04)
+
+    assert gate.s_eff == pytest.approx(0.03)
+    assert gate.stop_floor_frac is None
+    assert gate.stop_floor_source == "derived"
+    assert gate.reward_risk == pytest.approx(4 / 3)
+
+
 def test_stop_wider_than_the_floor_is_kept():
     gate = evaluate(_context(floor=2.0), 0.03, 0.04)
     assert gate.s_eff == 0.03
