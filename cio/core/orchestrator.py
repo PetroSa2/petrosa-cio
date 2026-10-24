@@ -722,7 +722,6 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("COLD_START_RECORD_FAILED: %s", exc)
 
-
     @staticmethod
     def _observe_llm_call(
         route: str, provider: str, started: float, outcome: str
