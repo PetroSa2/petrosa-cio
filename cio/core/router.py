@@ -38,6 +38,29 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _emit_final_decision_metrics(action: ActionType, strategy_id: str) -> None:
+    """Record the action after routing has resolved the final decision."""
+    if not strategy_id:
+        return
+    try:
+        from cio.core.metrics import (
+            DECISION_ACTIONS,
+            PETROSA_CIO_DECISIONS_TOTAL,
+            SUMMARY,
+        )
+
+        action_value = getattr(action, "value", str(action))
+        DECISION_ACTIONS.add(1, {"action": action_value, "strategy_id": strategy_id})
+        PETROSA_CIO_DECISIONS_TOTAL.add(
+            1,
+            {"action": action_value, "reason": "decision", "outcome": "completed"},
+        )
+        SUMMARY.decision(action_value, "decision", "completed")
+        SUMMARY.emit()
+    except ImportError:
+        pass
+
+
 def _log_value(value: Any) -> str:
     """Render a log value without relying on logging ``extra`` serialization."""
     return json.dumps(value, default=str, separators=(",", ":"))
@@ -521,6 +544,8 @@ class OutputRouter:
                         "strategy_id": strategy_id,
                     },
                 )
+
+        _emit_final_decision_metrics(action, strategy_id)
 
         # 1. Prepare Audit Path (Memory storage - Always executed)
         audit_payload: dict[str, Any] = {

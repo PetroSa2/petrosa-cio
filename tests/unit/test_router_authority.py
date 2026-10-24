@@ -75,7 +75,10 @@ async def test_enabled_action_dispatches_normally_via_authority_store():
         authority_store=store,
     )
 
-    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+    with (
+        patch.dict(os.environ, {"DRY_RUN": "false"}),
+        patch("cio.core.router._emit_final_decision_metrics") as emit_metrics,
+    ):
         await router.route(_make_context(), _make_decision(ActionType.ADMIT))
 
     # ADMIT (a lifecycle action) publishes on cio.lifecycle.admit.<sid>,
@@ -84,6 +87,7 @@ async def test_enabled_action_dispatches_normally_via_authority_store():
     subjects = [c.args[0] for c in router.nats_client.publish.call_args_list]
     assert "cio.lifecycle.admit.strat_a" in subjects
     assert "cio.decision.audit.admit" in subjects
+    emit_metrics.assert_called_once_with(ActionType.ADMIT, "strat_a")
     # No pending-approval entries because action was ENABLED.
     assert store.list_pending() == []
 

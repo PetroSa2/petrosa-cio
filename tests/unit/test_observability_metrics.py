@@ -1,5 +1,6 @@
 import json
 import logging
+import sys
 from unittest.mock import Mock, patch
 
 from cio.core.metrics import (
@@ -56,7 +57,7 @@ def test_summary_record_is_bounded_and_uses_300_second_window(caplog):
 
 
 def test_decision_action_metric_requires_strategy_id():
-    from cio.core.orchestrator import Orchestrator
+    from cio.core.router import _emit_final_decision_metrics
 
     counter = Mock()
     summary = Mock()
@@ -65,10 +66,26 @@ def test_decision_action_metric_requires_strategy_id():
         patch("cio.core.metrics.PETROSA_CIO_DECISIONS_TOTAL"),
         patch("cio.core.metrics.SUMMARY", summary),
     ):
-        Orchestrator.__new__(Orchestrator)._emit_decision_action(
-            ActionType.EXECUTE, "momentum-v3"
-        )
+        _emit_final_decision_metrics(ActionType.EXECUTE, "momentum-v3")
 
     counter.add.assert_called_once_with(
         1, {"action": "execute", "strategy_id": "momentum-v3"}
     )
+
+
+def test_final_decision_metrics_skip_empty_strategy_id():
+    from cio.core.router import _emit_final_decision_metrics
+
+    with patch("cio.core.metrics.DECISION_ACTIONS") as counter:
+        _emit_final_decision_metrics(ActionType.EXECUTE, "")
+
+    counter.add.assert_not_called()
+
+
+def test_final_decision_metrics_tolerate_missing_metrics_dependency():
+    from cio.core.router import _emit_final_decision_metrics
+
+    with patch.dict(sys.modules, {"cio.core.metrics": None}):
+        result = _emit_final_decision_metrics(ActionType.EXECUTE, "momentum-v3")
+
+    assert result is None
