@@ -198,7 +198,6 @@ class Orchestrator:
                 justification="NON_ACTIONABLE_INTENT",
                 thought_trace="NON_ACTIONABLE_INTENT",
             )
-            self._emit_decision_action(decision.action, context.strategy_id)
             return decision
 
         logger.info(
@@ -222,7 +221,6 @@ class Orchestrator:
         # treat CONTEXT_UNAVAILABLE as a fresh directive.
         context_gate_result = await apply_context_gate(context, self.cache)
         if context_gate_result is not None:
-            self._emit_decision_action(context_gate_result.action, context.strategy_id)
             return context_gate_result
 
         # FR53 / P3.4 (#130) — stale-characterization refusal gate. Only runs
@@ -384,7 +382,6 @@ class Orchestrator:
                             else None
                         ),
                     )
-                    self._emit_decision_action(_prefiltered.action, context.strategy_id)
                     return _prefiltered
                 logger.info(
                     "COST_SHARE_PREFILTER would skip (log-only)",
@@ -490,9 +487,6 @@ class Orchestrator:
                         calibration_status if calibration_mode() == "enforce" else None
                     ),
                 )
-                self._emit_decision_action(
-                    _fallback_decision.action, context.strategy_id
-                )
                 return _fallback_decision
 
             if code_result.hard_blocked:
@@ -519,9 +513,6 @@ class Orchestrator:
                         calibration_status if calibration_mode() == "enforce" else None
                     ),
                 )
-                self._emit_decision_action(
-                    _blocked_decision.action, context.strategy_id
-                )
                 return _blocked_decision
 
             # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
@@ -542,7 +533,6 @@ class Orchestrator:
                     ),
                 )
                 await self._record_cold_start(context, _bypass_decision)
-                self._emit_decision_action(_bypass_decision.action, context.strategy_id)
                 return _bypass_decision
 
             # 2. REGIME ANALYSIS + 3. STRATEGY ASSESSMENT (S3-S5)
@@ -658,7 +648,6 @@ class Orchestrator:
                     ),
                 )
                 await self._check_spend_ceiling(context.correlation_id)
-                self._emit_decision_action(decision.action, context.strategy_id)
                 return decision
 
             # 4. ACTION CLASSIFICATION
@@ -701,7 +690,6 @@ class Orchestrator:
                     "llm_provider": provider_name,
                 },
             )
-            self._emit_decision_action(decision.action, context.strategy_id)
             return decision
 
         except Exception as e:
@@ -709,7 +697,6 @@ class Orchestrator:
                 f"Critical failure in reasoning loop: {str(e)}",
                 extra={"correlation_id": context.correlation_id},
             )
-            self._emit_decision_action(SAFE_DECISION_RESULT.action, context.strategy_id)
             return SAFE_DECISION_RESULT
 
     async def _record_cold_start(
@@ -735,26 +722,6 @@ class Orchestrator:
         except Exception as exc:
             logger.warning("COLD_START_RECORD_FAILED: %s", exc)
 
-    def _emit_decision_action(self, action: ActionType, strategy_id: str) -> None:
-        try:
-            from cio.core.metrics import (
-                DECISION_ACTIONS,
-                PETROSA_CIO_DECISIONS_TOTAL,
-                SUMMARY,
-            )
-
-            action_value = getattr(action, "value", str(action))
-            DECISION_ACTIONS.add(
-                1, {"action": action_value, "strategy_id": strategy_id}
-            )
-            PETROSA_CIO_DECISIONS_TOTAL.add(
-                1,
-                {"action": action_value, "reason": "decision", "outcome": "completed"},
-            )
-            SUMMARY.decision(action_value, "decision", "completed")
-            SUMMARY.emit()
-        except ImportError:
-            pass
 
     @staticmethod
     def _observe_llm_call(

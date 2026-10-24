@@ -56,7 +56,7 @@ def test_summary_record_is_bounded_and_uses_300_second_window(caplog):
 
 
 def test_decision_action_metric_requires_strategy_id():
-    from cio.core.orchestrator import Orchestrator
+    from cio.core.router import _emit_final_decision_metrics
 
     counter = Mock()
     summary = Mock()
@@ -65,9 +65,7 @@ def test_decision_action_metric_requires_strategy_id():
         patch("cio.core.metrics.PETROSA_CIO_DECISIONS_TOTAL"),
         patch("cio.core.metrics.SUMMARY", summary),
     ):
-        Orchestrator.__new__(Orchestrator)._emit_decision_action(
-            ActionType.EXECUTE, "momentum-v3"
-        )
+        _emit_final_decision_metrics(ActionType.EXECUTE, "momentum-v3")
 
     counter.add.assert_called_once_with(
         1, {"action": "execute", "strategy_id": "momentum-v3"}
