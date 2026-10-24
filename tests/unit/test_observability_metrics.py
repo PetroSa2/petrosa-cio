@@ -86,4 +86,6 @@ def test_final_decision_metrics_tolerate_missing_metrics_dependency():
     from cio.core.router import _emit_final_decision_metrics
 
     with patch.dict(sys.modules, {"cio.core.metrics": None}):
-        _emit_final_decision_metrics(ActionType.EXECUTE, "momentum-v3")
+        result = _emit_final_decision_metrics(ActionType.EXECUTE, "momentum-v3")
+
+    assert result is None
