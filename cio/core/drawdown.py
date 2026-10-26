@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import math
 import os
+import time
+from dataclasses import dataclass
 from typing import Any
 
 from cio.models.net_ev import DrawdownDecision, DrawdownState, RiskInputs
@@ -30,6 +32,19 @@ DEFAULT_Z_HALT = 3.0
 DEFAULT_REDUCE_FACTOR = 0.5
 FALLBACK_REDUCE = 0.03
 FALLBACK_HALT = 0.06
+DEFAULT_COOLING_SECONDS = 86400.0
+
+
+@dataclass
+class _HaltLifecycle:
+    key: str
+    started_at: float
+    cooling_seconds: float
+    resumed_drawdown: float | None = None
+    resume_threshold: float | None = None
+
+
+_HALT_LIFECYCLE: _HaltLifecycle | None = None
 
 
 def _env_float(name: str, default: float, low: float, high: float) -> float:
@@ -56,6 +71,24 @@ def reduce_factor() -> float:
 def drawdown_enforced() -> bool:
     """False only when ``CIO_DRAWDOWN_MODE=log_only``: the step is computed and logged, never acts."""
     return os.environ.get("CIO_DRAWDOWN_MODE", "enforce").strip().lower() != "log_only"
+
+
+def _cooling_period(inputs: RiskInputs | None, fallbacks: list[str]) -> float:
+    if inputs is not None and inputs.equity_window_days is not None:
+        if inputs.equity_window_days > 0:
+            return inputs.equity_window_days * 86400.0
+    fallbacks.append("cooling_period_fixed_fallback")
+    return _env_float(
+        "CIO_DRAWDOWN_COOLING_SECONDS",
+        DEFAULT_COOLING_SECONDS,
+        0.0,
+        31_536_000.0,
+    )
+
+
+def reset_drawdown_lifecycle() -> None:
+    global _HALT_LIFECYCLE
+    _HALT_LIFECYCLE = None
 
 
 def is_closing_intent(payload: dict[str, Any]) -> bool:
@@ -126,6 +159,7 @@ def evaluate_drawdown(
     drawdown: DrawdownState | None,
     inputs: RiskInputs | None,
     held: dict[str, float] | None = None,
+    now: float | None = None,
 ) -> DrawdownDecision:
     """The drawdown step in force: ``none``, ``reduce`` or ``halt`` (``not_evaluated`` without a drawdown)."""
     zr, zh = z_reduce(), z_halt()
@@ -144,6 +178,7 @@ def evaluate_drawdown(
         return decision
     decision.drawdown = drawdown.from_peak
     decision.net_notional_ratio = drawdown.net_notional_ratio
+    decision.cooling_period_seconds = _cooling_period(inputs, decision.fallbacks)
 
     model = realized = None
     if inputs is not None:
@@ -184,7 +219,51 @@ def evaluate_drawdown(
             decision.fallbacks.append("thresholds_fallback_floor")
     else:
         decision.fallbacks.append("thresholds_fallback")
+    lifecycle_key = drawdown.peak_at or (
+        str(drawdown.equity_peak) if drawdown.equity_peak is not None else None
+    )
+    current_time = time.monotonic() if now is None else now
+    global _HALT_LIFECYCLE
+    if lifecycle_key is not None and _HALT_LIFECYCLE is not None:
+        if _HALT_LIFECYCLE.key != lifecycle_key:
+            _HALT_LIFECYCLE = None
+        elif _HALT_LIFECYCLE.resumed_drawdown is not None:
+            decision.resume_threshold = _HALT_LIFECYCLE.resume_threshold
+            if decision.sigma is not None and drawdown.from_peak >= (
+                _HALT_LIFECYCLE.resume_threshold or float("inf")
+            ):
+                _HALT_LIFECYCLE = _HaltLifecycle(
+                    lifecycle_key,
+                    current_time,
+                    decision.cooling_period_seconds,
+                )
+                decision.action, decision.reason = "halt", "drawdown_rehalt"
+                decision.lifecycle_event = "rehalt"
+                return decision
+            if drawdown.from_peak >= decision.reduce_threshold:
+                decision.action, decision.reason = "reduce", "drawdown_reduce_resumed"
+            else:
+                decision.action, decision.reason = "none", "within_steps_resumed"
+            return decision
+        elif (
+            current_time - _HALT_LIFECYCLE.started_at >= decision.cooling_period_seconds
+        ):
+            _HALT_LIFECYCLE.resumed_drawdown = drawdown.from_peak
+            _HALT_LIFECYCLE.resume_threshold = drawdown.from_peak + (
+                decision.sigma or decision.halt_threshold / decision.z_halt
+            )
+            decision.resume_threshold = _HALT_LIFECYCLE.resume_threshold
+            decision.action, decision.reason = "reduce", "drawdown_resume"
+            decision.lifecycle_event = "resume"
+            return decision
     if drawdown.from_peak >= decision.halt_threshold:
+        if lifecycle_key is not None:
+            _HALT_LIFECYCLE = _HaltLifecycle(
+                lifecycle_key,
+                current_time,
+                decision.cooling_period_seconds,
+            )
+            decision.lifecycle_event = "halt"
         decision.action, decision.reason = "halt", "drawdown_halt"
     elif drawdown.from_peak >= decision.reduce_threshold:
         decision.action, decision.reason = "reduce", "drawdown_reduce"
