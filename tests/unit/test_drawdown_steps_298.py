@@ -51,6 +51,7 @@ def _inputs(sigma=0.027, rho=1.0, pairs=PAIRS, equity_sigma=0.005, equity_ok=Tru
         correlation={a: {b: (1.0 if a == b else rho) for b in pairs} for a in pairs},
         equity_sigma=equity_sigma,
         equity_sufficient=equity_ok,
+        daily_sigma_horizon_days=1.0,
     )
 
 
@@ -280,7 +281,9 @@ def test_closes_and_reduce_only_orders_pass_during_a_halt(payload):
 
 def test_halt_cools_then_resumes_at_reduced_size_and_rehalts_one_sigma_later():
     inputs = _inputs()
-    inputs = inputs.model_copy(update={"equity_window_days": 0.5})
+    inputs = inputs.model_copy(
+        update={"daily_sigma_horizon_days": 0.5, "equity_window_days": 30}
+    )
     halted = evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=0.0)
     assert halted.action == "halt" and halted.lifecycle_event == "halt"
     resumed = evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=43200.0)
@@ -294,7 +297,9 @@ def test_halt_cools_then_resumes_at_reduced_size_and_rehalts_one_sigma_later():
 
 def test_cooling_resume_reduces_new_entry_but_close_stays_unblocked():
     inputs = _inputs()
-    inputs = inputs.model_copy(update={"equity_window_days": 0.5})
+    inputs = inputs.model_copy(
+        update={"daily_sigma_horizon_days": 0.5, "equity_window_days": 30}
+    )
     evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=0.0)
     resumed_context = _context(drawdown=_dd(0.05, peak_at="peak"), inputs=inputs)
     resumed_context.drawdown_state = _dd(0.05, peak_at="peak")
@@ -309,6 +314,40 @@ def test_cooling_resume_reduces_new_entry_but_close_stays_unblocked():
         )
     )
     assert close.hard_blocked is False
+
+
+def test_cooling_uses_daily_sigma_horizon_not_equity_lookback():
+    inputs = _inputs()
+    inputs = inputs.model_copy(
+        update={"daily_sigma_horizon_days": 1.0, "equity_window_days": 30}
+    )
+    evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=0.0)
+    assert (
+        evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=86399).action == "halt"
+    )
+    assert (
+        evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=86400).lifecycle_event
+        == "resume"
+    )
+
+
+def test_persisted_lifecycle_survives_process_reset():
+    inputs = _inputs()
+    persisted = _dd(
+        0.05,
+        peak_at="peak",
+    ).model_copy(
+        update={
+            "halt_started_at": 0.0,
+            "resumed_drawdown": 0.05,
+            "resume_threshold": 0.05 + 0.01134,
+        }
+    )
+    reset_drawdown_lifecycle()
+    decision = evaluate_drawdown(persisted, inputs, now=100.0)
+    assert decision.resumed_drawdown == pytest.approx(0.05)
+    assert decision.resume_threshold == pytest.approx(0.06134)
+    assert decision.action == "reduce"
 
 
 def test_a_reduce_halves_the_size_of_new_entries_but_never_below_the_probe():
