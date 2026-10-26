@@ -135,11 +135,13 @@ async def test_orchestrator_real_breach_skips_classifier():
                 action=ActionType.BLOCK,
             )
         )
-        await Orchestrator(llm_client=MagicMock()).run(
+        decision = await Orchestrator(llm_client=MagicMock()).run(
             build_test_context(drawdown=0.15, portfolio_state_available=True)
         )
 
     classifier.return_value.classify.assert_not_awaited()
+    assert decision.action == ActionType.BLOCK
+    assert decision.hard_block_reason.startswith("Global drawdown")
 
 
 def test_assembler_real_hard_block_unchanged():
