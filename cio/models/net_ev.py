@@ -145,6 +145,7 @@ class RiskInputs(BaseModel):
     correlation: dict[str, dict[str, float | None]] = Field(default_factory=dict)
     equity_sigma: float | None = None
     equity_sufficient: bool = False
+    equity_window_days: float | None = None
 
 
 class DrawdownDecision(BaseModel):
@@ -170,6 +171,9 @@ class DrawdownDecision(BaseModel):
     halt_threshold: float
     threshold_source: Literal["derived", "fallback", "fallback_floor"] = "fallback"
     reduce_factor: float = 0.5
+    cooling_period_seconds: float | None = None
+    lifecycle_event: Literal["halt", "resume", "rehalt"] | None = None
+    resume_threshold: float | None = None
     fallbacks: list[str] = Field(default_factory=list)
 
 

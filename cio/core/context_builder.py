@@ -782,11 +782,17 @@ class ContextBuilder:
                 for a, row in matrix.items()
             }
             equity = body.get("equity") or {}
+            params = body.get("params") or {}
             inputs = RiskInputs(
                 sigma_daily=sigmas,
                 correlation=correlation,
                 equity_sigma=equity.get("sigma_daily"),
                 equity_sufficient=bool(equity.get("sufficient")),
+                equity_window_days=(
+                    equity.get("window_days")
+                    or equity.get("horizon_days")
+                    or params.get("window_days")
+                ),
             )
         except Exception as exc:
             self._fail_report(
