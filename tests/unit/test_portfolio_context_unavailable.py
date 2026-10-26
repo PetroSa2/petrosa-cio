@@ -117,7 +117,7 @@ async def test_orchestrator_fallback_block_skips_classifier_in_bypass_mode():
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_real_breach_still_calls_classifier():
+async def test_orchestrator_real_breach_skips_classifier():
     with (
         patch.dict(os.environ, {"NURSE_USE_LLM_REASONING": "true"}),
         patch("cio.core.orchestrator.ActionClassifier") as classifier,
@@ -139,7 +139,7 @@ async def test_orchestrator_real_breach_still_calls_classifier():
             build_test_context(drawdown=0.15, portfolio_state_available=True)
         )
 
-    classifier.return_value.classify.assert_awaited_once()
+    classifier.return_value.classify.assert_not_awaited()
 
 
 def test_assembler_real_hard_block_unchanged():

@@ -170,10 +170,7 @@ async def test_orchestrator_hard_block_with_bypass():
 
             await orchestrator.run(context)
 
-            # Classifier should be called with bypass_mode=True because reasoning is disabled
-            mock_classifier.classify.assert_called_once()
-            _, kwargs = mock_classifier.classify.call_args
-            assert kwargs["bypass_mode"] is True
+            mock_classifier.classify.assert_not_called()
 
 
 def _make_bypass_context(regime_enum):
