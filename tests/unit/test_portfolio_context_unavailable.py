@@ -185,9 +185,7 @@ async def test_orchestrator_non_context_hard_block_skips_action_classifier():
         )
         assemble.return_value = decision_result
         classifier.return_value.classify = AsyncMock()
-        decision = await Orchestrator(llm_client=MagicMock()).run(
-            build_test_context()
-        )
+        decision = await Orchestrator(llm_client=MagicMock()).run(build_test_context())
 
     classifier.return_value.classify.assert_not_awaited()
     engine.run.assert_called_once()
