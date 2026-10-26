@@ -118,6 +118,7 @@ async def test_orchestrator_hard_block_with_bypass():
             # Mock hard block
             mock_code_result = MagicMock()
             mock_code_result.hard_blocked = True
+            mock_code_result.block_context_fallback = False
             mock_code_result.block_reason = "Test Block"
             MockEngine.run.return_value = mock_code_result
 
@@ -168,12 +169,11 @@ async def test_orchestrator_hard_block_with_bypass():
                 ),
             )
 
-            await orchestrator.run(context)
+            decision = await orchestrator.run(context)
 
-            # Classifier should be called with bypass_mode=True because reasoning is disabled
-            mock_classifier.classify.assert_called_once()
-            _, kwargs = mock_classifier.classify.call_args
-            assert kwargs["bypass_mode"] is True
+            mock_classifier.classify.assert_not_called()
+            assert decision.hard_blocked is True
+            assert decision.action == ActionType.BLOCK
 
 
 def _make_bypass_context(regime_enum):

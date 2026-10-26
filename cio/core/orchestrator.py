@@ -490,7 +490,6 @@ class Orchestrator:
                 return _fallback_decision
 
             if code_result.hard_blocked:
-                # Bypassing persona analysis for hard blocks
                 logger.warning(
                     f"⛔ HARD BLOCK DETECTED | Reason: {code_result.block_reason}",
                     extra={
@@ -498,22 +497,15 @@ class Orchestrator:
                         "block_reason": code_result.block_reason,
                     },
                 )
-
-                logger.info(
-                    "Executing final Action Classifier for hard-blocked trade",
-                    extra={"correlation_id": context.correlation_id},
-                )
-                _blocked_decision = await self.action_classifier.classify(
-                    context,
-                    code_result,
-                    bypass_regime,
-                    bypass_strategy,
-                    bypass_mode=not self.use_llm_reasoning,
+                return DecisionAssembler.assemble(
+                    context=context,
+                    code_result=code_result,
+                    regime_result=bypass_regime,
+                    strategy_result=bypass_strategy,
                     calibration_status=(
                         calibration_status if calibration_mode() == "enforce" else None
                     ),
                 )
-                return _blocked_decision
 
             # NEW: DETERMINISTIC BYPASS (Ticket #334/337)
             if not self.use_llm_reasoning:
