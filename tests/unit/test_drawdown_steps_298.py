@@ -6,7 +6,12 @@ import pytest
 
 from cio.core.assembler import DecisionAssembler
 from cio.core.context_builder import ContextBuilder
-from cio.core.drawdown import basket_sigma, evaluate_drawdown, is_closing_intent
+from cio.core.drawdown import (
+    basket_sigma,
+    evaluate_drawdown,
+    is_closing_intent,
+    reset_drawdown_lifecycle,
+)
 from cio.core.engine import CodeEngine
 from cio.models import (
     ActionType,
@@ -49,8 +54,13 @@ def _inputs(sigma=0.027, rho=1.0, pairs=PAIRS, equity_sigma=0.005, equity_ok=Tru
     )
 
 
-def _dd(from_peak, net=0.42):
-    return DrawdownState(from_peak=from_peak, net_notional_ratio=net, equity_now=1000.0)
+def _dd(from_peak, net=0.42, peak_at=None):
+    return DrawdownState(
+        from_peak=from_peak,
+        net_notional_ratio=net,
+        equity_now=1000.0,
+        peak_at=peak_at,
+    )
 
 
 def _context(
@@ -100,6 +110,13 @@ def _context(
         drawdown_state=drawdown,
         risk_inputs=inputs,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_lifecycle():
+    reset_drawdown_lifecycle()
+    yield
+    reset_drawdown_lifecycle()
 
 
 # --- the thresholds ------------------------------------------------------------------------------
@@ -261,6 +278,39 @@ def test_closes_and_reduce_only_orders_pass_during_a_halt(payload):
     assert result.drawdown.action == "halt"  # still recorded
 
 
+def test_halt_cools_then_resumes_at_reduced_size_and_rehalts_one_sigma_later():
+    inputs = _inputs()
+    inputs = inputs.model_copy(update={"equity_window_days": 0.5})
+    halted = evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=0.0)
+    assert halted.action == "halt" and halted.lifecycle_event == "halt"
+    resumed = evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=43200.0)
+    assert resumed.action == "reduce" and resumed.lifecycle_event == "resume"
+    assert resumed.resume_threshold == pytest.approx(0.05 + resumed.sigma)
+    resumed_context = _context(drawdown=_dd(0.05, peak_at="peak"), inputs=inputs)
+    resumed_context.drawdown_state = _dd(resumed.resume_threshold, peak_at="peak")
+    rehalted = evaluate_drawdown(resumed_context.drawdown_state, inputs, now=43201.0)
+    assert rehalted.action == "halt" and rehalted.lifecycle_event == "rehalt"
+
+
+def test_cooling_resume_reduces_new_entry_but_close_stays_unblocked():
+    inputs = _inputs()
+    inputs = inputs.model_copy(update={"equity_window_days": 0.5})
+    evaluate_drawdown(_dd(0.05, peak_at="peak"), inputs, now=0.0)
+    resumed_context = _context(drawdown=_dd(0.05, peak_at="peak"), inputs=inputs)
+    resumed_context.drawdown_state = _dd(0.05, peak_at="peak")
+    result = CodeEngine.run(resumed_context)
+    assert result.drawdown.lifecycle_event == "resume"
+    assert result.sizing.drawdown_factor == 0.5
+    close = CodeEngine.run(
+        _context(
+            drawdown=_dd(0.05, peak_at="peak"),
+            inputs=inputs,
+            payload={"action": "close"},
+        )
+    )
+    assert close.hard_blocked is False
+
+
 def test_a_reduce_halves_the_size_of_new_entries_but_never_below_the_probe():
     base = CodeEngine.run(_context(drawdown=_dd(0.0), inputs=_inputs()))
     reduced = CodeEngine.run(_context(drawdown=_dd(0.03), inputs=_inputs()))
@@ -408,6 +458,7 @@ async def test_state_drawdown_block_reaches_the_context():
 
 
 RISK_INPUTS_BODY = {
+    "params": {"window_days": 60},
     "symbols": {
         "BTCUSDT": {
             "sigma_daily_best": {
@@ -459,6 +510,7 @@ async def test_builder_keeps_only_sufficient_risk_inputs_and_caches():
         inputs.correlation["BTCUSDT"]["BCHUSDT"] is None
     )  # insufficient correlation dropped
     assert (inputs.equity_sigma, inputs.equity_sufficient) == (0.012, True)
+    assert inputs.equity_window_days == 60
     await builder._fetch_risk_inputs("cid")
     assert builder.client.get.await_count == 1
     decision = evaluate_drawdown(_dd(0.0), inputs)

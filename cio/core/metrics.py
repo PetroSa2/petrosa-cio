@@ -142,6 +142,11 @@ DECISION_ACTIONS = meter.create_counter(
     description="Total number of final decisions by action type",
 )
 
+DRAWDOWN_EVENTS = meter.create_counter(
+    "cio_drawdown_events_total",
+    description="Drawdown halt, cooling resume, and re-halt lifecycle events",
+)
+
 CONCENTRATION_CAP_TOTAL = meter.create_counter(
     "cio_concentration_cap_total",
     description="Per-strategy rolling-hour concentration cap results",

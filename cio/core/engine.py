@@ -6,6 +6,7 @@ from cio.core.drawdown import (
     is_closing_intent,
 )
 from cio.core.metrics import (
+    DRAWDOWN_EVENTS,
     REGIME_AGE,
     REGIME_UNAVAILABLE,
     RISK_GATE_CONTEXT_FALLBACK,
@@ -146,6 +147,14 @@ class CodeEngine:
             context.portfolio.net_notional_by_symbol,
         )
         result.drawdown = drawdown
+        if drawdown.lifecycle_event is not None:
+            DRAWDOWN_EVENTS.add(1, {"event": drawdown.lifecycle_event})
+            logger.warning(
+                "DRAWDOWN_%s %s",
+                drawdown.lifecycle_event.upper(),
+                drawdown.model_dump_json(),
+                extra={"correlation_id": context.correlation_id},
+            )
         closing = is_closing_intent(context.trigger_payload)
         if drawdown.action == "halt" and not closing and drawdown_enforced():
             result.hard_blocked = True
