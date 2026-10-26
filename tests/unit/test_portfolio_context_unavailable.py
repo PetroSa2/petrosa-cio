@@ -153,6 +153,7 @@ async def test_orchestrator_non_context_hard_block_skips_action_classifier():
         patch("cio.core.orchestrator.RegimeAnalyst") as regime,
         patch("cio.core.orchestrator.StrategyAssessor") as strategy,
         patch("cio.core.orchestrator.ActionClassifier") as classifier,
+        patch("cio.core.orchestrator.DecisionAssembler.assemble") as assemble,
     ):
         engine.run.return_value = CodeEngineResult(
             hard_blocked=True,
@@ -172,18 +173,18 @@ async def test_orchestrator_non_context_hard_block_skips_action_classifier():
                 thought_trace="test",
             )
         )
-        classifier.return_value.classify = AsyncMock(
-            return_value=DecisionResult(
-                hard_blocked=False,
-                ev_passes=True,
-                cost_viable=True,
-                regime_confidence=ConfidenceLevel.HIGH,
-                regime_fit=RegimeFit.GOOD,
-                strategy_health=HealthStatus.HEALTHY,
-                activation_recommendation=ActivationRecommendation.RUN,
-                action=ActionType.EXECUTE,
-            )
+        decision_result = DecisionResult(
+            hard_blocked=True,
+            ev_passes=False,
+            cost_viable=False,
+            regime_confidence=ConfidenceLevel.LOW,
+            regime_fit=RegimeFit.NEUTRAL,
+            strategy_health=HealthStatus.HEALTHY,
+            activation_recommendation=ActivationRecommendation.RUN,
+            action=ActionType.BLOCK,
         )
+        assemble.return_value = decision_result
+        classifier.return_value.classify = AsyncMock()
         decision = await Orchestrator(llm_client=MagicMock()).run(
             build_test_context()
         )
@@ -193,8 +194,8 @@ async def test_orchestrator_non_context_hard_block_skips_action_classifier():
     assert engine.run.return_value.block_context_fallback is False
     regime.return_value.classify.assert_not_awaited()
     strategy.return_value.assess.assert_not_awaited()
-    assert decision.hard_blocked is True
-    assert decision.action == ActionType.BLOCK
+    assemble.assert_called_once()
+    assert decision is decision_result
 
 
 def test_assembler_real_hard_block_unchanged():
