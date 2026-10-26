@@ -31,6 +31,7 @@ from cio.models import (
     DecisionResult,
     HealthStatus,
     RegimeFit,
+    StrategyResult,
     TriggerType,
 )
 from cio.models.enums import RejectionSource
@@ -142,6 +143,54 @@ async def test_orchestrator_real_breach_skips_classifier():
     classifier.return_value.classify.assert_not_awaited()
     assert decision.action == ActionType.BLOCK
     assert decision.hard_block_reason.startswith("Global drawdown")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_non_context_hard_block_skips_action_classifier():
+    with (
+        patch.dict(os.environ, {"NURSE_USE_LLM_REASONING": "true"}),
+        patch("cio.core.orchestrator.CodeEngine") as engine,
+        patch("cio.core.orchestrator.RegimeAnalyst") as regime,
+        patch("cio.core.orchestrator.StrategyAssessor") as strategy,
+        patch("cio.core.orchestrator.ActionClassifier") as classifier,
+    ):
+        engine.run.return_value = CodeEngineResult(
+            hard_blocked=True,
+            block_reason="Global drawdown hard block",
+            block_context_fallback=False,
+        )
+        regime.return_value.classify = AsyncMock(
+            return_value=build_test_context().regime
+        )
+        strategy.return_value.assess = AsyncMock(
+            return_value=StrategyResult(
+                strategy_id="test-strategy",
+                health=HealthStatus.HEALTHY,
+                activation_recommendation=ActivationRecommendation.RUN,
+                regime_fit=RegimeFit.GOOD,
+                confidence=1.0,
+                thought_trace="test",
+            )
+        )
+        classifier.return_value.classify = AsyncMock(
+            return_value=DecisionResult(
+                hard_blocked=False,
+                ev_passes=True,
+                cost_viable=True,
+                regime_confidence=ConfidenceLevel.HIGH,
+                regime_fit=RegimeFit.GOOD,
+                strategy_health=HealthStatus.HEALTHY,
+                activation_recommendation=ActivationRecommendation.RUN,
+                action=ActionType.EXECUTE,
+            )
+        )
+        decision = await Orchestrator(llm_client=MagicMock()).run(
+            build_test_context()
+        )
+
+    classifier.return_value.classify.assert_not_awaited()
+    assert decision.hard_blocked is True
+    assert decision.action == ActionType.BLOCK
 
 
 def test_assembler_real_hard_block_unchanged():
