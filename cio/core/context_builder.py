@@ -741,6 +741,10 @@ class ContextBuilder:
                 peak_at=raw.get("peak_at"),
                 net_notional_ratio=raw.get("net_notional_ratio"),
                 as_of=raw.get("as_of"),
+                halt_started_at=raw.get("halt_started_at")
+                or raw.get("drawdown_halt_started_at"),
+                resumed_drawdown=raw.get("resumed_drawdown"),
+                resume_threshold=raw.get("resume_threshold"),
             )
         except Exception:
             return None
@@ -792,6 +796,13 @@ class ContextBuilder:
                     equity.get("window_days")
                     or equity.get("horizon_days")
                     or params.get("window_days")
+                ),
+                daily_sigma_horizon_days=(
+                    equity.get("daily_sigma_horizon_days")
+                    or equity.get("sigma_horizon_days")
+                    or params.get("daily_sigma_horizon_days")
+                    or params.get("sigma_horizon_days")
+                    or 1.0
                 ),
             )
         except Exception as exc:

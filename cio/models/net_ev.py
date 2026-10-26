@@ -132,6 +132,9 @@ class DrawdownState(BaseModel):
     peak_at: str | None = None
     net_notional_ratio: float | None = None  # signed net notional / equity
     as_of: str | None = None
+    halt_started_at: float | None = None
+    resumed_drawdown: float | None = None
+    resume_threshold: float | None = None
 
 
 class RiskInputs(BaseModel):
@@ -146,6 +149,7 @@ class RiskInputs(BaseModel):
     equity_sigma: float | None = None
     equity_sufficient: bool = False
     equity_window_days: float | None = None
+    daily_sigma_horizon_days: float | None = None
 
 
 class DrawdownDecision(BaseModel):
@@ -173,6 +177,8 @@ class DrawdownDecision(BaseModel):
     reduce_factor: float = 0.5
     cooling_period_seconds: float | None = None
     lifecycle_event: Literal["halt", "resume", "rehalt"] | None = None
+    halt_started_at: float | None = None
+    resumed_drawdown: float | None = None
     resume_threshold: float | None = None
     fallbacks: list[str] = Field(default_factory=list)
 
