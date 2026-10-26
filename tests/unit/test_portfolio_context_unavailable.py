@@ -189,6 +189,10 @@ async def test_orchestrator_non_context_hard_block_skips_action_classifier():
         )
 
     classifier.return_value.classify.assert_not_awaited()
+    engine.run.assert_called_once()
+    assert engine.run.return_value.block_context_fallback is False
+    regime.return_value.classify.assert_not_awaited()
+    strategy.return_value.assess.assert_not_awaited()
     assert decision.hard_blocked is True
     assert decision.action == ActionType.BLOCK
 
