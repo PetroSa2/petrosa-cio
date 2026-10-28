@@ -22,7 +22,7 @@ from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED, EXECUTE_SIGNAL_REJECTED
 from cio.core.pause_payload import build_ta_bot_pause_payload
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
-from cio.models import ActionType, DecisionResult, TriggerContext
+from cio.models import ActionType, DecisionResult, TriggerContext, TriggerType
 from cio.models.enums import RejectionSource
 from cio.output.translator import TradeEngineTranslator
 
@@ -388,6 +388,17 @@ class OutputRouter:
         action = decision.action or ActionType.SKIP
         is_dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
         qa_intents = os.getenv("NATS_TOPIC_INTENTS", "").startswith("qa.")
+
+        if (
+            action == ActionType.EXECUTE
+            and getattr(context, "trigger_type", None) == TriggerType.SCHEDULED_REVIEW
+            and not _decision_symbol(context)
+        ):
+            action = ActionType.SKIP
+            decision.action = action
+            decision.justification = (
+                "Scheduled review without a symbol is non-trading; holding decision"
+            )
 
         if action == ActionType.EXECUTE:
             concentration_at = datetime.now(UTC)
