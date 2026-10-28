@@ -18,6 +18,7 @@ from cio.core.cache import AsyncRedisCache
 from cio.core.concentration_cap import evaluate as evaluate_concentration
 from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED, EXECUTE_SIGNAL_REJECTED
 from cio.core.pause_payload import build_ta_bot_pause_payload
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
@@ -596,6 +597,18 @@ class OutputRouter:
                 )
                 if not is_dry_run:
                     self._register_executed_position(context, correlation_id)
+            else:
+                EXECUTE_SIGNAL_REJECTED.add(1, {"reason": "translation"})
+                logger.warning(
+                    "Execute decision rejected before signals.trading publication",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "decision_id": decision_id,
+                        "strategy_id": strategy_id,
+                        "symbol": _decision_symbol(context),
+                        "reason": "translation",
+                    },
+                )
 
         elif action == ActionType.MODIFY_PARAMS:
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
@@ -1162,6 +1175,20 @@ class OutputRouter:
                 logger.error(
                     f"Background routing task failed: {res}",
                     extra={"correlation_id": correlation_id},
+                )
+
+        if nats_publish_tasks and not is_dry_run:
+            published_subjects = [
+                subject
+                for (subject, _), result in zip(
+                    dispatch_tasks_data, results[1:], strict=False
+                )
+                if subject.startswith("signals.trading.")
+                and not isinstance(result, Exception)
+            ]
+            if published_subjects:
+                EXECUTE_SIGNAL_PUBLISHED.add(
+                    len(published_subjects), {"outcome": "published"}
                 )
 
         # 5. Audit log for no-publish actions

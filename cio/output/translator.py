@@ -80,8 +80,15 @@ class TradeEngineTranslator:
 
             current_price = context.market_signals.current_price
             quantity_usd = decision.computed_position_size_usd
+            symbol = context.trigger_payload.get("symbol")
 
-            if not side or current_price <= 0 or quantity_usd is None:
+            if (
+                not side
+                or not isinstance(symbol, str)
+                or not symbol.strip()
+                or current_price <= 0
+                or quantity_usd is None
+            ):
                 logger.critical(
                     "CONTRACT VIOLATION: Missing critical fields for translation",
                     extra={
@@ -89,6 +96,7 @@ class TradeEngineTranslator:
                         "has_side": bool(side),
                         "price": current_price,
                         "quantity_usd": quantity_usd,
+                        "has_symbol": bool(symbol),
                         "payload_keys": list(context.trigger_payload.keys()),
                     },
                 )
@@ -166,7 +174,7 @@ class TradeEngineTranslator:
             legacy_signal = {
                 "strategy_id": context.strategy_id,
                 "strategy": context.strategy_id,
-                "symbol": context.trigger_payload.get("symbol", "UNKNOWN"),
+                "symbol": symbol,
                 "action": action,
                 "price": current_price,
                 "current_price": current_price,
