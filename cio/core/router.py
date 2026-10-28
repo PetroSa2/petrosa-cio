@@ -18,6 +18,7 @@ from cio.core.cache import AsyncRedisCache
 from cio.core.concentration_cap import evaluate as evaluate_concentration
 from cio.core.decision_store import DecisionRecord, DecisionStore
 from cio.core.leverage_arbiter import arbitrate_leverage
+from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED, EXECUTE_SIGNAL_REJECTED
 from cio.core.pause_payload import build_ta_bot_pause_payload
 from cio.core.service_resolver import ServiceType, TargetServiceResolver
 from cio.core.vector import VectorClientProtocol
@@ -597,12 +598,7 @@ class OutputRouter:
                 if not is_dry_run:
                     self._register_executed_position(context, correlation_id)
             else:
-                try:
-                    from cio.core.metrics import EXECUTE_SIGNAL_REJECTED
-
-                    EXECUTE_SIGNAL_REJECTED.add(1, {"reason": "translation"})
-                except ImportError:
-                    pass
+                EXECUTE_SIGNAL_REJECTED.add(1, {"reason": "translation"})
                 logger.warning(
                     "Execute decision rejected before signals.trading publication",
                     extra={
@@ -1191,14 +1187,9 @@ class OutputRouter:
                 and not isinstance(result, Exception)
             ]
             if published_subjects:
-                try:
-                    from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED
-
-                    EXECUTE_SIGNAL_PUBLISHED.add(
-                        len(published_subjects), {"outcome": "published"}
-                    )
-                except ImportError:
-                    pass
+                EXECUTE_SIGNAL_PUBLISHED.add(
+                    len(published_subjects), {"outcome": "published"}
+                )
 
         # 5. Audit log for no-publish actions
         if not dispatch_tasks_data and action in (ActionType.SKIP, ActionType.BLOCK):

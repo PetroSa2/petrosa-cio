@@ -5,7 +5,6 @@ and that the audit path persists the new actions through the existing pattern
 (no new persistence code path required).
 """
 
-import builtins
 import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -236,20 +235,7 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
     decision = _make_decision(ActionType.EXECUTE)
     decision.computed_position_size_usd = 100.0
 
-    original_import = builtins.__import__
-
-    def import_without_metrics(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "cio.core.metrics" and any(
-            item in {"EXECUTE_SIGNAL_PUBLISHED", "EXECUTE_SIGNAL_REJECTED"}
-            for item in fromlist
-        ):
-            raise ImportError("metrics unavailable")
-        return original_import(name, globals, locals, fromlist, level)
-
-    with (
-        patch.dict(os.environ, {"DRY_RUN": "false"}),
-        patch("builtins.__import__", side_effect=import_without_metrics),
-    ):
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
     published_subjects = {c.args[0] for c in mock_nc.publish.call_args_list}
@@ -277,20 +263,7 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
     decision = _make_decision(ActionType.EXECUTE)
     decision.computed_position_size_usd = 100.0
 
-    original_import = builtins.__import__
-
-    def import_without_metrics(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "cio.core.metrics" and any(
-            item in {"EXECUTE_SIGNAL_PUBLISHED", "EXECUTE_SIGNAL_REJECTED"}
-            for item in fromlist
-        ):
-            raise ImportError("metrics unavailable")
-        return original_import(name, globals, locals, fromlist, level)
-
-    with (
-        patch.dict(os.environ, {"DRY_RUN": "false"}),
-        patch("builtins.__import__", side_effect=import_without_metrics),
-    ):
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
         await router.route(context, decision)
 
     subjects = {call.args[0] for call in mock_nc.publish.call_args_list}
