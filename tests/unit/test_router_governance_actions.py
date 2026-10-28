@@ -238,9 +238,7 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
 
     original_import = builtins.__import__
 
-    def import_without_metrics(
-        name, globals=None, locals=None, fromlist=(), level=0
-    ):
+    def import_without_metrics(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "cio.core.metrics" and any(
             item in {"EXECUTE_SIGNAL_PUBLISHED", "EXECUTE_SIGNAL_REJECTED"}
             for item in fromlist
@@ -248,8 +246,9 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
             raise ImportError("metrics unavailable")
         return original_import(name, globals, locals, fromlist, level)
 
-    with patch.dict(os.environ, {"DRY_RUN": "false"}), patch(
-        "builtins.__import__", side_effect=import_without_metrics
+    with (
+        patch.dict(os.environ, {"DRY_RUN": "false"}),
+        patch("builtins.__import__", side_effect=import_without_metrics),
     ):
         await router.route(context, decision)
 
@@ -280,9 +279,7 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
 
     original_import = builtins.__import__
 
-    def import_without_metrics(
-        name, globals=None, locals=None, fromlist=(), level=0
-    ):
+    def import_without_metrics(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "cio.core.metrics" and any(
             item in {"EXECUTE_SIGNAL_PUBLISHED", "EXECUTE_SIGNAL_REJECTED"}
             for item in fromlist
@@ -290,8 +287,9 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
             raise ImportError("metrics unavailable")
         return original_import(name, globals, locals, fromlist, level)
 
-    with patch.dict(os.environ, {"DRY_RUN": "false"}), patch(
-        "builtins.__import__", side_effect=import_without_metrics
+    with (
+        patch.dict(os.environ, {"DRY_RUN": "false"}),
+        patch("builtins.__import__", side_effect=import_without_metrics),
     ):
         await router.route(context, decision)
 
