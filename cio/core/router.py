@@ -596,6 +596,23 @@ class OutputRouter:
                 )
                 if not is_dry_run:
                     self._register_executed_position(context, correlation_id)
+            else:
+                try:
+                    from cio.core.metrics import EXECUTE_SIGNAL_REJECTED
+
+                    EXECUTE_SIGNAL_REJECTED.add(1, {"reason": "translation"})
+                except ImportError:
+                    pass
+                logger.warning(
+                    "Execute decision rejected before signals.trading publication",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "decision_id": decision_id,
+                        "strategy_id": strategy_id,
+                        "symbol": _decision_symbol(context),
+                        "reason": "translation",
+                    },
+                )
 
         elif action == ActionType.MODIFY_PARAMS:
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
@@ -1163,6 +1180,25 @@ class OutputRouter:
                     f"Background routing task failed: {res}",
                     extra={"correlation_id": correlation_id},
                 )
+
+        if nats_publish_tasks and not is_dry_run:
+            published_subjects = [
+                subject
+                for (subject, _), result in zip(
+                    dispatch_tasks_data, results[1:], strict=False
+                )
+                if subject.startswith("signals.trading.")
+                and not isinstance(result, Exception)
+            ]
+            if published_subjects:
+                try:
+                    from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED
+
+                    EXECUTE_SIGNAL_PUBLISHED.add(
+                        len(published_subjects), {"outcome": "published"}
+                    )
+                except ImportError:
+                    pass
 
         # 5. Audit log for no-publish actions
         if not dispatch_tasks_data and action in (ActionType.SKIP, ActionType.BLOCK):

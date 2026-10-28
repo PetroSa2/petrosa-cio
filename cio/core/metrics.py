@@ -176,6 +176,16 @@ NON_ACTIONABLE_INTENTS = meter.create_counter(
     description="Trade intents skipped before reasoning because their token is non-actionable",
 )
 
+EXECUTE_SIGNAL_PUBLISHED = meter.create_counter(
+    "cio_execute_signal_published_total",
+    description="Execute decisions published to the tradeengine signals subject",
+)
+
+EXECUTE_SIGNAL_REJECTED = meter.create_counter(
+    "cio_execute_signal_rejected_total",
+    description="Execute decisions rejected before tradeengine signal publication",
+)
+
 # LLM Validation Failures
 LLM_VALIDATION_FAILURES = meter.create_counter(
     "cio_llm_validation_failures_total",
