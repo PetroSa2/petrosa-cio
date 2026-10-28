@@ -391,7 +391,7 @@ class OutputRouter:
 
         if (
             action == ActionType.EXECUTE
-            and context.trigger_type == TriggerType.SCHEDULED_REVIEW
+            and getattr(context, "trigger_type", None) == TriggerType.SCHEDULED_REVIEW
             and not _decision_symbol(context)
         ):
             action = ActionType.SKIP
