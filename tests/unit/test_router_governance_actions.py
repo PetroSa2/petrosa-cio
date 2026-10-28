@@ -20,6 +20,7 @@ from cio.models import (
     HealthStatus,
     RegimeFit,
     TriggerContext,
+    TriggerType,
 )
 
 
@@ -266,6 +267,7 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
     context.strategy_id = "momentum_pulse"
     context.decision_id = "decision-589"
     context.correlation_id = "corr-589"
+    context.trigger_type = TriggerType.TRADE_INTENT
     context.trigger_payload = {"side": "long"}
     context.market_signals.current_price = 50000.0
     decision = _make_decision(ActionType.EXECUTE)
@@ -277,3 +279,31 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
     subjects = {call.args[0] for call in mock_nc.publish.call_args_list}
     assert "signals.trading.momentum_pulse" not in subjects
     assert "cio.decision.audit.execute" in subjects
+
+
+@pytest.mark.asyncio
+async def test_scheduled_review_without_symbol_is_non_trading_skip():
+    mock_nc = AsyncMock()
+    mock_vc = AsyncMock()
+    router = OutputRouter(
+        nats_client=mock_nc,
+        vector_client=mock_vc,
+        ta_bot_url="http://ta-bot",
+    )
+    context = MagicMock()
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "decision-590"
+    context.correlation_id = "corr-590"
+    context.trigger_type = TriggerType.SCHEDULED_REVIEW
+    context.trigger_payload = {"side": "long"}
+    context.market_signals.current_price = 50000.0
+    decision = _make_decision(ActionType.EXECUTE)
+    decision.computed_position_size_usd = 100.0
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+        await router.route(context, decision)
+
+    subjects = {call.args[0] for call in mock_nc.publish.call_args_list}
+    assert "signals.trading.momentum_pulse" not in subjects
+    assert "cio.decision.audit.skip" in subjects
+    assert decision.action == ActionType.SKIP
