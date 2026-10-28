@@ -230,7 +230,8 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
     context.strategy_id = "Spread Liquidity Monitor  625"
     context.decision_id = "decision-589"
     context.correlation_id = "corr-589"
-    context.trigger_payload = {"symbol": "BTCUSDT"}
+    context.position_id = None
+    context.trigger_payload = {"symbol": "BTCUSDT", "side": "long"}
     context.market_signals.current_price = 50000.0
     decision = _make_decision(ActionType.EXECUTE)
     decision.computed_position_size_usd = 100.0
@@ -239,6 +240,13 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
         await router.route(context, decision)
 
     published_subjects = {c.args[0] for c in mock_nc.publish.call_args_list}
+    assert "signals.trading.spread_liquidity_monitor_625" in published_subjects
+    trading_payload = next(
+        call.args[1]
+        for call in mock_nc.publish.call_args_list
+        if call.args[0] == "signals.trading.spread_liquidity_monitor_625"
+    )
+    assert json.loads(trading_payload)["symbol"] == "BTCUSDT"
     for subject in published_subjects:
         assert " " not in subject, f"subject contains whitespace: {subject!r}"
 
