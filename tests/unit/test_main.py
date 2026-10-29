@@ -54,6 +54,25 @@ async def test_connect_redis_closes_client_when_redis_is_unavailable(monkeypatch
     mock_redis.close.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_main_exits_when_redis_startup_fails(monkeypatch):
+    mock_nc = MagicMock()
+    mock_nc.connect = AsyncMock()
+    monkeypatch.setenv("QA_SHADOW_MODE", "true")
+    monkeypatch.setenv("NATS_TOPIC_INTENTS", "qa.x")
+    monkeypatch.setenv("ENABLE_OTEL", "false")
+    monkeypatch.setattr("cio.main._enforce_prompt_context_contract", lambda: None)
+    monkeypatch.setattr("cio.main.NATS", lambda: mock_nc)
+    monkeypatch.setattr(
+        "cio.main._connect_redis", AsyncMock(side_effect=ConnectionError("down"))
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await main()
+
+    assert exc_info.value.code == 1
+
+
 def test_litellm_logger_silenced_at_import_time():
     """#192: the `LiteLLM` logger must be raised to WARNING so its internal
     INFO chatter (e.g. "LiteLLM completion() model=...") no longer floods
