@@ -377,16 +377,7 @@ class ContextBuilder:
         execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
-        persisted_lifecycle = None
-        if self.drawdown_lifecycle_store is not None:
-            try:
-                persisted_lifecycle = await self.drawdown_lifecycle_store.load()
-            except Exception as exc:
-                logger.warning(
-                    "DRAWDOWN_LIFECYCLE_LOAD_FAILED exc_type=%s",
-                    type(exc).__name__,
-                )
-                persisted_lifecycle = None
+        persisted_lifecycle = await self._load_drawdown_lifecycle()
         drawdown_state = self._drawdown_from(
             self._merge_drawdown_lifecycle(
                 env_stats.get("drawdown"), persisted_lifecycle
@@ -743,6 +734,18 @@ class ContextBuilder:
             float(equity) if equity else None,
             decision.reduce_threshold,
         )
+
+    async def _load_drawdown_lifecycle(self) -> dict[str, float | None] | None:
+        if self.drawdown_lifecycle_store is None:
+            return None
+        try:
+            return await self.drawdown_lifecycle_store.load()
+        except Exception as exc:
+            logger.warning(
+                "DRAWDOWN_LIFECYCLE_LOAD_FAILED exc_type=%s",
+                type(exc).__name__,
+            )
+            return None
 
     @staticmethod
     def _merge_drawdown_lifecycle(

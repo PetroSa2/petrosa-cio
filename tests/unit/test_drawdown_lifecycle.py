@@ -35,9 +35,15 @@ class Decision:
 
 
 class RecordingStore:
-    def __init__(self, failure=False):
+    def __init__(self, failure=False, value=None):
         self.saved = []
         self.failure = failure
+        self.value = value
+
+    async def load(self):
+        if self.failure:
+            raise RuntimeError("store unavailable")
+        return self.value
 
     async def save(self, decision):
         if self.failure:
@@ -132,3 +138,22 @@ async def test_router_persists_lifecycle_without_blocking_on_store_failure():
 
     router.drawdown_lifecycle_store = RecordingStore(failure=True)
     await router._persist_drawdown_lifecycle(decision, "corr-2")
+
+
+@pytest.mark.asyncio
+async def test_context_loads_lifecycle_and_ignores_store_failure():
+    builder = ContextBuilder.__new__(ContextBuilder)
+    lifecycle = {
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+    builder.drawdown_lifecycle_store = RecordingStore(value=lifecycle)
+
+    assert await builder._load_drawdown_lifecycle() == lifecycle
+
+    builder.drawdown_lifecycle_store = RecordingStore(failure=True)
+    assert await builder._load_drawdown_lifecycle() is None
+
+    builder.drawdown_lifecycle_store = None
+    assert await builder._load_drawdown_lifecycle() is None
