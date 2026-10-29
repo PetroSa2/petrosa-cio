@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import time
 from typing import Any
 
@@ -8,6 +9,9 @@ from nats.aio.client import Client as NATS
 from nats.aio.msg import Msg
 
 logger = logging.getLogger(__name__)
+REDIS_HEALTHCHECK_TIMEOUT_SECONDS = float(
+    os.getenv("REDIS_HEALTHCHECK_TIMEOUT_SECONDS", "0.2")
+)
 
 
 class HeartbeatResponder:
@@ -51,10 +55,17 @@ class HeartbeatResponder:
 
         start_time = time.perf_counter()
 
-        # 1. Dependency Health Checks (Shallow)
-        health = {"redis": True, "latency_ms": 0}
+        redis_healthy = True
+        if self.redis is not None:
+            try:
+                await asyncio.wait_for(
+                    self.redis.ping(), timeout=REDIS_HEALTHCHECK_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                redis_healthy = False
+                logger.warning("Heartbeat Redis check failed: %s", type(exc).__name__)
 
-        # TODO: Add actual connectivity checks if clients are provided
+        health = {"redis": redis_healthy, "latency_ms": 0}
 
         status = "GOVERNANCE_ACTIVE"
         if not health["redis"]:
