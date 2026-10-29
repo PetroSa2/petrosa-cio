@@ -141,6 +141,7 @@ async def _connect_redis(redis_url: str):
         raise
     return redis_client
 
+
 # Initialize FastAPI for health checks
 app = FastAPI(title="Petrosa CIO Health")
 
