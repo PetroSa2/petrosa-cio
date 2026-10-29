@@ -68,6 +68,18 @@ async def test_missing_or_malformed_record_is_ignored():
 
     assert await DrawdownLifecycleStore(cache).load() is None
 
+    cache.value = "not-json"
+    assert await DrawdownLifecycleStore(cache).load() is None
+
+    cache.value = json.dumps(
+        {
+            "halt_started_at": "20",
+            "resumed_drawdown": None,
+            "resume_threshold": None,
+        }
+    )
+    assert await DrawdownLifecycleStore(cache).load() is None
+
 
 @pytest.mark.asyncio
 async def test_non_lifecycle_decision_does_not_replace_record():
