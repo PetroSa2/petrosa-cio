@@ -64,7 +64,11 @@ async def test_rehalt_overwrites_the_previous_episode():
 
 @pytest.mark.asyncio
 async def test_missing_or_malformed_record_is_ignored():
-    cache = FakeCache(json.dumps({"halt_started_at": 10.0}))
+    cache = FakeCache()
+
+    assert await DrawdownLifecycleStore(cache).load() is None
+
+    cache.value = json.dumps({"halt_started_at": 10.0})
 
     assert await DrawdownLifecycleStore(cache).load() is None
 
