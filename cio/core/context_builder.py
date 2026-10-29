@@ -388,7 +388,9 @@ class ContextBuilder:
                 )
                 persisted_lifecycle = None
         drawdown_state = self._drawdown_from(
-            self._merge_drawdown_lifecycle(env_stats.get("drawdown"), persisted_lifecycle)
+            self._merge_drawdown_lifecycle(
+                env_stats.get("drawdown"), persisted_lifecycle
+            )
         )
         slippage, (prior_strength, strategy_rounds), risk_inputs = await asyncio.gather(
             self._fetch_slippage(regime, correlation_id),
