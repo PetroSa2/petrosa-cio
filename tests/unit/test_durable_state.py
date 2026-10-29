@@ -122,6 +122,11 @@ class FakeRedis:
         self.deleted = True
 
 
+class FailingRedis(FakeRedis):
+    async def hgetall(self, key: str) -> dict[str, str]:
+        raise TimeoutError("redis delayed")
+
+
 class FakeStore:
     def __init__(self, existing: dict[str, str] | None = None):
         self.values = existing or {}
@@ -144,6 +149,19 @@ async def test_migration_preserves_existing_and_deletes_legacy_hash(caplog):
     assert store.puts == ["rsi"]
     assert redis.deleted is True
     assert "AUTO_RESUME_REGISTRY_MIGRATED count=1" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_migration_failure_preserves_legacy_hash(caplog):
+    caplog.set_level("ERROR")
+    redis = FailingRedis({"doji": entry_json("doji")})
+    store = FakeStore()
+
+    await migrate_redis_registry(redis, store)
+
+    assert redis.deleted is False
+    assert not store.puts
+    assert "AUTO_RESUME_REGISTRY_MIGRATION_FAILED exc_type=TimeoutError" in caplog.text
 
 
 def test_state_store_default_timeout_tolerates_data_manager_tail(monkeypatch):
