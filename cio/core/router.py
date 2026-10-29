@@ -353,6 +353,20 @@ class OutputRouter:
             else self.realtime_strategies_url
         )
 
+    async def _persist_drawdown_lifecycle(
+        self, drawdown: Any, correlation_id: str
+    ) -> None:
+        if self.drawdown_lifecycle_store is None:
+            return
+        try:
+            await self.drawdown_lifecycle_store.save(drawdown)
+        except Exception as exc:
+            logger.warning(
+                "DRAWDOWN_LIFECYCLE_SAVE_FAILED exc_type=%s",
+                type(exc).__name__,
+                extra={"correlation_id": correlation_id},
+            )
+
     async def route(self, context: TriggerContext, decision: DecisionResult) -> None:
         """
         Routes the decision following the T-Junction logic:
@@ -369,15 +383,9 @@ class OutputRouter:
         `vector_client.upsert`, which is the same payload the dead branch used
         to publish.
         """
-        if self.drawdown_lifecycle_store is not None:
-            try:
-                await self.drawdown_lifecycle_store.save(decision.drawdown)
-            except Exception as exc:
-                logger.warning(
-                    "DRAWDOWN_LIFECYCLE_SAVE_FAILED exc_type=%s",
-                    type(exc).__name__,
-                    extra={"correlation_id": context.correlation_id},
-                )
+        await self._persist_drawdown_lifecycle(
+            decision.drawdown, context.correlation_id
+        )
         correlation_id = context.correlation_id
         decision_id = context.decision_id
         # petrosa-cio#211: producers sometimes emit a human display name

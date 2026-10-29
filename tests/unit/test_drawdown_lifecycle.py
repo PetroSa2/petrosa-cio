@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+from cio.core.context_builder import ContextBuilder
 from cio.core.drawdown_lifecycle import KEY, TTL_SECONDS, DrawdownLifecycleStore
+from cio.core.router import OutputRouter
 
 
 class FakeCache:
@@ -30,6 +32,17 @@ class Decision:
         self.halt_started_at = started
         self.resumed_drawdown = resumed
         self.resume_threshold = threshold
+
+
+class RecordingStore:
+    def __init__(self, failure=False):
+        self.saved = []
+        self.failure = failure
+
+    async def save(self, decision):
+        if self.failure:
+            raise RuntimeError("store unavailable")
+        self.saved.append(decision)
 
 
 @pytest.mark.asyncio
@@ -72,3 +85,34 @@ async def test_store_write_failure_does_not_change_the_decision_path():
 
     with pytest.raises(RuntimeError):
         await store.save(Decision("rehalt", 20.0))
+
+
+def test_latest_lifecycle_overlays_only_lifecycle_fields():
+    raw = {"from_peak_pct": 0.07, "halt_started_at": 10.0}
+    persisted = {
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+
+    assert ContextBuilder._merge_drawdown_lifecycle(raw, persisted) == {
+        "from_peak_pct": 0.07,
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_router_persists_lifecycle_without_blocking_on_store_failure():
+    router = OutputRouter.__new__(OutputRouter)
+    store = RecordingStore()
+    router.drawdown_lifecycle_store = store
+    decision = Decision("rehalt", 20.0)
+
+    await router._persist_drawdown_lifecycle(decision, "corr-1")
+
+    assert store.saved == [decision]
+
+    router.drawdown_lifecycle_store = RecordingStore(failure=True)
+    await router._persist_drawdown_lifecycle(decision, "corr-2")

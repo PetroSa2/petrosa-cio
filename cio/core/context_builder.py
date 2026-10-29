@@ -377,7 +377,7 @@ class ContextBuilder:
         execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
-        drawdown_raw = env_stats.get("drawdown")
+        persisted_lifecycle = None
         if self.drawdown_lifecycle_store is not None:
             try:
                 persisted_lifecycle = await self.drawdown_lifecycle_store.load()
@@ -387,9 +387,9 @@ class ContextBuilder:
                     type(exc).__name__,
                 )
                 persisted_lifecycle = None
-            if persisted_lifecycle is not None and isinstance(drawdown_raw, dict):
-                drawdown_raw = {**drawdown_raw, **persisted_lifecycle}
-        drawdown_state = self._drawdown_from(drawdown_raw)
+        drawdown_state = self._drawdown_from(
+            self._merge_drawdown_lifecycle(env_stats.get("drawdown"), persisted_lifecycle)
+        )
         slippage, (prior_strength, strategy_rounds), risk_inputs = await asyncio.gather(
             self._fetch_slippage(regime, correlation_id),
             self._fetch_rounds(strategy_id, correlation_id),
@@ -741,6 +741,14 @@ class ContextBuilder:
             float(equity) if equity else None,
             decision.reduce_threshold,
         )
+
+    @staticmethod
+    def _merge_drawdown_lifecycle(
+        raw: Any, persisted: dict[str, float | None] | None
+    ) -> Any:
+        if persisted is None or not isinstance(raw, dict):
+            return raw
+        return {**raw, **persisted}
 
     @staticmethod
     def _drawdown_from(raw: Any) -> DrawdownState | None:
