@@ -5,7 +5,53 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cio.main import main
+from cio.main import _connect_redis, main
+
+
+@pytest.mark.asyncio
+async def test_connect_redis_checks_connectivity_with_bounded_timeouts(monkeypatch):
+    mock_redis = AsyncMock()
+    monkeypatch.setattr("redis.asyncio.from_url", MagicMock(return_value=mock_redis))
+
+    result = await _connect_redis("redis://redis:6379")
+
+    assert result is mock_redis
+    mock_redis.ping.assert_awaited_once()
+    from_url = __import__("redis.asyncio", fromlist=["from_url"]).from_url
+    from_url.assert_called_once_with(
+        "redis://redis:6379",
+        socket_connect_timeout=5.0,
+        socket_timeout=5.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_redis_closes_client_when_ping_fails(monkeypatch):
+    mock_redis = AsyncMock()
+    monkeypatch.setattr("cio.main.REDIS_STARTUP_TIMEOUT_SECONDS", 0.01)
+
+    async def delayed_ping():
+        await __import__("asyncio").sleep(1)
+
+    mock_redis.ping.side_effect = delayed_ping
+    monkeypatch.setattr("redis.asyncio.from_url", MagicMock(return_value=mock_redis))
+
+    with pytest.raises(TimeoutError):
+        await _connect_redis("redis://redis:6379")
+
+    mock_redis.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_connect_redis_closes_client_when_redis_is_unavailable(monkeypatch):
+    mock_redis = AsyncMock()
+    mock_redis.ping.side_effect = ConnectionError("redis unavailable")
+    monkeypatch.setattr("redis.asyncio.from_url", MagicMock(return_value=mock_redis))
+
+    with pytest.raises(ConnectionError):
+        await _connect_redis("redis://redis:6379")
+
+    mock_redis.close.assert_awaited_once()
 
 
 def test_litellm_logger_silenced_at_import_time():

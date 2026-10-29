@@ -115,6 +115,31 @@ logger = logging.getLogger("cio-strategist")
 NATS_RECONNECT_TIME_WAIT_SECONDS = int(
     os.getenv("NATS_RECONNECT_TIME_WAIT_SECONDS", "2")
 )
+REDIS_STARTUP_TIMEOUT_SECONDS = float(os.getenv("REDIS_STARTUP_TIMEOUT_SECONDS", "5"))
+REDIS_SOCKET_TIMEOUT_SECONDS = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "5"))
+
+
+async def _connect_redis(redis_url: str):
+    import redis.asyncio as redis_asyncio
+
+    redis_client = redis_asyncio.from_url(
+        redis_url,
+        socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
+    )
+    try:
+        await asyncio.wait_for(
+            redis_client.ping(), timeout=REDIS_STARTUP_TIMEOUT_SECONDS
+        )
+    except Exception as exc:
+        await redis_client.close()
+        logger.error(
+            "Failed to connect to Redis: exc_type=%s detail=%s",
+            type(exc).__name__,
+            str(exc) or "<empty>",
+        )
+        raise
+    return redis_client
 
 # Initialize FastAPI for health checks
 app = FastAPI(title="Petrosa CIO Health")
@@ -408,9 +433,10 @@ async def main():
         logger.error(f"Failed to connect to NATS: {e}")
         sys.exit(1)
 
-    import redis.asyncio as redis_asyncio
-
-    redis_client = redis_asyncio.from_url(redis_url)
+    try:
+        redis_client = await _connect_redis(redis_url)
+    except Exception:
+        sys.exit(1)
     cache = AsyncRedisCache(redis_client)
     logger.info(f"Connected to Redis at {redis_url}")
     durable_state = DataManagerStateStore(data_manager_url, "cio_auto_resume")
