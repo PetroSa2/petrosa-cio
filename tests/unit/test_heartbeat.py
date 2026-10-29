@@ -58,6 +58,56 @@ async def test_heartbeat_responder_handle_ping():
 
 
 @pytest.mark.asyncio
+async def test_heartbeat_responder_reports_redis_connected():
+    mock_nc = AsyncMock()
+    mock_redis = AsyncMock()
+    responder = HeartbeatResponder(mock_nc, redis_client=mock_redis)
+    mock_msg = MagicMock(reply="reply_subject")
+
+    await responder._handle_ping(mock_msg)
+
+    mock_redis.ping.assert_awaited_once()
+    response = json.loads(mock_nc.publish.call_args.args[1].decode())
+    assert response["status"] == "GOVERNANCE_ACTIVE"
+    assert response["health"]["redis"] is True
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_responder_reports_redis_unavailable():
+    mock_nc = AsyncMock()
+    mock_redis = AsyncMock()
+    mock_redis.ping.side_effect = ConnectionError("redis unavailable")
+    responder = HeartbeatResponder(mock_nc, redis_client=mock_redis)
+    mock_msg = MagicMock(reply="reply_subject")
+
+    await responder._handle_ping(mock_msg)
+
+    response = json.loads(mock_nc.publish.call_args.args[1].decode())
+    assert response["status"] == "DEGRADED"
+    assert response["health"]["redis"] is False
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_responder_reports_delayed_redis_as_degraded(monkeypatch):
+    mock_nc = AsyncMock()
+    mock_redis = AsyncMock()
+
+    async def delayed_ping():
+        await asyncio.sleep(1)
+
+    mock_redis.ping.side_effect = delayed_ping
+    monkeypatch.setattr("cio.core.heartbeat.REDIS_HEALTHCHECK_TIMEOUT_SECONDS", 0.001)
+    responder = HeartbeatResponder(mock_nc, redis_client=mock_redis)
+    mock_msg = MagicMock(reply="reply_subject")
+
+    await responder._handle_ping(mock_msg)
+
+    response = json.loads(mock_nc.publish.call_args.args[1].decode())
+    assert response["status"] == "DEGRADED"
+    assert response["health"]["redis"] is False
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_responder_start_stop():
     """Test start and stop methods with realistic types."""
     mock_nc = AsyncMock()
