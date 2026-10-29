@@ -1,0 +1,74 @@
+import json
+
+import pytest
+
+from cio.core.drawdown_lifecycle import KEY, TTL_SECONDS, DrawdownLifecycleStore
+
+
+class FakeCache:
+    def __init__(self, value=None):
+        self.value = value
+        self.calls = []
+
+    async def get(self, key):
+        self.calls.append(("get", key))
+        return self.value
+
+    async def set(self, key, value, ttl):
+        self.calls.append(("set", key, ttl))
+        self.value = value
+
+
+class FailingCache(FakeCache):
+    async def set(self, key, value, ttl):
+        raise RuntimeError("redis unavailable")
+
+
+class Decision:
+    def __init__(self, event, started, resumed=None, threshold=None):
+        self.lifecycle_event = event
+        self.halt_started_at = started
+        self.resumed_drawdown = resumed
+        self.resume_threshold = threshold
+
+
+@pytest.mark.asyncio
+async def test_rehalt_overwrites_the_previous_episode():
+    cache = FakeCache()
+    store = DrawdownLifecycleStore(cache)
+
+    await store.save(Decision("halt", 10.0))
+    await store.save(Decision("resume", 10.0, 0.05, 0.061))
+    await store.save(Decision("rehalt", 20.0))
+
+    assert await store.load() == {
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+    assert cache.calls[-2] == ("set", KEY, TTL_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_missing_or_malformed_record_is_ignored():
+    cache = FakeCache(json.dumps({"halt_started_at": 10.0}))
+
+    assert await DrawdownLifecycleStore(cache).load() is None
+
+
+@pytest.mark.asyncio
+async def test_non_lifecycle_decision_does_not_replace_record():
+    cache = FakeCache()
+    store = DrawdownLifecycleStore(cache)
+
+    await store.save(Decision(None, 99.0))
+
+    assert cache.value is None
+
+
+@pytest.mark.asyncio
+async def test_store_write_failure_does_not_change_the_decision_path():
+    store = DrawdownLifecycleStore(FailingCache())
+
+    with pytest.raises(RuntimeError):
+        await store.save(Decision("rehalt", 20.0))

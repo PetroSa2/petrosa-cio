@@ -223,6 +223,7 @@ class ContextBuilder:
         evaluator_subscriber: Any | None = None,
         clock: Callable[[], float] | None = None,
         intent_subject: str | None = None,
+        drawdown_lifecycle_store: Any | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
@@ -233,6 +234,7 @@ class ContextBuilder:
             "QA_SHADOW_MODE", "false"
         ).lower() == "true" and self.intent_subject.startswith("qa.")
         self.vector_client = vector_client
+        self.drawdown_lifecycle_store = drawdown_lifecycle_store
         self._clock = clock or time.monotonic
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
         self._slippage_cache: tuple[float, dict[str, tuple[float, int]]] | None = None
@@ -375,7 +377,19 @@ class ContextBuilder:
         execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
-        drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
+        drawdown_raw = env_stats.get("drawdown")
+        if self.drawdown_lifecycle_store is not None:
+            try:
+                persisted_lifecycle = await self.drawdown_lifecycle_store.load()
+            except Exception as exc:
+                logger.warning(
+                    "DRAWDOWN_LIFECYCLE_LOAD_FAILED exc_type=%s",
+                    type(exc).__name__,
+                )
+                persisted_lifecycle = None
+            if persisted_lifecycle is not None and isinstance(drawdown_raw, dict):
+                drawdown_raw = {**drawdown_raw, **persisted_lifecycle}
+        drawdown_state = self._drawdown_from(drawdown_raw)
         slippage, (prior_strength, strategy_rounds), risk_inputs = await asyncio.gather(
             self._fetch_slippage(regime, correlation_id),
             self._fetch_rounds(strategy_id, correlation_id),
