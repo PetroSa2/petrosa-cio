@@ -82,11 +82,15 @@ async def test_missing_or_malformed_record_is_ignored():
     assert await DrawdownLifecycleStore(cache).load() is None
 
     cache.value = json.dumps(
-        {"gave_up_reason": json.dumps({
-            "halt_started_at": "20",
-            "resumed_drawdown": None,
-            "resume_threshold": None,
-        })}
+        {
+            "gave_up_reason": json.dumps(
+                {
+                    "halt_started_at": "20",
+                    "resumed_drawdown": None,
+                    "resume_threshold": None,
+                }
+            )
+        }
     )
     assert await DrawdownLifecycleStore(cache).load() is None
 
