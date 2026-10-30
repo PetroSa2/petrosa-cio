@@ -488,7 +488,7 @@ class AutoResumeLoop:
             else entry.paused_at + entry.min_pause_seconds
         )
         return (
-            entry.status in {"paused", "gave_up"}
+            entry.status == "paused"
             and now >= expires_at
             and now - entry.last_unavailable_at >= QUIET_PERIOD_SECONDS
             and now >= entry.next_attempt_at
@@ -553,8 +553,6 @@ class AutoResumeLoop:
             elif entry.status == "gave_up" and entry.gave_up_at is not None:
                 if now - entry.gave_up_at >= GAVE_UP_RETENTION_SECONDS:
                     await self.registry.remove(entry.strategy_id, "gave_up_expired")
-                elif self._eligible(entry, now):
-                    eligible.append(entry)
             elif entry.status == "paused":
                 if entry.flap_count >= MAX_FLAPS:
                     await self._give_up(entry, "flapping")
@@ -644,7 +642,9 @@ class AutoResumeLoop:
                 or body.get("success") is not True
                 or "data" not in body
             ):
-                raise ValueError("audit response is not verifiable")
+                raise ValueError(
+                    f"{entry.service} response missing success=true or data"
+                )
             if entry.service == "realtime-strategies":
                 state = body["data"]
                 expected_changed_by = f"petrosa-cio:lifecycle:{entry.strategy_id}"
@@ -654,26 +654,33 @@ class AutoResumeLoop:
                     or state.get("changed_by") != expected_changed_by
                 ):
                     raise ValueError(
-                        "state does not prove CIO lifecycle pause ownership"
+                        f"{entry.service} state missing state=paused or "
+                        "CIO lifecycle changed_by"
                     )
                 items = []
             else:
                 if not isinstance(body["data"], list) or not body["data"]:
-                    raise ValueError("audit response is not verifiable")
+                    raise ValueError(
+                        f"{entry.service} audit data missing a non-empty list"
+                    )
                 items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:
                 if not isinstance(item, dict):
-                    raise ValueError("audit item is not an object")
+                    raise ValueError(f"{entry.service} audit item is not an object")
                 changed_at = item.get("changed_at")
                 if not isinstance(changed_at, str):
-                    raise ValueError("audit changed_at is not a string")
+                    raise ValueError(
+                        f"{entry.service} audit changed_at is not a string"
+                    )
                 changed = datetime.fromisoformat(changed_at)
                 if changed.tzinfo is None:
                     changed = changed.replace(tzinfo=UTC)
                 changed_by = item.get("changed_by")
                 if not isinstance(changed_by, str):
-                    raise ValueError("audit changed_by is not a string")
+                    raise ValueError(
+                        f"{entry.service} audit changed_by is not a string"
+                    )
                 parsed.append((item, changed.timestamp()))
                 if changed.timestamp() > entry.paused_at and not changed_by.startswith(
                     "petrosa-cio:"
@@ -690,12 +697,14 @@ class AutoResumeLoop:
                 and len(items) == AUDIT_LIMIT
                 and all(changed_at > entry.paused_at for _, changed_at in parsed)
             ):
-                raise ValueError("audit window cannot prove pause ownership")
+                raise ValueError(
+                    f"{entry.service} audit window cannot prove pause ownership"
+                )
         except Exception as exc:
             detail = str(exc) or "<empty>"
             logger.warning(
                 f"AUTO_RESUME_PRECHECK_UNVERIFIABLE strategy_id={entry.strategy_id} "
-                f"detail={detail}"
+                f"service={entry.service} detail={detail}"
             )
             self._metric("precheck_unverifiable")
             await self._record_failure(entry, detail)
@@ -784,7 +793,10 @@ class AutoResumeLoop:
 
     async def _record_failure(self, entry: PauseEntry, detail: str) -> None:
         entry.attempts += 1
-        backoff = RETRY_BASE_SECONDS * 2 ** (entry.attempts - 1)
+        backoff = min(
+            MAX_PAUSE_SECONDS,
+            RETRY_BASE_SECONDS * 2 ** (entry.attempts - 1),
+        )
         entry.next_attempt_at = self.clock() + backoff
         await self.registry.put(entry)
         logger.warning(
@@ -793,17 +805,19 @@ class AutoResumeLoop:
         )
         self._metric("failed")
         if entry.attempts >= MAX_ATTEMPTS:
-            await self._give_up(entry, "failed_attempts")
+            await self._give_up(entry, "failed_attempts", detail)
 
-    async def _give_up(self, entry: PauseEntry, reason: str) -> None:
+    async def _give_up(
+        self, entry: PauseEntry, reason: str, detail: str | None = None
+    ) -> None:
         entry.status = "gave_up"
         entry.gave_up_at = self.clock()
         entry.gave_up_reason = reason
-        entry.next_attempt_at = entry.gave_up_at + RETRY_BASE_SECONDS
+        entry.next_attempt_at = entry.gave_up_at + MAX_PAUSE_SECONDS
         justification = (
             f"AUTO_RESUME_GAVE_UP strategy_id={entry.strategy_id} reason={reason} "
             f"attempts={entry.attempts} flap_count={entry.flap_count} — strategy left paused, "
-            "re-enable manually"
+            f"detail={detail or '<none>'} re-enable manually"
         )
         await self.registry.put(entry)
         logger.error(justification)
