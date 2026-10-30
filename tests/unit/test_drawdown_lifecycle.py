@@ -37,11 +37,12 @@ class FailingStore(FakeStore):
 
 
 class Decision:
-    def __init__(self, event, started, resumed=None, threshold=None):
+    def __init__(self, event, started, resumed=None, threshold=None, reason=None):
         self.lifecycle_event = event
         self.halt_started_at = started
         self.resumed_drawdown = resumed
         self.resume_threshold = threshold
+        self.reason = reason
 
 
 class RecordingStore:
@@ -76,6 +77,28 @@ async def test_rehalt_overwrites_the_previous_episode():
         "resume_threshold": None,
     }
     assert any(call[0:2] == ("put", KEY) for call in store_backend.calls)
+
+
+@pytest.mark.asyncio
+async def test_rehalt_reason_persists_and_restart_loads_newest_episode():
+    store_backend = FakeStore()
+    store = DrawdownLifecycleStore(store_backend)
+
+    await store.save(Decision("halt", 10.0))
+    await store.save(Decision("resume", 10.0, 0.05, 0.061))
+    await store.save(Decision(None, 20.0, reason="drawdown_rehalt"))
+
+    builder = ContextBuilder.__new__(ContextBuilder)
+    builder.drawdown_lifecycle_store = store
+    persisted = await builder._load_drawdown_lifecycle()
+    assert persisted == {
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+    assert ContextBuilder._merge_drawdown_lifecycle(
+        {"from_peak_pct": 0.07, "halt_started_at": 10.0}, persisted
+    )["halt_started_at"] == 20.0
 
 
 @pytest.mark.asyncio
