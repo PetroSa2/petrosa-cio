@@ -79,6 +79,21 @@ async def test_rehalt_overwrites_the_previous_episode():
 
 
 @pytest.mark.asyncio
+async def test_stale_lifecycle_write_cannot_replace_newer_rehalt():
+    store_backend = FakeStore()
+    store = DrawdownLifecycleStore(store_backend)
+
+    await store.save(Decision("rehalt", 20.0))
+    await store.save(Decision("halt", 10.0))
+
+    assert await store.load() == {
+        "halt_started_at": 20.0,
+        "resumed_drawdown": None,
+        "resume_threshold": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_missing_or_malformed_record_is_ignored():
     cache = FakeStore()
 

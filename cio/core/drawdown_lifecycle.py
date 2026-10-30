@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -14,6 +15,7 @@ FIELDS = ("halt_started_at", "resumed_drawdown", "resume_threshold")
 class DrawdownLifecycleStore:
     def __init__(self, store: DataManagerStateStore) -> None:
         self.store = store
+        self._save_lock = asyncio.Lock()
 
     async def load(self) -> dict[str, float | None] | None:
         raw = await self.store.get(KEY)
@@ -37,21 +39,30 @@ class DrawdownLifecycleStore:
         event = getattr(decision, "lifecycle_event", None)
         if event not in {"halt", "resume", "rehalt"}:
             return
-        record = {
-            "halt_started_at": getattr(decision, "halt_started_at", None),
-            "resumed_drawdown": getattr(decision, "resumed_drawdown", None),
-            "resume_threshold": getattr(decision, "resume_threshold", None),
-        }
-        payload = {
-            "strategy_id": KEY,
-            "service": "cio",
-            "status": "drawdown_lifecycle",
-            "paused_at": record["halt_started_at"] or 0.0,
-            "last_unavailable_at": record["resumed_drawdown"] or 0.0,
-            "min_pause_seconds": 0,
-            "flap_count": 0,
-            "attempts": 0,
-            "next_attempt_at": record["resume_threshold"] or 0.0,
-            "gave_up_reason": json.dumps(record, separators=(",", ":")),
-        }
-        await self.store.put(KEY, json.dumps(payload))
+        async with self._save_lock:
+            record = {
+                "halt_started_at": getattr(decision, "halt_started_at", None),
+                "resumed_drawdown": getattr(decision, "resumed_drawdown", None),
+                "resume_threshold": getattr(decision, "resume_threshold", None),
+            }
+            current = await self.load()
+            current_started_at = current.get("halt_started_at") if current else None
+            if (
+                isinstance(current_started_at, int | float)
+                and isinstance(record["halt_started_at"], int | float)
+                and current_started_at > record["halt_started_at"]
+            ):
+                return
+            payload = {
+                "strategy_id": KEY,
+                "service": "cio",
+                "status": "drawdown_lifecycle",
+                "paused_at": record["halt_started_at"] or 0.0,
+                "last_unavailable_at": record["resumed_drawdown"] or 0.0,
+                "min_pause_seconds": 0,
+                "flap_count": 0,
+                "attempts": 0,
+                "next_attempt_at": record["resume_threshold"] or 0.0,
+                "gave_up_reason": json.dumps(record, separators=(",", ":")),
+            }
+            await self.store.put(KEY, json.dumps(payload))
