@@ -441,9 +441,9 @@ async def main():
         sys.exit(1)
     cache = AsyncRedisCache(redis_client)
     logger.info(f"Connected to Redis at {redis_url}")
-    drawdown_lifecycle_store = DrawdownLifecycleStore(cache)
     durable_state = DataManagerStateStore(data_manager_url, "cio_auto_resume")
     await migrate_redis_registry(cache, durable_state)
+    drawdown_lifecycle_store = DrawdownLifecycleStore(durable_state)
 
     # Factory creates LiteLLMClient or MockLLMClient based on LLM_PROVIDER env
     llm_client = ClientFactory.create()

@@ -3,39 +3,33 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
-from cio.core.cache import AsyncRedisCache
+from cio.core.durable_state import DataManagerStateStore
 
-logger = logging.getLogger(__name__)
-
-KEY = "cio:drawdown:lifecycle"
-TTL_SECONDS = 7 * 86400
+KEY = "drawdown_lifecycle"
 FIELDS = ("halt_started_at", "resumed_drawdown", "resume_threshold")
 
 
 class DrawdownLifecycleStore:
-    def __init__(self, cache: AsyncRedisCache) -> None:
-        self.cache = cache
+    def __init__(self, store: DataManagerStateStore) -> None:
+        self.store = store
 
     async def load(self) -> dict[str, float | None] | None:
-        raw = await self.cache.get(KEY)
+        raw = await self.store.get(KEY)
         if not raw:
             return None
         try:
             value = json.loads(raw)
-        except (TypeError, ValueError):
-            logger.warning("DRAWDOWN_LIFECYCLE_INVALID_RECORD")
+            value = json.loads(value.get("gave_up_reason", ""))
+        except (AttributeError, TypeError, ValueError):
             return None
         if not isinstance(value, dict) or any(key not in value for key in FIELDS):
-            logger.warning("DRAWDOWN_LIFECYCLE_INVALID_RECORD")
             return None
         if any(
             value[key] is not None and not isinstance(value[key], int | float)
             for key in FIELDS
         ):
-            logger.warning("DRAWDOWN_LIFECYCLE_INVALID_RECORD")
             return None
         return {key: value[key] for key in FIELDS}
 
@@ -48,4 +42,16 @@ class DrawdownLifecycleStore:
             "resumed_drawdown": getattr(decision, "resumed_drawdown", None),
             "resume_threshold": getattr(decision, "resume_threshold", None),
         }
-        await self.cache.set(KEY, json.dumps(record), ttl=TTL_SECONDS)
+        payload = {
+            "strategy_id": KEY,
+            "service": "cio",
+            "status": "drawdown_lifecycle",
+            "paused_at": record["halt_started_at"] or 0.0,
+            "last_unavailable_at": record["resumed_drawdown"] or 0.0,
+            "min_pause_seconds": 0,
+            "flap_count": 0,
+            "attempts": 0,
+            "next_attempt_at": record["resume_threshold"] or 0.0,
+            "gave_up_reason": json.dumps(record, separators=(",", ":")),
+        }
+        await self.store.put(KEY, json.dumps(payload))

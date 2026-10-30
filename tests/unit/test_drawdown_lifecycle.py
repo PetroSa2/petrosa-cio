@@ -3,11 +3,11 @@ import json
 import pytest
 
 from cio.core.context_builder import ContextBuilder
-from cio.core.drawdown_lifecycle import KEY, TTL_SECONDS, DrawdownLifecycleStore
+from cio.core.drawdown_lifecycle import KEY, DrawdownLifecycleStore
 from cio.core.router import OutputRouter
 
 
-class FakeCache:
+class FakeStore:
     def __init__(self, value=None):
         self.value = value
         self.calls = []
@@ -16,14 +16,14 @@ class FakeCache:
         self.calls.append(("get", key))
         return self.value
 
-    async def set(self, key, value, ttl):
-        self.calls.append(("set", key, ttl))
+    async def put(self, key, value):
+        self.calls.append(("put", key, value))
         self.value = value
 
 
-class FailingCache(FakeCache):
-    async def set(self, key, value, ttl):
-        raise RuntimeError("redis unavailable")
+class FailingStore(FakeStore):
+    async def put(self, key, value):
+        raise RuntimeError("store unavailable")
 
 
 class Decision:
@@ -53,8 +53,8 @@ class RecordingStore:
 
 @pytest.mark.asyncio
 async def test_rehalt_overwrites_the_previous_episode():
-    cache = FakeCache()
-    store = DrawdownLifecycleStore(cache)
+    store_backend = FakeStore()
+    store = DrawdownLifecycleStore(store_backend)
 
     await store.save(Decision("halt", 10.0))
     await store.save(Decision("resume", 10.0, 0.05, 0.061))
@@ -65,16 +65,16 @@ async def test_rehalt_overwrites_the_previous_episode():
         "resumed_drawdown": None,
         "resume_threshold": None,
     }
-    assert cache.calls[-2] == ("set", KEY, TTL_SECONDS)
+    assert any(call[0:2] == ("put", KEY) for call in store_backend.calls)
 
 
 @pytest.mark.asyncio
 async def test_missing_or_malformed_record_is_ignored():
-    cache = FakeCache()
+    cache = FakeStore()
 
     assert await DrawdownLifecycleStore(cache).load() is None
 
-    cache.value = json.dumps({"halt_started_at": 10.0})
+    cache.value = json.dumps({"gave_up_reason": json.dumps({"halt_started_at": 10.0})})
 
     assert await DrawdownLifecycleStore(cache).load() is None
 
@@ -82,28 +82,28 @@ async def test_missing_or_malformed_record_is_ignored():
     assert await DrawdownLifecycleStore(cache).load() is None
 
     cache.value = json.dumps(
-        {
+        {"gave_up_reason": json.dumps({
             "halt_started_at": "20",
             "resumed_drawdown": None,
             "resume_threshold": None,
-        }
+        })}
     )
     assert await DrawdownLifecycleStore(cache).load() is None
 
 
 @pytest.mark.asyncio
 async def test_non_lifecycle_decision_does_not_replace_record():
-    cache = FakeCache()
-    store = DrawdownLifecycleStore(cache)
+    store_backend = FakeStore()
+    store = DrawdownLifecycleStore(store_backend)
 
     await store.save(Decision(None, 99.0))
 
-    assert cache.value is None
+    assert store_backend.value is None
 
 
 @pytest.mark.asyncio
 async def test_store_write_failure_does_not_change_the_decision_path():
-    store = DrawdownLifecycleStore(FailingCache())
+    store = DrawdownLifecycleStore(FailingStore())
 
     with pytest.raises(RuntimeError):
         await store.save(Decision("rehalt", 20.0))
