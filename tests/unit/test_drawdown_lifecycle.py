@@ -96,9 +96,12 @@ async def test_rehalt_reason_persists_and_restart_loads_newest_episode():
         "resumed_drawdown": None,
         "resume_threshold": None,
     }
-    assert ContextBuilder._merge_drawdown_lifecycle(
-        {"from_peak_pct": 0.07, "halt_started_at": 10.0}, persisted
-    )["halt_started_at"] == 20.0
+    assert (
+        ContextBuilder._merge_drawdown_lifecycle(
+            {"from_peak_pct": 0.07, "halt_started_at": 10.0}, persisted
+        )["halt_started_at"]
+        == 20.0
+    )
 
 
 @pytest.mark.asyncio
