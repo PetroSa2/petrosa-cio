@@ -953,6 +953,33 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
 
 
 @pytest.mark.asyncio
+async def test_resume_precheck_reports_realtime_state_evidence():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    missing_data = PauseEntry("missing-data", "realtime-strategies", "paused", 0, 0, 0)
+    bad_state = PauseEntry("bad-state", "realtime-strategies", "paused", 0, 0, 0)
+    await registry.put(missing_data)
+    await registry.put(bad_state)
+    http = MagicMock(
+        get=AsyncMock(
+            side_effect=[
+                response(200, {"success": True}),
+                response(200, {"success": True, "data": {"state": "running"}}),
+            ]
+        )
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    await loop._resume_one(missing_data)
+    await loop._resume_one(bad_state)
+
+    assert (await registry.get("missing-data")).attempts == 1
+    assert (await registry.get("bad-state")).attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_loop_start_is_idempotent_and_empty_tick_is_noop():
     clock = FakeClock()
     cache = FakeCache()
