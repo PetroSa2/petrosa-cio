@@ -670,13 +670,17 @@ class AutoResumeLoop:
                     raise ValueError(f"{entry.service} audit item is not an object")
                 changed_at = item.get("changed_at")
                 if not isinstance(changed_at, str):
-                    raise ValueError(f"{entry.service} audit changed_at is not a string")
+                    raise ValueError(
+                        f"{entry.service} audit changed_at is not a string"
+                    )
                 changed = datetime.fromisoformat(changed_at)
                 if changed.tzinfo is None:
                     changed = changed.replace(tzinfo=UTC)
                 changed_by = item.get("changed_by")
                 if not isinstance(changed_by, str):
-                    raise ValueError(f"{entry.service} audit changed_by is not a string")
+                    raise ValueError(
+                        f"{entry.service} audit changed_by is not a string"
+                    )
                 parsed.append((item, changed.timestamp()))
                 if changed.timestamp() > entry.paused_at and not changed_by.startswith(
                     "petrosa-cio:"
