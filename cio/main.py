@@ -33,6 +33,7 @@ from cio.core.cache import AsyncRedisCache
 from cio.core.confidence_calibration import ConfidenceCalibrationService
 from cio.core.context_builder import ContextBuilder
 from cio.core.decision_store import DecisionStore
+from cio.core.drawdown_lifecycle import DrawdownLifecycleStore
 from cio.core.durable_state import DataManagerStateStore
 from cio.core.evaluator_subscriber import EvaluatorSubscriber
 from cio.core.execution_events_consumer import ExecutionEventsConsumer
@@ -442,6 +443,7 @@ async def main():
     logger.info(f"Connected to Redis at {redis_url}")
     durable_state = DataManagerStateStore(data_manager_url, "cio_auto_resume")
     await migrate_redis_registry(cache, durable_state)
+    drawdown_lifecycle_store = DrawdownLifecycleStore(durable_state)
 
     # Factory creates LiteLLMClient or MockLLMClient based on LLM_PROVIDER env
     llm_client = ClientFactory.create()
@@ -457,6 +459,7 @@ async def main():
         tradeengine_url=tradeengine_url,
         vector_client=vector_client,
         intent_subject=intents_subject,
+        drawdown_lifecycle_store=drawdown_lifecycle_store,
     )
 
     # petrosa-cio#312: refresh the data-manager reports now, off the decision path, and watch the loop so a
@@ -478,6 +481,7 @@ async def main():
         cache=cache,
         decision_store=app.state.decision_store,
         pause_registry=pause_registry,
+        drawdown_lifecycle_store=drawdown_lifecycle_store,
     )
     # P2.6 (#597): evaluator-verdict subscriber + arbiter pause gate.
     # Started before arbiter construction so the arbiter wires the

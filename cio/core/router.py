@@ -207,6 +207,7 @@ class OutputRouter:
         authority_store: Any = None,
         decision_store: "DecisionStore | None" = None,
         pause_registry: "LLMPauseRegistry | None" = None,
+        drawdown_lifecycle_store: Any | None = None,
         evaluator_subscriber: Any = None,
         position_review_loop: "PositionReviewLoop | None" = None,
     ):
@@ -228,6 +229,7 @@ class OutputRouter:
         self.realtime_params_mode = self._realtime_mode("CIO_REALTIME_PARAMS_MODE")
         self.cache = cache
         self.pause_registry = pause_registry
+        self.drawdown_lifecycle_store = drawdown_lifecycle_store
         self.evaluator_subscriber = evaluator_subscriber
         self.position_review_loop = position_review_loop
 
@@ -351,6 +353,20 @@ class OutputRouter:
             else self.realtime_strategies_url
         )
 
+    async def _persist_drawdown_lifecycle(
+        self, drawdown: Any, correlation_id: str
+    ) -> None:
+        if self.drawdown_lifecycle_store is None:
+            return
+        try:
+            await self.drawdown_lifecycle_store.save(drawdown)
+        except Exception as exc:
+            logger.warning(
+                "DRAWDOWN_LIFECYCLE_SAVE_FAILED exc_type=%s",
+                type(exc).__name__,
+                extra={"correlation_id": correlation_id},
+            )
+
     async def route(self, context: TriggerContext, decision: DecisionResult) -> None:
         """
         Routes the decision following the T-Junction logic:
@@ -367,6 +383,9 @@ class OutputRouter:
         `vector_client.upsert`, which is the same payload the dead branch used
         to publish.
         """
+        await self._persist_drawdown_lifecycle(
+            decision.drawdown, context.correlation_id
+        )
         correlation_id = context.correlation_id
         decision_id = context.decision_id
         # petrosa-cio#211: producers sometimes emit a human display name

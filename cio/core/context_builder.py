@@ -223,6 +223,7 @@ class ContextBuilder:
         evaluator_subscriber: Any | None = None,
         clock: Callable[[], float] | None = None,
         intent_subject: str | None = None,
+        drawdown_lifecycle_store: Any | None = None,
     ):
         self.data_manager_url = data_manager_url
         self.tradeengine_url = tradeengine_url
@@ -233,6 +234,7 @@ class ContextBuilder:
             "QA_SHADOW_MODE", "false"
         ).lower() == "true" and self.intent_subject.startswith("qa.")
         self.vector_client = vector_client
+        self.drawdown_lifecycle_store = drawdown_lifecycle_store
         self._clock = clock or time.monotonic
         # Measured slippage per data-manager regime: (expires_at, {regime: (median_bp, count)})
         self._slippage_cache: tuple[float, dict[str, tuple[float, int]]] | None = None
@@ -375,7 +377,12 @@ class ContextBuilder:
         execution_service_contacted = provenance.get("execution_service_contacted")
 
         commission = self._commission_from(env_stats.get("commission"))
-        drawdown_state = self._drawdown_from(env_stats.get("drawdown"))
+        persisted_lifecycle = await self._load_drawdown_lifecycle()
+        drawdown_state = self._drawdown_from(
+            self._merge_drawdown_lifecycle(
+                env_stats.get("drawdown"), persisted_lifecycle
+            )
+        )
         slippage, (prior_strength, strategy_rounds), risk_inputs = await asyncio.gather(
             self._fetch_slippage(regime, correlation_id),
             self._fetch_rounds(strategy_id, correlation_id),
@@ -727,6 +734,26 @@ class ContextBuilder:
             float(equity) if equity else None,
             decision.reduce_threshold,
         )
+
+    async def _load_drawdown_lifecycle(self) -> dict[str, float | None] | None:
+        if self.drawdown_lifecycle_store is None:
+            return None
+        try:
+            return await self.drawdown_lifecycle_store.load()
+        except Exception as exc:
+            logger.warning(
+                "DRAWDOWN_LIFECYCLE_LOAD_FAILED exc_type=%s",
+                type(exc).__name__,
+            )
+            return None
+
+    @staticmethod
+    def _merge_drawdown_lifecycle(
+        raw: Any, persisted: dict[str, float | None] | None
+    ) -> Any:
+        if persisted is None or not isinstance(raw, dict):
+            return raw
+        return {**raw, **persisted}
 
     @staticmethod
     def _drawdown_from(raw: Any) -> DrawdownState | None:
