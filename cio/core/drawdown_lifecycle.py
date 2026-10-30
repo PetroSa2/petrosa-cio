@@ -37,6 +37,12 @@ class DrawdownLifecycleStore:
 
     async def save(self, decision: Any) -> None:
         event = getattr(decision, "lifecycle_event", None)
+        if event is None:
+            event = {
+                "drawdown_halt": "halt",
+                "drawdown_resume": "resume",
+                "drawdown_rehalt": "rehalt",
+            }.get(getattr(decision, "reason", None))
         if event not in {"halt", "resume", "rehalt"}:
             return
         async with self._save_lock:
