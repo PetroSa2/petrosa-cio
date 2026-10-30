@@ -10,6 +10,7 @@ from cio.core.auto_resume import (
     HEALTH_PROBE_SYSTEM_PROMPT,
     MAX_ATTEMPTS,
     MAX_FLAPS,
+    MAX_PAUSE_SECONDS,
     AutoResumeLoop,
     LLMHealthTracker,
     LLMPauseRegistry,
@@ -532,7 +533,7 @@ async def test_expired_ta_pause_restores_runtime_allowlist():
 
 
 @pytest.mark.asyncio
-async def test_gave_up_pause_is_retried_after_backoff():
+async def test_gave_up_pause_is_not_retried_after_backoff():
     clock = FakeClock()
     cache = FakeCache()
     registry = LLMPauseRegistry(cache, clock=clock)
@@ -575,8 +576,8 @@ async def test_gave_up_pause_is_retried_after_backoff():
     assert http.request.await_count == 0
     clock.now = 1301
     await loop.tick()
-    assert http.request.await_count == 1
-    assert (await registry.get("inside_bar_breakout")).status == "resumed"
+    assert http.request.await_count == 0
+    assert (await registry.get("inside_bar_breakout")).status == "gave_up"
 
 
 @pytest.mark.asyncio
@@ -823,6 +824,32 @@ async def test_resume_precheck_and_request_failures_backoff_and_alert():
 
 
 @pytest.mark.asyncio
+async def test_failure_backoff_is_bounded_and_gave_up_survives_reload():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    entry = PauseEntry("doji", "ta-bot", "paused", 0, 0, 0, attempts=1000)
+    await registry.put(entry)
+    nats = AsyncMock()
+    loop = build_loop(clock, cache, registry, nats=nats)
+
+    await loop._record_failure(entry, "ta-bot audit data missing a non-empty list")
+
+    saved = await registry.get("doji")
+    assert saved is not None
+    assert saved.status == "gave_up"
+    assert saved.next_attempt_at - clock() == MAX_PAUSE_SECONDS
+    nats.publish.assert_awaited_once()
+
+    reloaded = LLMPauseRegistry(cache, clock=clock)
+    request = AsyncMock()
+    resumed = build_loop(clock, cache, reloaded, http=MagicMock(request=request))
+    await resumed.tick()
+    assert (await reloaded.get("doji")).status == "gave_up"
+    request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_resume_429_defers_without_attempt_and_body_failure_counts():
     clock = FakeClock()
     cache = FakeCache()
@@ -901,7 +928,7 @@ async def test_resume_gates_freeze_lock_and_unroutable():
 
 
 @pytest.mark.asyncio
-async def test_resume_precheck_rejects_malformed_audit_data():
+async def test_resume_precheck_rejects_malformed_audit_data(caplog):
     clock = FakeClock()
     cache = FakeCache()
     registry = LLMPauseRegistry(cache, clock=clock)
@@ -912,6 +939,8 @@ async def test_resume_precheck_rejects_malformed_audit_data():
     loop = build_loop(clock, cache, registry, http=http)
     await loop.tick()
     assert (await registry.get("doji")).attempts == 1
+    assert "service=ta-bot" in caplog.text
+    assert "ta-bot audit changed_at is not a string" in caplog.text
 
     cache.values.pop("cio:auto_resume:lock:doji", None)
     entry = await registry.get("doji")
