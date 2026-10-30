@@ -1,10 +1,20 @@
 import json
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from cio.core.context_builder import ContextBuilder
 from cio.core.drawdown_lifecycle import KEY, DrawdownLifecycleStore
 from cio.core.router import OutputRouter
+from cio.models import (
+    ActionType,
+    ActivationRecommendation,
+    ConfidenceLevel,
+    DecisionResult,
+    HealthStatus,
+    RegimeFit,
+    TriggerContext,
+)
 
 
 class FakeStore:
@@ -142,6 +152,37 @@ async def test_router_persists_lifecycle_without_blocking_on_store_failure():
 
     router.drawdown_lifecycle_store = RecordingStore(failure=True)
     await router._persist_drawdown_lifecycle(decision, "corr-2")
+
+
+@pytest.mark.asyncio
+async def test_router_route_persists_the_decision_lifecycle():
+    router = OutputRouter(
+        nats_client=AsyncMock(),
+        vector_client=AsyncMock(),
+        drawdown_lifecycle_store=AsyncMock(),
+    )
+    context = MagicMock(spec=TriggerContext)
+    context.strategy_id = "drawdown_test"
+    context.decision_id = "decision-1"
+    context.correlation_id = "corr-1"
+    context.trigger_payload = {"symbol": "BTCUSDT"}
+    decision = DecisionResult(
+        hard_blocked=False,
+        ev_passes=True,
+        cost_viable=True,
+        regime_confidence=ConfidenceLevel.HIGH,
+        regime_fit=RegimeFit.GOOD,
+        strategy_health=HealthStatus.HEALTHY,
+        activation_recommendation=ActivationRecommendation.RUN,
+        action=ActionType.ADMIT,
+        justification="",
+        thought_trace="",
+    )
+    decision.drawdown = Decision("rehalt", 20.0)
+
+    await router.route(context, decision)
+
+    router.drawdown_lifecycle_store.save.assert_awaited_once_with(decision.drawdown)
 
 
 @pytest.mark.asyncio
