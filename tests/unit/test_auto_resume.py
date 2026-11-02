@@ -940,7 +940,7 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
     await loop.tick()
     assert (await registry.get("doji")).attempts == 1
     assert "service=ta-bot" in caplog.text
-    assert "ta-bot audit changed_at is not a string" in caplog.text
+    assert "ta-bot audit data item missing field: changed_at" in caplog.text
 
     cache.values.pop("cio:auto_resume:lock:doji", None)
     entry = await registry.get("doji")
@@ -950,6 +950,32 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
     http.get.return_value = response(500, {})
     await loop.tick()
     assert (await registry.get("doji")).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_tick_does_not_resume_entry_that_became_terminal_after_snapshot():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    snapshot = PauseEntry("doji", "ta-bot", "paused", 0, 0, 0)
+    terminal = PauseEntry(
+        "doji",
+        "ta-bot",
+        "gave_up",
+        0,
+        0,
+        0,
+        gave_up_at=clock(),
+        gave_up_reason="failed_attempts",
+    )
+    registry.all = AsyncMock(return_value=[snapshot])
+    registry.get = AsyncMock(return_value=terminal)
+    http = MagicMock(request=AsyncMock())
+    loop = build_loop(clock, cache, registry, http=http)
+
+    await loop.tick()
+
+    http.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio

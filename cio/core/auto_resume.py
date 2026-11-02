@@ -613,7 +613,12 @@ class AutoResumeLoop:
             ):
                 continue
             current = await self.registry.get(strategy_id)
-            if current is None or not self._eligible(current, self.clock()):
+            if (
+                current is None
+                or current.status != "paused"
+                or current.attempts >= MAX_ATTEMPTS
+                or not self._eligible(current, self.clock())
+            ):
                 continue
             await self._resume_one(current)
             resumed += 1
@@ -637,41 +642,48 @@ class AutoResumeLoop:
             if not 200 <= response.status_code < 300:
                 raise ValueError(f"status={response.status_code}")
             body = response.json()
-            if (
-                not isinstance(body, dict)
-                or body.get("success") is not True
-                or "data" not in body
-            ):
+            endpoint = "state" if entry.service == "realtime-strategies" else "audit"
+            if not isinstance(body, dict):
+                raise ValueError(f"{entry.service} {endpoint} response is not an object")
+            missing = [field for field in ("success", "data") if field not in body]
+            if missing:
                 raise ValueError(
-                    f"{entry.service} response missing success=true or data"
+                    f"{entry.service} {endpoint} response missing fields: {','.join(missing)}"
+                )
+            if body["success"] is not True:
+                raise ValueError(
+                    f"{entry.service} {endpoint} response field success={body['success']!r}"
                 )
             if entry.service == "realtime-strategies":
                 state = body["data"]
                 expected_changed_by = f"petrosa-cio:lifecycle:{entry.strategy_id}"
-                if (
-                    not isinstance(state, dict)
-                    or state.get("state") != "paused"
-                    or state.get("changed_by") != expected_changed_by
-                ):
+                if not isinstance(state, dict):
                     raise ValueError(
-                        f"{entry.service} state missing state=paused or "
-                        "CIO lifecycle changed_by"
+                        "realtime-strategies state data missing fields: state,changed_by"
+                    )
+                if state.get("state") != "paused":
+                    raise ValueError(
+                        f"realtime-strategies state field state={state.get('state')!r} "
+                        "does not prove paused status"
+                    )
+                if state.get("changed_by") != expected_changed_by:
+                    raise ValueError(
+                        f"realtime-strategies state field changed_by={state.get('changed_by')!r} "
+                        f"does not match {expected_changed_by}"
                     )
                 items = []
             else:
                 if not isinstance(body["data"], list) or not body["data"]:
-                    raise ValueError(
-                        f"{entry.service} audit data missing a non-empty list"
-                    )
+                    raise ValueError(f"{entry.service} audit response field data is empty")
                 items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:
                 if not isinstance(item, dict):
-                    raise ValueError(f"{entry.service} audit item is not an object")
+                    raise ValueError(f"{entry.service} audit data item is not an object")
                 changed_at = item.get("changed_at")
                 if not isinstance(changed_at, str):
                     raise ValueError(
-                        f"{entry.service} audit changed_at is not a string"
+                        f"{entry.service} audit data item missing field: changed_at"
                     )
                 changed = datetime.fromisoformat(changed_at)
                 if changed.tzinfo is None:
@@ -679,7 +691,7 @@ class AutoResumeLoop:
                 changed_by = item.get("changed_by")
                 if not isinstance(changed_by, str):
                     raise ValueError(
-                        f"{entry.service} audit changed_by is not a string"
+                        f"{entry.service} audit data item missing field: changed_by"
                     )
                 parsed.append((item, changed.timestamp()))
                 if changed.timestamp() > entry.paused_at and not changed_by.startswith(
@@ -698,7 +710,7 @@ class AutoResumeLoop:
                 and all(changed_at > entry.paused_at for _, changed_at in parsed)
             ):
                 raise ValueError(
-                    f"{entry.service} audit window cannot prove pause ownership"
+                    f"{entry.service} audit window missing pre-pause ownership evidence"
                 )
         except Exception as exc:
             detail = str(exc) or "<empty>"
