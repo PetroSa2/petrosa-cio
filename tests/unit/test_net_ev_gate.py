@@ -139,6 +139,40 @@ def _assemble(ctx: TriggerContext, action: ActionType):
     ), code
 
 
+def test_pause_is_refused_when_strategy_health_is_unknown():
+    context = _context(win_rate=None, wins=None, losses=None)
+    context.strategy_stats.history_status = "unavailable"
+
+    decision, _ = _assemble(context, ActionType.PAUSE_STRATEGY)
+
+    assert decision.action == ActionType.SKIP
+    assert "HEALTH_UNKNOWN" in decision.justification
+
+
+def test_pause_is_refused_when_degraded_stats_have_no_negative_evidence():
+    context = _context(win_rate=None, wins=None, losses=None)
+    context.strategy_stats.history_status = "computed"
+
+    decision, _ = _assemble(context, ActionType.PAUSE_STRATEGY)
+
+    assert decision.action == ActionType.SKIP
+    assert "HEALTH_UNKNOWN" in decision.justification
+
+
+def test_pause_remains_available_with_measured_negative_evidence():
+    context = _context(
+        win_rate=0.2,
+        wins=2,
+        losses=8,
+        realized_pnl=-25.0,
+    )
+    context.strategy_stats.history_status = "computed"
+
+    decision, _ = _assemble(context, ActionType.PAUSE_STRATEGY)
+
+    assert decision.action == ActionType.PAUSE_STRATEGY
+
+
 # --- the Beta CDF ---------------------------------------------------------------------------------
 
 

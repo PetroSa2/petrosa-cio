@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 PORTFOLIO_CONTEXT_UNAVAILABLE_TRACE = "PORTFOLIO_CONTEXT_UNAVAILABLE"
 
 
+def _has_measured_negative_health(context: TriggerContext) -> bool:
+    stats = context.strategy_stats
+    return (
+        stats.history_status == "computed"
+        and isinstance(stats.wins, int)
+        and isinstance(stats.losses, int)
+        and stats.wins + stats.losses > 0
+        and stats.realized_pnl is not None
+        and stats.realized_pnl < 0
+    )
+
+
 class DecisionAssembler:
     """
     Synthesizes Code Engine results, LLM classifications, and persona assessments.
@@ -143,6 +155,21 @@ class DecisionAssembler:
         # from the code (below), so a modify_params never carries more than the computed size.
         action = llm_action or ActionType.SKIP
         justification = llm_justification or "Assembled without explicit LLM action."
+        if action == ActionType.PAUSE_STRATEGY and not _has_measured_negative_health(
+            context
+        ):
+            logger.warning(
+                "HEALTH_UNKNOWN: refusing strategy pause without measured negative evidence",
+                extra={
+                    "correlation_id": correlation_id,
+                    "strategy_id": context.strategy_id,
+                    "history_status": context.strategy_stats.history_status,
+                },
+            )
+            action = ActionType.SKIP
+            justification = (
+                "HEALTH_UNKNOWN: strategy pause refused without measured negative evidence"
+            )
         gate = evaluate_net_ev(context, sl_pct, tp_pct, point="assembler")
         log_gate(context, gate)
         probe_override = False

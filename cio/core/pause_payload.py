@@ -16,6 +16,10 @@ def build_ta_bot_pause_payload(
     enabled = current_config.get("enabled_strategies", [])
     if not isinstance(enabled, list):
         raise ValueError("target application config has invalid enabled_strategies")
+    if strategy_id in enabled and len(enabled) == 1:
+        raise ValueError(
+            f"refusing to remove final actionable strategy {strategy_id}: empty allowlist"
+        )
 
     return {
         "enabled_strategies": [item for item in enabled if item != strategy_id],
