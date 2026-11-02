@@ -190,6 +190,8 @@ class NATSClientProtocol(Protocol):
 
     async def publish(self, subject: str, payload: bytes) -> None: ...
 
+    async def flush(self) -> None: ...
+
 
 class OutputRouter:
     """
@@ -1208,18 +1210,37 @@ class OutputRouter:
                 )
 
         if nats_publish_tasks and not is_dry_run:
-            published_subjects = [
+            signal_subjects = [
                 subject
-                for (subject, _), result in zip(
-                    dispatch_tasks_data, results[1:], strict=False
-                )
+                for index, (subject, _) in enumerate(dispatch_tasks_data)
                 if subject.startswith("signals.trading.")
-                and not isinstance(result, Exception)
+                and not isinstance(results[index + 1], Exception)
             ]
-            if published_subjects:
-                EXECUTE_SIGNAL_PUBLISHED.add(
-                    len(published_subjects), {"outcome": "published"}
-                )
+            if signal_subjects:
+                try:
+                    await self.nats_client.flush()
+                except Exception as exc:
+                    logger.error(
+                        "NATS execute publication boundary failed",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "message_id": correlation_id,
+                            "subject_count": len(signal_subjects),
+                            "exc_type": type(exc).__name__,
+                        },
+                    )
+                else:
+                    EXECUTE_SIGNAL_PUBLISHED.add(
+                        len(signal_subjects), {"outcome": "published"}
+                    )
+                    logger.info(
+                        "NATS execute publication boundary confirmed",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "message_id": correlation_id,
+                            "subject_count": len(signal_subjects),
+                        },
+                    )
 
         # 5. Audit log for no-publish actions
         if not dispatch_tasks_data and action in (ActionType.SKIP, ActionType.BLOCK):
