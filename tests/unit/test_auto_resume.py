@@ -953,29 +953,24 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
 
 
 @pytest.mark.asyncio
-async def test_tick_does_not_resume_entry_that_became_terminal_after_snapshot():
+async def test_failure_persists_terminal_state_without_intermediate_paused_write():
     clock = FakeClock()
     cache = FakeCache()
     registry = LLMPauseRegistry(cache, clock=clock)
-    snapshot = PauseEntry("doji", "ta-bot", "paused", 0, 0, 0)
-    terminal = PauseEntry(
-        "doji",
-        "ta-bot",
-        "gave_up",
-        0,
-        0,
-        0,
-        gave_up_at=clock(),
-        gave_up_reason="failed_attempts",
-    )
-    registry.all = AsyncMock(return_value=[snapshot])
-    registry.get = AsyncMock(return_value=terminal)
-    http = MagicMock(request=AsyncMock())
-    loop = build_loop(clock, cache, registry, http=http)
+    entry = PauseEntry("doji", "ta-bot", "paused", 0, 0, 0, attempts=MAX_ATTEMPTS - 1)
+    writes = []
+    original_put = registry.put
 
-    await loop.tick()
+    async def record_write(value):
+        writes.append(value.status)
+        return await original_put(value)
 
-    http.request.assert_not_awaited()
+    registry.put = record_write
+    loop = build_loop(clock, cache, registry)
+    await loop._record_failure(entry, "ta-bot audit response missing fields: data")
+
+    assert writes == ["gave_up"]
+    assert (await registry.get("doji")).status == "gave_up"
 
 
 @pytest.mark.asyncio

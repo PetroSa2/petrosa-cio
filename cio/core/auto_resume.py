@@ -613,12 +613,7 @@ class AutoResumeLoop:
             ):
                 continue
             current = await self.registry.get(strategy_id)
-            if (
-                current is None
-                or current.status != "paused"
-                or current.attempts >= MAX_ATTEMPTS
-                or not self._eligible(current, self.clock())
-            ):
+            if current is None or not self._eligible(current, self.clock()):
                 continue
             await self._resume_one(current)
             resumed += 1
@@ -816,7 +811,6 @@ class AutoResumeLoop:
             RETRY_BASE_SECONDS * 2 ** (entry.attempts - 1),
         )
         entry.next_attempt_at = self.clock() + backoff
-        await self.registry.put(entry)
         logger.warning(
             f"AUTO_RESUME_FAILED strategy_id={entry.strategy_id} attempts={entry.attempts} "
             f"next_attempt_in_s={backoff} detail={detail}"
@@ -824,6 +818,8 @@ class AutoResumeLoop:
         self._metric("failed")
         if entry.attempts >= MAX_ATTEMPTS:
             await self._give_up(entry, "failed_attempts", detail)
+            return
+        await self.registry.put(entry)
 
     async def _give_up(
         self, entry: PauseEntry, reason: str, detail: str | None = None
