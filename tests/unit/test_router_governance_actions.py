@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from cio.core.metrics import EXECUTE_SIGNAL_PUBLISHED
 from cio.core.router import OutputRouter
 from cio.models import (
     ActionType,
@@ -237,7 +238,9 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
     decision = _make_decision(ActionType.EXECUTE)
     decision.computed_position_size_usd = 100.0
 
-    with patch.dict(os.environ, {"DRY_RUN": "false"}):
+    with patch.dict(os.environ, {"DRY_RUN": "false"}), patch.object(
+        EXECUTE_SIGNAL_PUBLISHED, "add"
+    ) as add:
         await router.route(context, decision)
 
     published_subjects = {c.args[0] for c in mock_nc.publish.call_args_list}
@@ -252,6 +255,8 @@ async def test_router_sanitizes_spaced_strategy_id_for_execute_action():
         assert " " not in subject, f"subject contains whitespace: {subject!r}"
 
     assert "trade.execute.spread_liquidity_monitor_625" not in published_subjects
+    mock_nc.flush.assert_awaited_once()
+    add.assert_called_once_with(1, {"outcome": "published"})
 
 
 @pytest.mark.asyncio
@@ -279,6 +284,37 @@ async def test_execute_without_symbol_is_rejected_before_trading_publish():
     subjects = {call.args[0] for call in mock_nc.publish.call_args_list}
     assert "signals.trading.momentum_pulse" not in subjects
     assert "cio.decision.audit.execute" in subjects
+    mock_nc.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_publication_counter_waits_for_nats_flush():
+    mock_nc = AsyncMock()
+    mock_nc.flush.side_effect = RuntimeError("flush failed")
+    mock_vc = AsyncMock()
+    router = OutputRouter(nats_client=mock_nc, vector_client=mock_vc, ta_bot_url="http://ta-bot")
+    context = MagicMock()
+    context.strategy_id = "momentum_pulse"
+    context.decision_id = "decision-589"
+    context.correlation_id = "corr-589"
+    context.trigger_type = TriggerType.TRADE_INTENT
+    context.position_id = None
+    context.trigger_payload = {"symbol": "BTCUSDT", "side": "long"}
+    context.market_signals.current_price = 50000.0
+    decision = _make_decision(ActionType.EXECUTE)
+    decision.computed_position_size_usd = 100.0
+
+    with patch.dict(os.environ, {"DRY_RUN": "false"}), patch.object(
+        EXECUTE_SIGNAL_PUBLISHED, "add"
+    ) as add:
+        await router.route(context, decision)
+
+    assert any(
+        call.args[0] == "signals.trading.momentum_pulse"
+        for call in mock_nc.publish.call_args_list
+    )
+    mock_nc.flush.assert_awaited_once()
+    add.assert_not_called()
 
 
 @pytest.mark.asyncio
