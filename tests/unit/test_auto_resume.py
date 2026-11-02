@@ -940,7 +940,7 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
     await loop.tick()
     assert (await registry.get("doji")).attempts == 1
     assert "service=ta-bot" in caplog.text
-    assert "ta-bot audit changed_at is not a string" in caplog.text
+    assert "ta-bot audit data item missing field: changed_at" in caplog.text
 
     cache.values.pop("cio:auto_resume:lock:doji", None)
     entry = await registry.get("doji")
@@ -950,6 +950,27 @@ async def test_resume_precheck_rejects_malformed_audit_data(caplog):
     http.get.return_value = response(500, {})
     await loop.tick()
     assert (await registry.get("doji")).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_failure_persists_terminal_state_without_intermediate_paused_write():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    entry = PauseEntry("doji", "ta-bot", "paused", 0, 0, 0, attempts=MAX_ATTEMPTS - 1)
+    writes = []
+    original_put = registry.put
+
+    async def record_write(value):
+        writes.append(value.status)
+        return await original_put(value)
+
+    registry.put = record_write
+    loop = build_loop(clock, cache, registry)
+    await loop._record_failure(entry, "ta-bot audit response missing fields: data")
+
+    assert writes == ["gave_up"]
+    assert (await registry.get("doji")).status == "gave_up"
 
 
 @pytest.mark.asyncio
@@ -977,6 +998,45 @@ async def test_resume_precheck_reports_realtime_state_evidence():
 
     assert (await registry.get("missing-data")).attempts == 1
     assert (await registry.get("bad-state")).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_precheck_reports_non_verifiable_response_fields():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    entries = [
+        PauseEntry("not-object", "ta-bot", "paused", 0, 0, 0),
+        PauseEntry("not-success", "ta-bot", "paused", 0, 0, 0),
+        PauseEntry("not-state", "realtime-strategies", "paused", 0, 0, 0),
+        PauseEntry("not-owner", "realtime-strategies", "paused", 0, 0, 0),
+    ]
+    for entry in entries:
+        await registry.put(entry)
+    http = MagicMock(
+        get=AsyncMock(
+            side_effect=[
+                response(200, []),
+                response(200, {"success": False, "data": []}),
+                response(200, {"success": True, "data": []}),
+                response(
+                    200,
+                    {
+                        "success": True,
+                        "data": {"state": "paused", "changed_by": "other"},
+                    },
+                ),
+            ]
+        )
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    for entry in entries:
+        await loop._resume_one(entry)
+
+    for entry in entries:
+        assert (await registry.get(entry.strategy_id)).attempts == 1
 
 
 @pytest.mark.asyncio
