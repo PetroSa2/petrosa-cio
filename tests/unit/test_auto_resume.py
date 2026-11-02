@@ -1001,6 +1001,45 @@ async def test_resume_precheck_reports_realtime_state_evidence():
 
 
 @pytest.mark.asyncio
+async def test_resume_precheck_reports_non_verifiable_response_fields():
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    entries = [
+        PauseEntry("not-object", "ta-bot", "paused", 0, 0, 0),
+        PauseEntry("not-success", "ta-bot", "paused", 0, 0, 0),
+        PauseEntry("not-state", "realtime-strategies", "paused", 0, 0, 0),
+        PauseEntry("not-owner", "realtime-strategies", "paused", 0, 0, 0),
+    ]
+    for entry in entries:
+        await registry.put(entry)
+    http = MagicMock(
+        get=AsyncMock(
+            side_effect=[
+                response(200, []),
+                response(200, {"success": False, "data": []}),
+                response(200, {"success": True, "data": []}),
+                response(
+                    200,
+                    {
+                        "success": True,
+                        "data": {"state": "paused", "changed_by": "other"},
+                    },
+                ),
+            ]
+        )
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    for entry in entries:
+        await loop._resume_one(entry)
+
+    for entry in entries:
+        assert (await registry.get(entry.strategy_id)).attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_loop_start_is_idempotent_and_empty_tick_is_noop():
     clock = FakeClock()
     cache = FakeCache()
