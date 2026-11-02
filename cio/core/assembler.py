@@ -167,9 +167,7 @@ class DecisionAssembler:
                 },
             )
             action = ActionType.SKIP
-            justification = (
-                "HEALTH_UNKNOWN: strategy pause refused without measured negative evidence"
-            )
+            justification = "HEALTH_UNKNOWN: strategy pause refused without measured negative evidence"
         gate = evaluate_net_ev(context, sl_pct, tp_pct, point="assembler")
         log_gate(context, gate)
         probe_override = False
