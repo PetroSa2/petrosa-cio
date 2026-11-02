@@ -644,7 +644,9 @@ class AutoResumeLoop:
             body = response.json()
             endpoint = "state" if entry.service == "realtime-strategies" else "audit"
             if not isinstance(body, dict):
-                raise ValueError(f"{entry.service} {endpoint} response is not an object")
+                raise ValueError(
+                    f"{entry.service} {endpoint} response is not an object"
+                )
             missing = [field for field in ("success", "data") if field not in body]
             if missing:
                 raise ValueError(
@@ -674,12 +676,16 @@ class AutoResumeLoop:
                 items = []
             else:
                 if not isinstance(body["data"], list) or not body["data"]:
-                    raise ValueError(f"{entry.service} audit response field data is empty")
+                    raise ValueError(
+                        f"{entry.service} audit response field data is empty"
+                    )
                 items = body["data"]
             parsed: list[tuple[dict[str, Any], float]] = []
             for item in items:
                 if not isinstance(item, dict):
-                    raise ValueError(f"{entry.service} audit data item is not an object")
+                    raise ValueError(
+                        f"{entry.service} audit data item is not an object"
+                    )
                 changed_at = item.get("changed_at")
                 if not isinstance(changed_at, str):
                     raise ValueError(
