@@ -44,6 +44,17 @@ def test_ta_bot_pause_payload_rejects_invalid_target_schema():
     assert "enabled_strategies" in str(exc_info.value)
 
 
+def test_ta_bot_pause_payload_refuses_final_actionable_strategy():
+    with pytest.raises(ValueError, match="final actionable strategy") as exc_info:
+        build_ta_bot_pause_payload(
+            {"enabled_strategies": ["fox_trap_reversal"]},
+            "fox_trap_reversal",
+            "CIO_PAUSE: test",
+        )
+
+    assert "empty allowlist" in str(exc_info.value)
+
+
 def test_ta_bot_resume_payload_restores_only_missing_strategy():
     payload = build_ta_bot_resume_payload(
         {"enabled_strategies": ["momentum_pulse"], "symbols": ["BTCUSDT"]},
