@@ -168,6 +168,12 @@ class DecisionAssembler:
             )
             action = ActionType.SKIP
             justification = "HEALTH_UNKNOWN: strategy pause refused without measured negative evidence"
+        if action == ActionType.PAUSE_STRATEGY:
+            stats = context.strategy_stats
+            justification = (
+                f"MEASURED_NEGATIVE_HEALTH: wins={stats.wins} losses={stats.losses} "
+                f"realized_pnl={stats.realized_pnl}; {justification}"
+            )
         gate = evaluate_net_ev(context, sl_pct, tp_pct, point="assembler")
         log_gate(context, gate)
         probe_override = False
