@@ -171,6 +171,8 @@ def test_pause_remains_available_with_measured_negative_evidence():
     decision, _ = _assemble(context, ActionType.PAUSE_STRATEGY)
 
     assert decision.action == ActionType.PAUSE_STRATEGY
+    assert "MEASURED_NEGATIVE_HEALTH" in decision.justification
+    assert "wins=2 losses=8 realized_pnl=-25.0" in decision.justification
 
 
 # --- the Beta CDF ---------------------------------------------------------------------------------
