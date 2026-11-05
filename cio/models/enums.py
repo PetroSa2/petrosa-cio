@@ -150,6 +150,9 @@ class RejectionSource(StrEnum):
     # eligible for automatic resume.
     LLM_UNAVAILABLE = "llm_unavailable"
     CONCENTRATION_CAP = "concentration_cap"
+    # petrosa-cio#395 — tradeengine refused the signal's own stop (422 stop_not_protective):
+    # the stop is on the wrong side of the entry. A bad signal, not a context outage.
+    SIGNAL_STOP_NOT_PROTECTIVE = "signal_stop_not_protective"
 
 
 class TriggerType(StrEnum):
