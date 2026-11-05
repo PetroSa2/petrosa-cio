@@ -5,6 +5,7 @@ from typing import Any
 from petrosa_contracts import Signal
 
 from cio.models import DecisionResult, TriggerContext
+from cio.models.decision import LLM_UNAVAILABLE_TRACE
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,36 @@ def resolve_direction_token(token: Any) -> tuple[str, str | None] | None:
     if token_lower == "hold":
         return "non_actionable", None
     return None
+
+
+#: Fallback only, a bound on the free text of ``llm_reasoning`` so one signal cannot carry an unbounded
+#: message; the justification (≤200) and trace (≤120) are far below it.
+LLM_REASONING_MAX_CHARS = 1000
+#: The reasoning sent when no LLM text exists: CIO still made the routing decision on its gates.
+DETERMINISTIC_ROUTING_REASONING = (
+    "CIO routed this action: deterministic gates passed; LLM stage unavailable"
+)
+
+
+def routed_llm_reasoning(decision: DecisionResult) -> str:
+    """The top-level ``llm_reasoning`` CIO attaches to every routed signal; never empty.
+
+    tradeengine honours CIO's routed action only when ``source == "petrosa-cio"`` and
+    ``llm_reasoning`` is set (petrosa-tradeengine ``LLMProcessor.process``). Without it, every CIO
+    execute fell through to a placeholder that drops signals at confidence <= 0.7
+    (PetroSa2/petrosa-tradeengine#807).
+    """
+    justification = (decision.justification or "").strip()
+    trace = (decision.thought_trace or "").strip()
+    if not justification or trace == LLM_UNAVAILABLE_TRACE:
+        parts = [DETERMINISTIC_ROUTING_REASONING]
+        if justification:
+            parts.append(justification)
+    else:
+        parts = [justification]
+        if trace:
+            parts.append(f"trace: {trace}")
+    return " | ".join(parts)[:LLM_REASONING_MAX_CHARS]
 
 
 class TradeEngineTranslator:
@@ -183,6 +214,8 @@ class TradeEngineTranslator:
                 "source": "petrosa-cio",
                 "strength": "strong",
                 "strategy_mode": "llm_reasoning",
+                # tradeengine trusts CIO's routed action only with this set (te#807).
+                "llm_reasoning": routed_llm_reasoning(decision),
                 "timeframe": timeframe,
                 "timestamp": datetime.now(UTC).isoformat(),
                 "decision_id": context.decision_id,
