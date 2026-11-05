@@ -1,5 +1,6 @@
 import logging
 
+from cio.core.context_builder import SIGNAL_STOP_SURFACE
 from cio.core.drawdown import (
     drawdown_enforced,
     evaluate_drawdown,
@@ -18,6 +19,7 @@ from cio.core.order_levels import carried_order_distances
 from cio.core.regime_policy import regime_availability
 from cio.core.sizing import size_order
 from cio.models import CodeEngineResult, RegimeEnum, TriggerContext, VolatilityLevel
+from cio.models.enums import RejectionSource
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,29 @@ class CodeEngine:
 
         # 1. RISK GATES
         pre_decision = context.pre_decision_context
+        stop_gap = next(
+            (
+                gap
+                for gap in (pre_decision.gaps if pre_decision is not None else [])
+                if gap.surface == SIGNAL_STOP_SURFACE
+            ),
+            None,
+        )
+        if stop_gap is not None:
+            # tradeengine refused the signal's own stop (422, te#829): reject the signal for that
+            # reason. Not a context-fetch fallback, so it never counts as a tradeengine outage (#395).
+            result.hard_blocked = True
+            result.block_context_fallback = False
+            result.block_rejection_source = RejectionSource.SIGNAL_STOP_NOT_PROTECTIVE
+            result.block_reason = (
+                "SIGNAL_STOP_NOT_PROTECTIVE: the signal's stop is on the wrong side of its "
+                f"entry ({stop_gap.reason}); tradeengine refused it."
+            )
+            logger.warning(
+                "SIGNAL_STOP_NOT_PROTECTIVE: BLOCK reason=%s", stop_gap.reason
+            )
+            return result
+
         if pre_decision is not None and pre_decision.portfolio_state_available is False:
             gap_reason = next(
                 (gap.reason for gap in pre_decision.gaps if gap.surface == "portfolio"),
