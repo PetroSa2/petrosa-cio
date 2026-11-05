@@ -53,3 +53,27 @@ def test_without_the_gap_the_portfolio_outage_path_is_unchanged():
     assert result.block_reason.startswith("PORTFOLIO_CONTEXT_UNAVAILABLE: ")
     assert result.block_context_fallback is True
     assert result.block_rejection_source is None
+
+
+def test_the_decision_carries_the_signal_stop_rejection_source():
+    from unittest.mock import MagicMock
+
+    from cio.core.assembler import DecisionAssembler
+    from cio.models import ActionType, ActivationRecommendation, HealthStatus, RegimeFit
+
+    context = _context(drawdown=0.0, portfolio_state_available=True)
+    decision = DecisionAssembler.assemble(
+        context=context,
+        code_result=CodeEngine.run(context),
+        regime_result=context.regime,
+        strategy_result=MagicMock(
+            regime_fit=RegimeFit.NEUTRAL,
+            health=HealthStatus.HEALTHY,
+            activation_recommendation=ActivationRecommendation.RUN,
+        ),
+    )
+
+    assert decision.action == ActionType.BLOCK
+    assert decision.rejection_source == RejectionSource.SIGNAL_STOP_NOT_PROTECTIVE
+    assert decision.hard_block_reason.startswith("SIGNAL_STOP_NOT_PROTECTIVE: ")
+    assert decision.thought_trace != "PORTFOLIO_CONTEXT_UNAVAILABLE"
