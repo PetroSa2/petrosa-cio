@@ -49,3 +49,26 @@ def test_missing_consumer_required_field_is_rejected():
         Signal.model_validate(payload)
 
     assert any(error["type"] == "missing" for error in raised.value.errors())
+
+
+def test_low_confidence_cio_execute_meets_tradeengine_trust_condition():
+    """A routed CIO execute at confidence 0.65 is accepted, not dropped as "LLM rejected".
+
+    tradeengine (``LLMProcessor.process``) skips its placeholder confidence > 0.7 gate only when
+    ``source == "petrosa-cio"`` and ``llm_reasoning`` is set (PetroSa2/petrosa-tradeengine#807).
+    """
+    context = _make_context(
+        trigger_payload={
+            "symbol": "BTCUSDT",
+            "side": "long",
+            "current_price": 50000.0,
+            "confidence": 0.65,
+        }
+    )
+    payload = TradeEngineTranslator.to_legacy_signal(context, _make_decision())
+    assert payload is not None
+    signal = Signal.model_validate(payload)
+
+    assert signal.confidence == 0.65
+    assert signal.strategy_mode == "llm_reasoning"
+    assert signal.source == "petrosa-cio" and signal.llm_reasoning
