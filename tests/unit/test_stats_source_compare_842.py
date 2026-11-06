@@ -146,3 +146,32 @@ def test_classification_uses_cios_own_rules():
     )
     assert rows["iceberg"]["history"] == "computed"
     assert rows["iceberg"]["net_ev"]["n"] == 25
+
+
+def test_an_unreachable_breakeven_always_fails():
+    levels = {"s_eff": 0.02, "p_be": 1.0, "c": 0.02, "alpha": 0.2}
+    gate = compare_module.net_ev(levels, wins=50, losses=0, k=30.0)
+    assert gate["result"] == "fail" and gate["net_ev_r"] == -1.0
+
+
+def test_main_renders_a_report_with_no_flips_and_none_paused(tmp_path, capsys):
+    same = {"iceberg": (3, 3, 0, [0.1] * 6, 0)}
+    path = tmp_path / "inputs.json"
+    import json
+
+    inputs = _inputs(same, same)
+    inputs["gates"] = []  # no gate data for any strategy
+    path.write_text(json.dumps(inputs))
+    assert compare_module.main(["stats_source_compare.py", str(path)]) == 0
+    report = capsys.readouterr().out
+    assert "None: no strategy becomes tradeable" in report
+    assert "None paused today." in report
+    assert "## Every flip\n\nNone." in report
+    assert "no gate data" in report
+    assert "| iceberg | 3/3 (0.50, 0)" in report
+
+
+def test_number_formatting():
+    assert compare_module._f(None) == "–"
+    assert compare_module._f(0.12345) == "0.12"
+    assert compare_module._f(7) == "7"
