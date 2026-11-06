@@ -53,3 +53,22 @@ def mock_httpx_client():
     mock.get = AsyncMock()
     mock.post = AsyncMock()
     return mock
+
+
+@pytest.fixture(autouse=True)
+def fake_portfolio_retry_clock(monkeypatch):
+    """The /state connect-retry waits on a fake clock (petrosa-tradeengine#840).
+
+    Its budget is ~75 s of real time, so every test gets a fake ``_sleep`` that only advances a fake
+    ``_monotonic``. Returns the clock (``[seconds]``) so a test can read the time a retry spent.
+    """
+    from cio.core import context_builder
+
+    now = [0.0]
+
+    async def fake_sleep(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr(context_builder, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(context_builder, "_sleep", fake_sleep)
+    return now
