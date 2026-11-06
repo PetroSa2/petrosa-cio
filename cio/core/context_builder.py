@@ -209,6 +209,51 @@ _REPORTS: dict[str, tuple[str, tuple[Any, ...]]] = {
 }
 
 
+#: The ``ContextGap.surface`` of a signal whose own stop tradeengine refused (petrosa-cio#395).
+SIGNAL_STOP_SURFACE = "signal_stop"
+
+
+def _stop_not_protective_detail(exc: Exception) -> str | None:
+    """The detail of tradeengine's 422 ``stop_not_protective`` answer, or None for any other failure."""
+    if not isinstance(exc, httpx.HTTPStatusError) or exc.response.status_code != 422:
+        return None
+    try:
+        body = exc.response.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if not isinstance(detail, dict) or detail.get("error") != "stop_not_protective":
+        return None
+    return (
+        f"side={detail.get('side')} stop_loss={detail.get('stop_loss')} "
+        f"reference_price={detail.get('reference_price')}"
+    )
+
+
+def _blocking_portfolio_defaults() -> tuple[
+    PortfolioSummary, RiskLimits, dict[str, Any]
+]:
+    """Conservative portfolio/risk values that trip every risk gate (the fail-safe)."""
+    return (
+        PortfolioSummary(
+            gross_exposure=1.0,
+            same_asset_pct=1.0,
+            open_positions_count=999,
+        ),
+        RiskLimits(
+            max_drawdown_pct=0.0,
+            max_orders_global=0,
+            max_orders_per_symbol=0,
+            max_position_size_usd=0.0,
+        ),
+        {
+            "global_drawdown_pct": 1.0,
+            "open_orders_global": 999,
+            "available_capital_usd": 0.0,
+        },
+    )
+
+
 class ContextBuilder:
     """
     Assembles the complete TriggerContext for a reasoning loop iteration.
@@ -1525,6 +1570,28 @@ class ContextBuilder:
                         dict(env_stats),
                     )
 
+        stop_detail = _stop_not_protective_detail(last_exc)
+        if stop_detail is not None:
+            # tradeengine answered 422: the signal's own stop is on the wrong side of its entry
+            # (te#829). That is a bad signal, not a tradeengine outage: no portfolio gap and no
+            # ERROR. The engine blocks the signal on the ``signal_stop`` gap (petrosa-cio#395);
+            # the blocking defaults below stay as the fail-safe.
+            logger.warning(
+                "SIGNAL_STOP_NOT_PROTECTIVE symbol=%s strategy_id=%s detail=%s",
+                symbol,
+                strategy_id,
+                stop_detail,
+                extra={"correlation_id": correlation_id},
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface=SIGNAL_STOP_SURFACE,
+                        reason=f"stop_not_protective: {stop_detail}",
+                    )
+                )
+            return _blocking_portfolio_defaults()
+
         e = last_exc
         logger.error(
             f"Failed to fetch portfolio/risk: {e}",
@@ -1576,24 +1643,7 @@ class ContextBuilder:
         if availability is not None:
             availability["portfolio"] = False
         # Safe conservative defaults (trigger blocks)
-        return (
-            PortfolioSummary(
-                gross_exposure=1.0,
-                same_asset_pct=1.0,
-                open_positions_count=999,
-            ),
-            RiskLimits(
-                max_drawdown_pct=0.0,
-                max_orders_global=0,
-                max_orders_per_symbol=0,
-                max_position_size_usd=0.0,
-            ),
-            {
-                "global_drawdown_pct": 1.0,
-                "open_orders_global": 999,
-                "available_capital_usd": 0.0,
-            },
-        )
+        return _blocking_portfolio_defaults()
 
     async def _fetch_strategy_data(
         self,

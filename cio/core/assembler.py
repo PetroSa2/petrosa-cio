@@ -115,6 +115,15 @@ class DecisionAssembler:
                 drawdown=drawdown,
                 justification=f"Hard blocked by engine: {code_result.block_reason}",
                 thought_trace="Code Engine safety gate triggered. Bypassing all LLM logic.",
+                # #395: the engine's reason, when it names one (e.g. a refused signal stop).
+                rejection_source=(
+                    code_result.block_rejection_source
+                    if isinstance(
+                        getattr(code_result, "block_rejection_source", None),
+                        RejectionSource,
+                    )
+                    else None
+                ),
             )
 
         # 2. PARAMETER SYNTHESIS

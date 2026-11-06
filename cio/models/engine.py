@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from cio.models.enums import RejectionSource
 from cio.models.net_ev import DrawdownDecision, NetEvGate, SizingRecord
 
 
@@ -14,6 +15,8 @@ class CodeEngineResult(BaseModel):
         False, description="If True, all further reasoning is bypassed"
     )
     block_reason: str | None = None
+    # petrosa-cio#395 — why the block happened, when the engine knows it (persisted on the decision).
+    block_rejection_source: RejectionSource | None = None
     block_context_fallback: bool = Field(
         False,
         description=(
