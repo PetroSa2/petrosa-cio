@@ -463,3 +463,100 @@ async def test_a_timeout_is_logged_with_its_type_not_an_empty_message(caplog):
     assert builder.client.get.await_count == 1  # #199: timeouts are still not retried
 
     await builder.close()
+
+
+# --- the signal's freshness bounds the retry (te#840) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("timestamp", "expected_age"),
+    [
+        ("2026-11-06T20:00:00+00:00", 100.0),
+        ("2026-11-06T20:00:00Z", 100.0),
+        ("2026-11-06T20:00:00", 100.0),  # naive is UTC
+        (1793995200.0, 100.0),  # epoch seconds
+        (1793995200000, 100.0),  # epoch milliseconds
+    ],
+)
+def test_signal_age_from_the_intent_timestamp(timestamp, expected_age):
+    now = 1793995300.0  # 2026-11-06T20:01:40Z
+    age = context_builder_module.signal_age_seconds({"timestamp": timestamp}, now=now)
+    assert age == pytest.approx(expected_age)
+
+
+@pytest.mark.parametrize("raw", [None, "", "not a time", True])
+def test_unknown_signal_age_gives_no_freshness_budget(raw):
+    payload = {} if raw is None else {"timestamp": raw}
+    assert context_builder_module.signal_age_seconds(payload) is None
+    assert context_builder_module.freshness_budget_seconds(payload) is None
+
+
+def test_freshness_budget_is_max_age_minus_reserve_minus_age():
+    now = 1793995300.0
+    budget = context_builder_module.freshness_budget_seconds(
+        {"timestamp": now - 200.0}, now=now
+    )
+    # 300 s max age (tradeengine's default) - 60 s decision reserve - 200 s already old
+    assert budget == pytest.approx(40.0)
+    assert (
+        context_builder_module.freshness_budget_seconds(
+            {"timestamp": now - 400.0}, now=now
+        )
+        == 0.0
+    )
+
+
+@pytest.mark.asyncio
+async def test_retry_stops_at_the_signal_deadline_with_a_named_block(
+    caplog, fake_portfolio_retry_clock
+):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="cio.core.context_builder")
+    builder = _make_builder()
+    builder.client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+    gaps: list[ContextGap] = []
+    availability = {"portfolio": True}
+
+    portfolio, risk, _env = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT",
+        "cid-fresh",
+        strategy_id="iceberg_detector",
+        gaps=gaps,
+        availability=availability,
+        freshness_budget_s=10.0,
+    )
+
+    assert portfolio.open_positions_count == 999 and risk.max_orders_global == 0
+    assert availability["portfolio"] is False
+    assert len(gaps) == 1
+    assert gaps[0].reason.startswith("signal_freshness_deadline:")
+    assert (
+        fake_portfolio_retry_clock[0] <= 10.0
+    )  # never waited past the signal's freshness
+    assert any(
+        "PORTFOLIO_FETCH_SIGNAL_DEADLINE" in r.getMessage() for r in caplog.records
+    )
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fresh_signal_keeps_the_full_retry_budget(fake_portfolio_retry_clock):
+    builder = _make_builder()
+    clock = fake_portfolio_retry_clock
+
+    async def get(url):
+        if clock[0] < 60.0:
+            raise httpx.ConnectError("refused")
+        return _success_response()
+
+    builder.client.get = AsyncMock(side_effect=get)
+    gaps: list[ContextGap] = []
+    portfolio, _risk, _env = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-ok", gaps=gaps, freshness_budget_s=230.0
+    )
+
+    assert portfolio.open_positions_count == 2 and gaps == []
+
+    await builder.close()
