@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlencode
 
@@ -168,10 +168,63 @@ def classify_strategy_history(raw: dict) -> str:
 # / tradeengine network blip self-heals without adding meaningful latency to
 # the decision path, while a persistent outage still falls back to the
 # existing conservative defaults after retries are exhausted.
-_PORTFOLIO_FETCH_MAX_RETRIES = int(os.getenv("CIO_PORTFOLIO_FETCH_RETRIES", "2"))
+#
+# petrosa-tradeengine#840: a tradeengine rollout (one replica, no surge) refuses connections for
+# ~50-63 s (measured 2026-11-06), so the connect-failure retry is bounded by a time budget that
+# covers that gap instead of ~0.75 s. Only ConnectError is retried (#199 still holds for timeouts),
+# and tradeengine rejects signals older than its max_signal_age_seconds (300 s), which the budget
+# stays well inside.
+_PORTFOLIO_FETCH_MAX_RETRIES = int(os.getenv("CIO_PORTFOLIO_FETCH_RETRIES", "30"))
 _PORTFOLIO_FETCH_RETRY_BACKOFF_S = float(
     os.getenv("CIO_PORTFOLIO_FETCH_RETRY_BACKOFF_S", "0.25")
 )
+#: Labelled fallback: the measured tradeengine rollout gap (50-63 s) plus margin.
+_PORTFOLIO_CONNECT_RETRY_BUDGET_S = float(
+    os.getenv("CIO_PORTFOLIO_CONNECT_RETRY_BUDGET_S", "75")
+)
+_PORTFOLIO_FETCH_RETRY_BACKOFF_CAP_S = 5.0
+#: Labelled fallback: tradeengine's default ``max_signal_age_seconds`` (a signal older than this is stale).
+_SIGNAL_MAX_AGE_S = float(os.getenv("CIO_SIGNAL_MAX_AGE_S", "300"))
+#: Labelled fallback: time kept for the rest of the decision (LLM, routing) after the /state fetch.
+_DECISION_RESERVE_S = float(os.getenv("CIO_DECISION_RESERVE_S", "60"))
+SIGNAL_FRESHNESS_DEADLINE = "signal_freshness_deadline"
+
+
+def signal_age_seconds(
+    payload: dict[str, Any], now: float | None = None
+) -> float | None:
+    """Age of the intent from its ``timestamp`` (ISO, epoch seconds or epoch ms); None if unknown."""
+    raw = payload.get("timestamp")
+    stamp: float | None = None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int | float):
+        stamp = float(raw) / 1000.0 if raw > 1e12 else float(raw)
+    elif isinstance(raw, str) and raw:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        stamp = parsed.timestamp()
+    if stamp is None:
+        return None
+    return (time.time() if now is None else now) - stamp
+
+
+def freshness_budget_seconds(
+    payload: dict[str, Any], now: float | None = None
+) -> float | None:
+    """Seconds the /state fetch may still spend before the signal would be stale; None if unknown."""
+    age = signal_age_seconds(payload, now)
+    if age is None:
+        return None
+    return max(0.0, _SIGNAL_MAX_AGE_S - _DECISION_RESERVE_S - age)
+
+
+_monotonic = time.monotonic
+_sleep = asyncio.sleep
 _PORTFOLIO_STALE_MAX_S = float(os.getenv("CIO_PORTFOLIO_STALE_MAX_S", "120"))
 
 _SIGNAL_STRENGTH_TO_TREND = {
@@ -395,6 +448,7 @@ class ContextBuilder:
                 strategy_id=strategy_id,
                 gaps=gaps,
                 availability=availability,
+                freshness_budget_s=freshness_budget_seconds(payload),
                 provenance=provenance,
             ),
             self._fetch_strategy_data(strategy_id, correlation_id, gaps=gaps),
@@ -1473,8 +1527,13 @@ class ContextBuilder:
         gaps: list[ContextGap] | None = None,
         availability: dict[str, bool] | None = None,
         provenance: dict[str, str | bool] | None = None,
+        freshness_budget_s: float | None = None,
     ) -> tuple[PortfolioSummary, RiskLimits, dict[str, Any]]:
         """Fetches portfolio and risk data from tradeengine.
+
+        ``freshness_budget_s`` (te#840): how long the connect retry may still wait before the signal
+        would be stale. When that, not the retry budget, ends the retry, the result is the blocking
+        defaults with the named gap ``signal_freshness_deadline``.
 
         P1.4-AC2 (#132): when the call falls back to conservative defaults
         (exception path), record a ``ContextGap(surface='portfolio')`` and
@@ -1499,6 +1558,12 @@ class ContextBuilder:
             params["strategy_id"] = strategy_id
         url = f"{self.tradeengine_url}/state?{urlencode(params)}"
         last_exc: Exception = RuntimeError("unreachable")
+        started = _monotonic()
+        budget = _PORTFOLIO_CONNECT_RETRY_BUDGET_S
+        deadline_bound = False
+        if freshness_budget_s is not None and freshness_budget_s < budget:
+            budget, deadline_bound = freshness_budget_s, True
+        deadline_hit = False
         for attempt in range(_PORTFOLIO_FETCH_MAX_RETRIES + 1):
             try:
                 response = await self.client.get(url)
@@ -1524,25 +1589,60 @@ class ContextBuilder:
                 return portfolio, risk, env_stats
             except httpx.ConnectError as e:
                 last_exc = e
+                backoff = min(
+                    _PORTFOLIO_FETCH_RETRY_BACKOFF_S * (2**attempt),
+                    _PORTFOLIO_FETCH_RETRY_BACKOFF_CAP_S,
+                )
+                elapsed = _monotonic() - started
+                if (
+                    attempt < _PORTFOLIO_FETCH_MAX_RETRIES
+                    and elapsed + backoff > budget
+                ):
+                    deadline_hit = deadline_bound
+                    break
                 if attempt < _PORTFOLIO_FETCH_MAX_RETRIES:
                     logger.warning(
-                        "PORTFOLIO_FETCH_CONNECT_RETRY attempt=%d/%d endpoint=%s "
-                        "detail=%s",
+                        "PORTFOLIO_FETCH_CONNECT_RETRY attempt=%d/%d elapsed_s=%.1f "
+                        "budget_s=%.0f endpoint=%s exc_type=%s detail=%s",
                         attempt + 1,
                         _PORTFOLIO_FETCH_MAX_RETRIES,
+                        elapsed,
+                        budget,
                         url,
+                        type(e).__name__,
                         str(e) or "<empty>",
                         extra={"correlation_id": correlation_id},
                     )
-                    await asyncio.sleep(
-                        _PORTFOLIO_FETCH_RETRY_BACKOFF_S * (attempt + 1)
-                    )
+                    await _sleep(backoff)
                     continue
                 break
             except Exception as e:
                 last_exc = e
                 break
 
+        if deadline_hit:
+            # The signal would be stale before tradeengine is back: block it with a named reason
+            # instead of acting on a stale signal (te#840).
+            logger.error(
+                "PORTFOLIO_FETCH_SIGNAL_DEADLINE symbol=%s strategy_id=%s elapsed_s=%.1f "
+                "freshness_budget_s=%.1f exc_type=%s",
+                symbol,
+                strategy_id,
+                _monotonic() - started,
+                budget,
+                type(last_exc).__name__,
+                extra={"correlation_id": correlation_id},
+            )
+            if gaps is not None:
+                gaps.append(
+                    ContextGap(
+                        surface="portfolio",
+                        reason=f"{SIGNAL_FRESHNESS_DEADLINE}: freshness_budget_s={budget:.1f}",
+                    )
+                )
+            if availability is not None:
+                availability["portfolio"] = False
+            return _blocking_portfolio_defaults()
         if isinstance(last_exc, httpx.ConnectError):
             cached = self._portfolio_cache.get(symbol)
             if cached is not None:
@@ -1593,8 +1693,12 @@ class ContextBuilder:
             return _blocking_portfolio_defaults()
 
         e = last_exc
+        # The exception type is always named: an httpx timeout's message is empty (te#840).
         logger.error(
-            f"Failed to fetch portfolio/risk: {e}",
+            "Failed to fetch portfolio/risk: exc_type=%s detail=%s elapsed_s=%.1f",
+            type(e).__name__,
+            str(e) or "<empty>",
+            _monotonic() - started,
             extra={"correlation_id": correlation_id},
         )
         if self.qa_shadow_fallback_enabled:
@@ -1637,7 +1741,7 @@ class ContextBuilder:
             gaps.append(
                 ContextGap(
                     surface="portfolio",
-                    reason=f"fetch_error: {e}",
+                    reason=f"fetch_error: {type(e).__name__}: {str(e) or '<empty>'}",
                 )
             )
         if availability is not None:
