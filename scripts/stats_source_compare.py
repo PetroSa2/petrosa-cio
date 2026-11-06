@@ -160,7 +160,7 @@ def compare(inputs: dict[str, Any]) -> dict[str, Any]:
     by_source = {s: evaluate_source(inputs[s], levels, **kwargs) for s in SOURCES}
     paused = set(inputs.get("paused") or [])
     strategies = sorted(set(by_source["netting"]) | set(by_source["ground_truth"]))
-    rows, flips, unpauses = [], [], []
+    rows, flips, unpauses, paused_rows = [], [], [], []
     for strategy in strategies:
         before = by_source["netting"].get(strategy) or {}
         after = by_source["ground_truth"].get(strategy) or {}
@@ -191,9 +191,20 @@ def compare(inputs: dict[str, Any]) -> dict[str, Any]:
         newly_allowed = (
             bool(after) and _allowed(after) and not (bool(before) and _allowed(before))
         )
-        if newly_allowed or (strategy in paused and bool(after) and _allowed(after)):
+        # Keep/kill never lifts a pause (it only pauses, on kill, and only in enforce mode), so a strategy paused
+        # today stays paused on either source: it is listed apart, never as tradeable. Where risk enters is an
+        # unpaused strategy whose Net-EV gate opens.
+        if newly_allowed and strategy not in paused:
             unpauses.append(row)
-    return {"rows": rows, "flips": flips, "unpauses": unpauses, "levels": levels}
+        if strategy in paused:
+            paused_rows.append(row)
+    return {
+        "rows": rows,
+        "flips": flips,
+        "unpauses": unpauses,
+        "paused": paused_rows,
+        "levels": levels,
+    }
 
 
 def _f(value: Any, digits: int = 2) -> str:
@@ -213,7 +224,11 @@ def _gate(row: dict[str, Any] | None) -> str:
 
 def render(result: dict[str, Any]) -> str:
     out = ["# Strategy stats: netting (today) vs exchange truth (dm#842)", ""]
-    out.append("## UNPAUSES (would be allowed to trade on exchange truth)")
+    out.append("## UNPAUSES IN PRACTICE: newly tradeable on exchange truth")
+    out.append(
+        "An unpaused strategy whose Net-EV gate opens (fail on netting, pass on truth) and that keep/kill doesn't "
+        "kill. Keep/kill never lifts a pause, so strategies paused today are listed separately below."
+    )
     if not result["unpauses"]:
         out.append("None: no strategy becomes tradeable on the exchange-truth source.")
     for row in result["unpauses"]:
@@ -222,6 +237,16 @@ def render(result: dict[str, Any]) -> str:
             f"- **{row['strategy']}**{' (paused today)' if row['paused'] else ''}: "
             f"Net-EV {_gate(a)}; keep/kill {a['keep_kill']} ({a['keep_kill_reason']}, {a['net_r_n']} rounds of known R"
             f", unknown-R share {_f(a['unknown_r_share'])}); W/L {a['wins']}/{a['losses']}"
+        )
+    out += ["", "## Paused today: stay paused on either source", ""]
+    if not result["paused"]:
+        out.append("None paused today.")
+    for row in result["paused"]:
+        a = row["after"]
+        out.append(
+            f"- **{row['strategy']}**: stays paused (no stats path lifts a pause). On truth: keep/kill "
+            f"{a.get('keep_kill')} ({a.get('keep_kill_reason')}, {a.get('net_r_n')} rounds of known R, unknown-R "
+            f"share {_f(a.get('unknown_r_share'))}); Net-EV {_gate(a)}; it would trade only if a person resumes it."
         )
     out += ["", "## Every flip", ""]
     if not result["flips"]:

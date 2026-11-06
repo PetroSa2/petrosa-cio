@@ -83,15 +83,26 @@ def test_net_ev_posterior_matches_cios_formula():
     assert unknown["result"] == "fail" and 0.4 < unknown["prob_edge"] < 0.6
 
 
-def test_a_paused_strategy_that_truth_would_allow_is_listed_as_an_unpause():
+def test_an_unpaused_strategy_whose_gate_opens_is_the_unpause():
+    netting = {"spread": (6, 6, 3, [0.1] * 12, 0)}
+    truth = {"spread": (40, 10, 0, [0.5] * 50, 0)}
+    result = compare_module.compare(_inputs(netting, truth))
+    assert [r["strategy"] for r in result["unpauses"]] == ["spread"]
+    report = compare_module.render(result)
+    assert report.index("## UNPAUSES IN PRACTICE") < report.index("## Every flip")
+    assert "**spread**" in report and "rounds of known R" in report
+
+
+def test_a_paused_strategy_stays_paused_and_is_listed_apart():
+    """Keep/kill never lifts a pause: a paused strategy is shown with its truth verdict, never as tradeable."""
     netting = {"spread": (6, 6, 3, [0.1] * 12, 0)}
     truth = {"spread": (40, 10, 0, [0.5] * 50, 0)}
     result = compare_module.compare(_inputs(netting, truth, paused=["spread"]))
-    assert [r["strategy"] for r in result["unpauses"]] == ["spread"]
+    assert result["unpauses"] == []
+    assert [r["strategy"] for r in result["paused"]] == ["spread"]
     report = compare_module.render(result)
-    assert report.index("## UNPAUSES") < report.index("## Every flip")
-    assert "**spread** (paused today)" in report
-    assert "rounds of known R" in report
+    assert "**spread**: stays paused" in report
+    assert "unknown-R share" in report
 
 
 def test_mostly_unknown_r_is_not_evaluated_by_keep_kill():
