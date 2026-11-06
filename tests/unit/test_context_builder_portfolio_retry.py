@@ -158,13 +158,17 @@ async def test_persistent_connect_error_exhausts_retries_then_falls_back(caplog)
     assert gaps[0].reason.startswith("fetch_error:")
     assert availability["portfolio"] is False
 
-    # Default budget is 2 retries -> 3 total attempts.
-    assert builder.client.get.await_count == 3
-
+    # te#840: retries run until the time budget (75 s by default) is spent, on the fake clock.
+    attempts = builder.client.get.await_count
+    assert attempts > 3
     retry_records = [
         r for r in caplog.records if "PORTFOLIO_FETCH_CONNECT_RETRY" in r.message
     ]
-    assert len(retry_records) == 2, "expected one retry log per retried attempt"
+    assert len(retry_records) == attempts - 1, "one retry log per retried attempt"
+    assert all("exc_type=ConnectError" in r.getMessage() for r in retry_records)
+    assert context_builder_module._monotonic() <= (
+        context_builder_module._PORTFOLIO_CONNECT_RETRY_BUDGET_S
+    )
 
     error_records = [
         r
@@ -172,6 +176,7 @@ async def test_persistent_connect_error_exhausts_retries_then_falls_back(caplog)
         if r.levelno == logging.ERROR and "Failed to fetch portfolio/risk" in r.message
     ]
     assert error_records, "final exhaustion must still log the existing ERROR line"
+    assert "exc_type=ConnectError" in error_records[-1].getMessage()
 
     await builder.close()
 
@@ -384,4 +389,77 @@ async def test_intent_prefix_without_qa_shadow_mode_keeps_fail_safe_defaults(
     assert portfolio.open_positions_count == 999
     assert risk.max_orders_global == 0
     assert env_stats["open_orders_global"] == 999
+    await builder.close()
+
+
+# --- petrosa-tradeengine#840: the rollout gap and typed failures ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rollout_gap_of_a_minute_is_bridged_by_the_connect_retry(
+    fake_portfolio_retry_clock,
+):
+    """A one-replica tradeengine rollout refuses connections for ~50-63 s (measured 2026-11-06)."""
+    builder = _make_builder()
+    clock = fake_portfolio_retry_clock
+
+    async def get(url):
+        if clock[0] < 60.0:
+            raise httpx.ConnectError("All connection attempts failed")
+        return _success_response()
+
+    builder.client.get = AsyncMock(side_effect=get)
+    gaps: list[ContextGap] = []
+    availability = {"portfolio": True}
+    portfolio, risk, _env = await builder._fetch_portfolio_and_risk(
+        "BTCUSDT", "cid-rollout", gaps=gaps, availability=availability
+    )
+
+    assert portfolio.gross_exposure == 0.2  # the real state, not the blocking defaults
+    assert portfolio.open_positions_count == 2
+    assert gaps == [] and availability["portfolio"] is True
+    assert 60.0 <= clock[0] <= context_builder_module._PORTFOLIO_CONNECT_RETRY_BUDGET_S
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_retry_stops_at_the_configured_budget(
+    monkeypatch, fake_portfolio_retry_clock
+):
+    monkeypatch.setattr(
+        context_builder_module, "_PORTFOLIO_CONNECT_RETRY_BUDGET_S", 3.0
+    )
+    builder = _make_builder()
+    builder.client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+    portfolio, _risk, _env = await builder._fetch_portfolio_and_risk("BTCUSDT", "cid-b")
+
+    assert portfolio.open_positions_count == 999  # the fail-safe block is unchanged
+    assert fake_portfolio_retry_clock[0] <= 3.0
+    # backoffs 0.25 + 0.5 + 1 = 1.75 s fit, the next (2 s) would exceed 3 s
+    assert builder.client.get.await_count == 4
+
+    await builder.close()
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_is_logged_with_its_type_not_an_empty_message(caplog):
+    import logging
+
+    caplog.set_level(logging.INFO, logger="cio.core.context_builder")
+    builder = _make_builder()
+    builder.client.get = AsyncMock(side_effect=httpx.ReadTimeout(""))
+    gaps: list[ContextGap] = []
+
+    await builder._fetch_portfolio_and_risk("BTCUSDT", "cid-t", gaps=gaps)
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(
+        "Failed to fetch portfolio/risk: exc_type=ReadTimeout detail=<empty>" in m
+        for m in errors
+    )
+    assert gaps[0].reason == "fetch_error: ReadTimeout: <empty>"
+    assert builder.client.get.await_count == 1  # #199: timeouts are still not retried
+
     await builder.close()
