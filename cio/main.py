@@ -45,6 +45,7 @@ from cio.core.keep_kill_job import (
 from cio.core.keep_kill_job import KeepKillJob, make_pause
 from cio.core.lifecycle import StrategyLifecycleStore
 from cio.core.listener import NATSListener
+from cio.core.log_redaction import install_log_redaction, redact_url
 from cio.core.loop_watchdog import LoopWatchdog
 from cio.core.orchestrator import Orchestrator
 from cio.core.position_review_loop import (
@@ -108,6 +109,8 @@ root_logger.addHandler(handler)
 # untouched — only INFO/DEBUG chatter from this specific logger is raised.
 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
+# Credentials never reach a log line, from CIO or any library (petrosa-cio#397).
+install_log_redaction()
 logger = logging.getLogger("cio-strategist")
 
 # #209 (AC3): backoff wait (seconds) between NATS reconnect attempts. Kept as
@@ -429,7 +432,7 @@ async def main():
             max_reconnect_attempts=-1,
             reconnect_time_wait=NATS_RECONNECT_TIME_WAIT_SECONDS,
         )
-        logger.info(f"Connected to NATS at {nats_url}")
+        logger.info("Connected to NATS at %s", redact_url(nats_url))
         app.state.nats_client = nc
     except Exception as e:
         logger.error(f"Failed to connect to NATS: {e}")
@@ -440,7 +443,7 @@ async def main():
     except Exception:
         sys.exit(1)
     cache = AsyncRedisCache(redis_client)
-    logger.info(f"Connected to Redis at {redis_url}")
+    logger.info("Connected to Redis at %s", redact_url(redis_url))
     durable_state = DataManagerStateStore(data_manager_url, "cio_auto_resume")
     await migrate_redis_registry(cache, durable_state)
     drawdown_lifecycle_store = DrawdownLifecycleStore(durable_state)
