@@ -18,11 +18,18 @@ async def test_connect_redis_checks_connectivity_with_bounded_timeouts(monkeypat
 
     assert result is mock_redis
     mock_redis.ping.assert_awaited_once()
-    from_url.assert_called_once_with(
-        "redis://redis:6379",
-        socket_connect_timeout=5.0,
-        socket_timeout=5.0,
-    )
+    from_url.assert_called_once()
+    args, kwargs = from_url.call_args
+    assert args == ("redis://redis:6379",)
+    assert kwargs["socket_connect_timeout"] == 5.0
+    assert kwargs["socket_timeout"] == 5.0
+    # petrosa-cio#406: one short retry on connection errors, and a health check on idle pooled connections.
+    assert kwargs["health_check_interval"] == 30
+    assert kwargs["retry"].get_retries() == 1
+    assert {e.__name__ for e in kwargs["retry_on_error"]} == {
+        "ConnectionError",
+        "TimeoutError",
+    }
 
 
 @pytest.mark.asyncio
