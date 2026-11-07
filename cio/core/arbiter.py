@@ -4,8 +4,9 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Protocol
 
-from cio.core.cache import AsyncRedisCache
+from cio.core.cache import AsyncRedisCache, CacheUnavailable
 from cio.core.evaluator_subscriber import PAUSE_GUARD_SUBSYSTEMS
+from cio.core.metrics import meter
 from cio.models import TriggerType
 
 if TYPE_CHECKING:
@@ -26,6 +27,13 @@ class _ScheduledReviewEnforcer(Protocol):
 
 
 _DEDUP_TTL_SECONDS = 60
+
+# petrosa-cio#406: Redis unreachable (after the client's bounded retry) during arbitration. outcome=refused is a
+# new entry refused; outcome=passed_closing is a close or reduce-only intent let through without arbitration.
+ARBITER_STATE_UNAVAILABLE = meter.create_counter(
+    "cio_arbiter_state_unavailable_total",
+    description="Signals arbitrated while Redis was unreachable, by outcome (refused | passed_closing)",
+)
 _CONFLICT_TTL_SECONDS = 300  # 5 minutes
 
 # P2.6 (#597) + P2.6-EXT (#123): subsystems whose unhealthy verdict triggers
@@ -182,9 +190,13 @@ class SignalArbiter:
         confidence: float,
         strategy_id: str,
         correlation_id: str,
+        closing: bool = False,
     ) -> tuple[bool, str]:
         """
         Check whether the incoming signal should be allowed through.
+
+        ``closing`` marks a close or reduce-only intent (``drawdown.is_closing_intent``). It only matters when the
+        arbitration state in Redis can't be read: new entries are then refused, closes still pass (#406).
 
         Returns:
             (allowed, reason) — ``allowed=False`` means the signal must be suppressed.
@@ -238,7 +250,15 @@ class SignalArbiter:
 
         # 1. Deduplication guard (60 s window, same symbol + canonical action)
         dedup_key = f"arbiter:dedup:{symbol}:{canonical_action}"
-        if await self._cache.get(dedup_key):
+        bias_key = f"arbiter:bias:{symbol}"
+        try:
+            dedup_hit = await self._cache.get_strict(dedup_key)
+            raw_bias = None if dedup_hit else await self._cache.get_strict(bias_key)
+        except CacheUnavailable as exc:
+            return self._state_unavailable(
+                symbol, canonical_action, strategy_id, correlation_id, closing, exc
+            )
+        if dedup_hit:
             reason = (
                 f"SIGNAL_DEDUPLICATED: {symbol} {canonical_action} already published "
                 f"within the last {_DEDUP_TTL_SECONDS}s (strategy={strategy_id})"
@@ -247,8 +267,6 @@ class SignalArbiter:
             return False, reason
 
         # 2. Conflict detection (5 min window, opposing action for same symbol)
-        bias_key = f"arbiter:bias:{symbol}"
-        raw_bias = await self._cache.get(bias_key)
         stored_action: str | None = None
         stored_conf: float = 0.0
         stored_strategy: str = "unknown"
@@ -293,3 +311,32 @@ class SignalArbiter:
         await self._cache.set(dedup_key, "1", ttl=_DEDUP_TTL_SECONDS)
 
         return True, "allowed"
+
+    def _state_unavailable(
+        self,
+        symbol: str,
+        canonical_action: str,
+        strategy_id: str,
+        correlation_id: str,
+        closing: bool,
+        exc: Exception,
+    ) -> tuple[bool, str]:
+        """petrosa-cio#406: without the dedup and conflict state, a new entry fails closed, like an unknown
+        drawdown (#398/#405). An absent key would have let a duplicate or a losing opposing signal through, so an
+        error must never read as one. Closes and reduce-only intents still pass: they only reduce exposure."""
+        if closing:
+            ARBITER_STATE_UNAVAILABLE.add(1, {"outcome": "passed_closing"})
+            reason = (
+                f"ARBITER_STATE_UNAVAILABLE: Redis unreachable ({exc}); closing intent {symbol} "
+                f"{canonical_action} from {strategy_id} passes without arbitration"
+            )
+            logger.warning(reason, extra={"correlation_id": correlation_id})
+            return True, reason
+        ARBITER_STATE_UNAVAILABLE.add(1, {"outcome": "refused"})
+        reason = (
+            f"ARBITER_STATE_UNAVAILABLE: Redis unreachable ({exc}); new entry {symbol} {canonical_action} "
+            f"from {strategy_id} refused until arbitration state is readable "
+            "(closes and reduce-only orders pass)"
+        )
+        logger.warning(reason, extra={"correlation_id": correlation_id})
+        return False, reason

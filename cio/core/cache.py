@@ -5,6 +5,13 @@ from redis.asyncio import Redis
 logger = logging.getLogger(__name__)
 
 
+class CacheUnavailable(Exception):
+    """Redis could not be read, even after the client's bounded retry (petrosa-cio#406).
+
+    Raised only by the strict reads. A caller that gates trading on cached state must not treat it as a miss.
+    """
+
+
 class AsyncRedisCache:
     """
     Async wrapper for Redis caching.
@@ -24,6 +31,20 @@ class AsyncRedisCache:
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
             return None
+
+    async def get_strict(self, key: str) -> str | None:
+        """Like ``get``, but a Redis error raises ``CacheUnavailable`` instead of looking like an absent key.
+
+        petrosa-cio#406: ``get`` returns None on an error, which an entry gate would read as "no prior signal"
+        (fail open). Gates use this read and decide themselves what an unreachable Redis means.
+        """
+        try:
+            value = await self.redis.get(key)
+        except Exception as e:
+            raise CacheUnavailable(f"{type(e).__name__}: {e}") from e
+        if value:
+            return value.decode("utf-8") if isinstance(value, bytes) else value
+        return None
 
     async def set(self, key: str, value: str, ttl: int = 900):
         """Stores a value in the cache with a TTL (default 15 mins)."""

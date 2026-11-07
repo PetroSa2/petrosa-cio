@@ -30,6 +30,7 @@ def _make_cache(store: dict | None = None) -> MagicMock:
         store[key] = value
 
     cache.get = AsyncMock(side_effect=_get)
+    cache.get_strict = AsyncMock(side_effect=_get)
     cache.set = AsyncMock(side_effect=_set)
     return cache
 
