@@ -32,6 +32,7 @@ from cio.models import (
 )
 from cio.models.decision import is_safe_default
 from cio.models.enums import RejectionSource
+from cio.models.net_ev import DrawdownState
 from cio.personas.action_classifier import PROMPT_ID as ACTION_PROMPT_ID
 from cio.personas.regime_analyst import PROMPT_ID as REGIME_PROMPT_ID
 from cio.personas.strategy_assessor import PROMPT_ID as STRATEGY_PROMPT_ID
@@ -40,6 +41,8 @@ from cio.personas.strategy_assessor import PROMPT_ID as STRATEGY_PROMPT_ID
 def _make_context() -> TriggerContext:
     return TriggerContext(
         correlation_id="test-persona-concurrency",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         trigger_type=TriggerType.TRADE_INTENT,
         strategy_id="test_strat",
         symbol="BTCUSDT",

@@ -52,6 +52,7 @@ async def test_full_nats_to_nats_loop(caplog):
         },
         "env_stats": {
             "global_drawdown_pct": 0.02,
+            "drawdown": {"from_peak_pct": 0.0},  # cio#398: a known drawdown
             "open_orders_global": 5,
             "open_orders_symbol": 0,
             "available_capital_usd": 50000.0,

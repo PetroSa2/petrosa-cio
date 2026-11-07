@@ -32,6 +32,7 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.net_ev import DrawdownState
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
 # stop 1.32% (the derived floor), target 1.98%: R 1.5, p_be about 0.44 with the fallback costs
@@ -57,6 +58,8 @@ def _context(
 ) -> TriggerContext:
     return TriggerContext(
         correlation_id="cid",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         source_subject="test",
         trigger_type=TriggerType.TRADE_INTENT,
         trigger_payload=PAYLOAD,

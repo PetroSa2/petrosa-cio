@@ -39,6 +39,7 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.net_ev import DrawdownState
 
 ENTRY = 100.0
 PAYLOAD = {"side": "BUY", "entry_price": ENTRY, "stop_loss": 97.0, "take_profit": 104.0}
@@ -68,6 +69,8 @@ def _context(
         slippage = SlippageEstimate(regime=dm_regime or "x", median_bp=3.0, count=50)
     return TriggerContext(
         correlation_id="cid",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         source_subject="test",
         trigger_type=TriggerType.TRADE_INTENT,
         trigger_payload=PAYLOAD if payload is None else payload,

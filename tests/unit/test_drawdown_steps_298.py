@@ -726,3 +726,39 @@ def test_closes_pass_during_a_halt_under_the_floor():
     result = CodeEngine.run(context)
     assert result.drawdown.action == "halt"
     assert result.hard_blocked is False
+
+
+# --- petrosa-cio#398: an unknown drawdown fails closed for new entries -------------------------
+
+
+@pytest.mark.parametrize("drawdown", [None, DrawdownState(from_peak=None)])
+def test_an_unknown_drawdown_blocks_new_entries(drawdown):
+    result = CodeEngine.run(_context(drawdown=drawdown, inputs=_inputs()))
+    assert result.hard_blocked is True
+    assert result.block_reason.startswith("drawdown_unavailable")
+    assert result.drawdown.reason == "drawdown_unavailable"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"action": "close", "entry_price": 100.0},
+        {"side": "close_short"},
+        {"side": "SELL", "reduce_only": True},
+    ],
+)
+def test_closes_and_reduce_only_orders_pass_with_an_unknown_drawdown(payload):
+    result = CodeEngine.run(_context(drawdown=None, inputs=_inputs(), payload=payload))
+    assert result.hard_blocked is False
+
+
+def test_log_only_mode_does_not_block_an_unknown_drawdown(monkeypatch):
+    monkeypatch.setenv("CIO_DRAWDOWN_MODE", "log_only")
+    result = CodeEngine.run(_context(drawdown=None, inputs=_inputs()))
+    assert result.hard_blocked is False
+    assert result.drawdown.reason == "drawdown_unavailable"  # still recorded
+
+
+def test_a_known_zero_drawdown_does_not_block():
+    result = CodeEngine.run(_context(drawdown=_dd(0.0), inputs=_inputs()))
+    assert not (result.block_reason or "").startswith("drawdown_")
