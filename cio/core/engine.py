@@ -196,6 +196,25 @@ class CodeEngine:
                 extra={"correlation_id": context.correlation_id},
             )
             return result
+        if (
+            drawdown.reason == "drawdown_unavailable"
+            and not closing
+            and drawdown_enforced()
+        ):
+            # petrosa-cio#398: an unknown drawdown fails closed for new entries, like a halt. Without the
+            # equity peak the drawdown steps can't be evaluated, so letting entries through would drop the
+            # guard without anyone deciding it (a re-base must be an audited decision, data-manager#856).
+            result.hard_blocked = True
+            result.block_reason = (
+                "drawdown_unavailable: tradeengine /state has no drawdown from the equity peak; "
+                "new entries blocked until it is known (closes and reduce-only orders pass)"
+            )
+            logger.warning(
+                "DRAWDOWN_UNAVAILABLE_BLOCK %s",
+                drawdown.model_dump_json(),
+                extra={"correlation_id": context.correlation_id},
+            )
+            return result
         if drawdown.action in ("reduce", "halt"):
             logger.warning(
                 "DRAWDOWN_STEP %s",

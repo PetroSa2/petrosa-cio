@@ -19,6 +19,7 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.net_ev import DrawdownState
 
 
 def build_test_context(
@@ -56,6 +57,8 @@ def build_test_context(
         )
     return TriggerContext(
         correlation_id="test",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         source_subject="test",
         trigger_type=TriggerType.TRADE_INTENT,
         trigger_payload={},

@@ -268,6 +268,7 @@ async def test_data_manager_payload_reaches_assessor_and_engine(caplog):
             source_context.risk_limits,
             {
                 "global_drawdown_pct": 0.0,
+                "drawdown": {"from_peak_pct": 0.0},  # cio#398: a known drawdown
                 "open_orders_global": 0,
                 "open_orders_symbol": 0,
                 "available_capital_usd": 10000.0,

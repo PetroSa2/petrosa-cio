@@ -1735,6 +1735,9 @@ class ContextBuilder:
                     "global_drawdown_pct": 0.0,
                     "open_orders_global": 0,
                     "available_capital_usd": 100000.0,
+                    # cio#398: the neutral QA context states a neutral drawdown explicitly, so an
+                    # unknown drawdown (which blocks new entries) never comes from this path.
+                    "drawdown": {"from_peak_pct": 0.0, "as_of": "qa_shadow_neutral"},
                 },
             )
         if gaps is not None:

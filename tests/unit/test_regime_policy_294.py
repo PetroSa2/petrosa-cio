@@ -29,6 +29,7 @@ from cio.models import (
     TriggerType,
     VolatilityLevel,
 )
+from cio.models.net_ev import DrawdownState
 from cio.models.regime import _map_confidence, regime_min_confidence
 
 NOW = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
@@ -60,6 +61,8 @@ def _regime(
 def _context(regime=None, slippage=None, wins=160, losses=40):
     return TriggerContext(
         correlation_id="cid",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         source_subject="test",
         trigger_type=TriggerType.TRADE_INTENT,
         trigger_payload=PAYLOAD,

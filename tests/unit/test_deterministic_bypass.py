@@ -23,6 +23,7 @@ from cio.models import (
     VolatilityLevel,
 )
 from cio.models.decision import DecisionResult
+from cio.models.net_ev import DrawdownState
 
 
 @pytest.mark.asyncio
@@ -48,6 +49,8 @@ async def test_orchestrator_deterministic_bypass():
             # Create a mock trigger context with ALL required fields
             context = TriggerContext(
                 correlation_id="test-bypass",
+                # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+                drawdown_state=DrawdownState(from_peak=0.0),
                 trigger_type=TriggerType.TRADE_INTENT,
                 strategy_id="test_strat",
                 symbol="BTCUSDT",
@@ -128,6 +131,8 @@ async def test_orchestrator_hard_block_with_bypass():
             orchestrator = Orchestrator()
             context = TriggerContext(
                 correlation_id="test-block",
+                # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+                drawdown_state=DrawdownState(from_peak=0.0),
                 trigger_type=TriggerType.TRADE_INTENT,
                 strategy_id="test_strat",
                 symbol="BTCUSDT",
@@ -180,6 +185,8 @@ def _make_bypass_context(regime_enum):
     """Helper: build a TriggerContext with the given regime for bypass tests."""
     return TriggerContext(
         correlation_id="test-regime-bypass",
+        # cio#398: a known drawdown (0 from the peak); an unknown one blocks new entries
+        drawdown_state=DrawdownState(from_peak=0.0),
         trigger_type=TriggerType.TRADE_INTENT,
         strategy_id="test_strat",
         symbol="BTCUSDT",
