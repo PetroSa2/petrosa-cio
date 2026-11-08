@@ -9,6 +9,7 @@ from nats.aio.msg import Msg
 from cio.core import stage_timing
 from cio.core.arbiter import SignalArbiter
 from cio.core.context_builder import ContextBuilder
+from cio.core.drawdown import is_closing_intent
 from cio.core.router import OutputRouter
 from cio.models import DecisionResult, TriggerContext, TriggerType
 
@@ -110,6 +111,8 @@ class NATSListener:
                 confidence=confidence,
                 strategy_id=strategy_id_raw,
                 correlation_id=correlation_id,
+                # petrosa-cio#406: if Redis is unreachable, closes and reduce-only intents still pass.
+                closing=is_closing_intent(payload),
             )
             if not allowed:
                 logger.info(

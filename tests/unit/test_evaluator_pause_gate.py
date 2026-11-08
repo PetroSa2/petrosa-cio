@@ -158,6 +158,7 @@ async def test_arbiter_passes_through_when_ingest_healthy(subscriber, mock_redis
         _msg("evaluator.ingest.verdict", {"verdict": HEALTHY, "reason": "ok"})
     )
     mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
     allowed, _ = await arbiter.check(
@@ -175,6 +176,7 @@ async def test_arbiter_passes_through_when_ingest_healthy(subscriber, mock_redis
 async def test_arbiter_passes_through_when_no_subscriber_wired(mock_redis_cache):
     """Legacy/no-eval-subscriber path must not break — ``None`` is allowed."""
     mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=None)
     allowed, _ = await arbiter.check(
@@ -311,6 +313,7 @@ async def test_arbiter_lax_policy_allows_on_strategy_fidelity_unhealthy(
         )
     )
     mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
     allowed, _ = await arbiter.check(
@@ -335,6 +338,7 @@ async def test_arbiter_lax_policy_allows_on_audit_unhealthy(
         _msg("evaluator.audit.verdict", {"verdict": UNHEALTHY, "reason": "gap"})
     )
     mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
     allowed, _ = await arbiter.check(
@@ -516,6 +520,8 @@ async def test_arbiter_allows_unrelated_symbol_when_execution_fault_scoped(
     from unittest.mock import AsyncMock
 
     mock_redis_cache.get = AsyncMock(return_value=None)
+
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     await subscriber._handle_message(
         _msg(
@@ -584,6 +590,8 @@ async def test_ac4_execution_pause_resume_full_cycle(subscriber, mock_redis_cach
     from unittest.mock import AsyncMock
 
     mock_redis_cache.get = AsyncMock(return_value=None)
+
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     mock_redis_cache.set = AsyncMock()
     arbiter = SignalArbiter(cache=mock_redis_cache, evaluator_subscriber=subscriber)
 
@@ -615,6 +623,7 @@ async def test_ac4_execution_pause_resume_full_cycle(subscriber, mock_redis_cach
     )
     assert subscriber.is_paused("execution") is False
     mock_redis_cache.get = AsyncMock(return_value=None)
+    mock_redis_cache.get_strict = AsyncMock(return_value=None)
     allowed, _ = await arbiter.check("BTCUSDT", "buy", 0.9, "s1", "c3")
     assert allowed is True
 

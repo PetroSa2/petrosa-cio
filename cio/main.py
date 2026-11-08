@@ -121,16 +121,48 @@ NATS_RECONNECT_TIME_WAIT_SECONDS = int(
 )
 REDIS_STARTUP_TIMEOUT_SECONDS = float(os.getenv("REDIS_STARTUP_TIMEOUT_SECONDS", "5"))
 REDIS_SOCKET_TIMEOUT_SECONDS = float(os.getenv("REDIS_SOCKET_TIMEOUT_SECONDS", "5"))
+# petrosa-cio#406: after a redis restart the pooled connections are dead. Without a retry, redis-py surfaces the
+# first command on each as an error ("Connection lost"). One short retry on a fresh connection replaces a stale
+# connection transparently. It is deliberately bounded (labelled fallbacks, env-overridable), so a real outage
+# fails fast and the arbiter fails closed instead of waiting on a long reconnect.
+REDIS_COMMAND_RETRIES = int(os.getenv("REDIS_COMMAND_RETRIES", "1"))
+REDIS_RETRY_BACKOFF_BASE_SECONDS = float(
+    os.getenv("REDIS_RETRY_BACKOFF_BASE_SECONDS", "0.05")
+)
+REDIS_RETRY_BACKOFF_CAP_SECONDS = float(
+    os.getenv("REDIS_RETRY_BACKOFF_CAP_SECONDS", "0.5")
+)
+# A pooled connection idle longer than this is PINGed before use, so a stale one is found before a real command.
+REDIS_HEALTH_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("REDIS_HEALTH_CHECK_INTERVAL_SECONDS", "30")
+)
+
+
+def _redis_client_kwargs() -> dict[str, Any]:
+    from redis.asyncio.retry import Retry
+    from redis.backoff import ExponentialBackoff
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    return {
+        "socket_connect_timeout": REDIS_SOCKET_TIMEOUT_SECONDS,
+        "socket_timeout": REDIS_SOCKET_TIMEOUT_SECONDS,
+        "health_check_interval": REDIS_HEALTH_CHECK_INTERVAL_SECONDS,
+        "retry": Retry(
+            ExponentialBackoff(
+                cap=REDIS_RETRY_BACKOFF_CAP_SECONDS,
+                base=REDIS_RETRY_BACKOFF_BASE_SECONDS,
+            ),
+            REDIS_COMMAND_RETRIES,
+        ),
+        "retry_on_error": [RedisConnectionError, RedisTimeoutError],
+    }
 
 
 async def _connect_redis(redis_url: str):
     import redis.asyncio as redis_asyncio
 
-    redis_client = redis_asyncio.from_url(
-        redis_url,
-        socket_connect_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
-        socket_timeout=REDIS_SOCKET_TIMEOUT_SECONDS,
-    )
+    redis_client = redis_asyncio.from_url(redis_url, **_redis_client_kwargs())
     try:
         await asyncio.wait_for(
             redis_client.ping(), timeout=REDIS_STARTUP_TIMEOUT_SECONDS
