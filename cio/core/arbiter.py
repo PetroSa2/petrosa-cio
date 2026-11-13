@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import os
 import time
 import uuid
@@ -78,7 +79,7 @@ _ARBITER_BREAKER_FALLBACK_SECONDS = 5.0
 
 
 def _breaker_seconds_from_env() -> float:
-    """Return the labelled Redis breaker window, with a safe fallback for invalid values."""
+    """Return the labelled Redis breaker window, falling back for invalid values."""
     try:
         value = float(
             os.getenv(
@@ -88,7 +89,11 @@ def _breaker_seconds_from_env() -> float:
         )
     except ValueError:
         return _ARBITER_BREAKER_FALLBACK_SECONDS
-    return value if value >= 0 else _ARBITER_BREAKER_FALLBACK_SECONDS
+    return (
+        value
+        if math.isfinite(value) and value >= 0
+        else _ARBITER_BREAKER_FALLBACK_SECONDS
+    )
 
 
 CIO_ARBITER_BREAKER_SECONDS = _breaker_seconds_from_env()

@@ -180,12 +180,7 @@ async def test_breaker_suppresses_redis_reads_and_recovers_after_window(monkeypa
     opens = MagicMock()
     cache = MagicMock()
     cache.get_strict = AsyncMock(
-        side_effect=[
-            CacheUnavailable("connection lost"),
-            CacheUnavailable("still unavailable"),
-            None,
-            None,
-        ]
+        side_effect=[CacheUnavailable("connection lost"), None, None, None, None]
     )
     cache.set = AsyncMock()
     monkeypatch.setattr(arbiter_module, "ARBITER_STATE_UNAVAILABLE", counter)
@@ -194,34 +189,71 @@ async def test_breaker_suppresses_redis_reads_and_recovers_after_window(monkeypa
     arbiter._clock = lambda: now[0]
     arbiter._breaker_seconds = 5.0
 
-    assert (await arbiter.check("BCHUSDT", "buy", 0.9, "s", "cid1"))[0] is False
-    first_reads = cache.get_strict.await_count
-    assert first_reads == 1
-
-    allowed, reason = await arbiter.check("BCHUSDT", "buy", 0.9, "s", "cid2")
+    allowed, reason = await arbiter.check("BCHUSDT", "buy", 0.9, "s", "cid1")
     assert allowed is False
-    assert "circuit breaker open" in reason
-    assert cache.get_strict.await_count == first_reads
+    assert "refused" in reason
+    assert arbiter._breaker_open_until == 105.0
+    assert cache.get_strict.await_count == 1
 
-    allowed, reason = await arbiter.check(
-        "BCHUSDT", "close_long", 0.9, "s", "cid3", closing=True
-    )
-    assert allowed is True
-    assert "circuit breaker open" in reason
-    assert cache.get_strict.await_count == first_reads
+    for cid, closing in (("cid2", False), ("cid3", True)):
+        allowed, reason = await arbiter.check(
+            "BCHUSDT",
+            "close_long" if closing else "buy",
+            0.9,
+            "s",
+            cid,
+            closing=closing,
+        )
+        assert allowed is closing
+        assert "circuit breaker open" in reason
+        assert arbiter._breaker_open_until == 105.0
+        assert cache.get_strict.await_count == 1
 
-    now[0] += 5.0
+    now[0] = 104.999
     allowed, reason = await arbiter.check("BCHUSDT", "sell", 0.9, "s", "cid4")
     assert allowed is False
-    assert "still unavailable" in reason
-    assert cache.get_strict.await_count == first_reads + 1
-    assert opens.add.call_count == 2
+    assert "circuit breaker open" in reason
+    assert cache.get_strict.await_count == 1
 
-    now[0] += 5.0
+    now[0] = 105.0
     allowed, reason = await arbiter.check("BCHUSDT", "sell", 0.9, "s", "cid5")
     assert (allowed, reason) == (True, "allowed")
-    assert cache.get_strict.await_count == first_reads + 3
-    assert cache.set.await_count == 2
+    assert arbiter._breaker_open_until is None
+    assert cache.get_strict.await_count == 3
+    assert opens.add.call_count == 1
+
+    # After a successful half-open read, ordinary arbitration still reads Redis per signal.
+    allowed, reason = await arbiter.check("ETHUSDT", "buy", 0.9, "s", "cid6")
+    assert (allowed, reason) == (True, "allowed")
+    assert arbiter._breaker_open_until is None
+    assert cache.get_strict.await_count == 5
+    opens.add.assert_called_once_with(1)
+
+
+@pytest.mark.asyncio
+async def test_breaker_reopens_when_half_open_probe_fails(monkeypatch):
+    now = [10.0]
+    opens = MagicMock()
+    cache = MagicMock()
+    cache.get_strict = AsyncMock(
+        side_effect=[CacheUnavailable("down"), CacheUnavailable("still down")]
+    )
+    cache.set = AsyncMock()
+    monkeypatch.setattr(arbiter_module, "ARBITER_STATE_UNAVAILABLE", MagicMock())
+    monkeypatch.setattr(arbiter_module, "CIO_ARBITER_BREAKER_OPEN_TOTAL", opens)
+    arbiter = SignalArbiter(cache)
+    arbiter._clock = lambda: now[0]
+    arbiter._breaker_seconds = 5.0
+
+    assert (await arbiter.check("BTCUSDT", "buy", 0.9, "s", "cid1"))[0] is False
+    assert arbiter._breaker_open_until == 15.0
+    now[0] = 15.0
+    allowed, reason = await arbiter.check("BTCUSDT", "buy", 0.9, "s", "cid2")
+    assert allowed is False
+    assert "still down" in reason
+    assert arbiter._breaker_open_until == 20.0
+    assert cache.get_strict.await_count == 2
+    opens.add.assert_called_with(1)
     assert opens.add.call_count == 2
 
 
@@ -237,8 +269,10 @@ async def test_breaker_allows_only_one_half_open_redis_probe(monkeypatch):
         reads[0] += 1
         if reads[0] == 1:
             raise CacheUnavailable("connection lost")
-        opened.set()
-        await release.wait()
+        if reads[0] == 2:
+            opened.set()
+            await release.wait()
+            return None
         return None
 
     cache.get_strict = AsyncMock(side_effect=read)
@@ -250,15 +284,19 @@ async def test_breaker_allows_only_one_half_open_redis_probe(monkeypatch):
     arbiter._breaker_seconds = 5.0
 
     assert (await arbiter.check("BCHUSDT", "buy", 0.9, "s", "cid1"))[0] is False
-    now[0] += 5.0
+    assert arbiter._breaker_open_until == 105.0
+    now[0] = 105.0
     first = asyncio.create_task(arbiter.check("BCHUSDT", "buy", 0.9, "s", "cid2"))
     await opened.wait()
+    assert arbiter._breaker_open_until is None
     second = asyncio.create_task(arbiter.check("BCHUSDT", "sell", 0.9, "s", "cid3"))
     await asyncio.sleep(0)
     assert cache.get_strict.await_count == 2
     release.set()
     assert (await first)[0] is True
     assert (await second)[0] is True
+    assert arbiter._breaker_open_until is None
+    assert cache.get_strict.await_count == 5
 
 
 @pytest.mark.asyncio
@@ -279,7 +317,16 @@ async def test_healthy_redis_never_opens_breaker(monkeypatch):
 
 @pytest.mark.parametrize(
     ("env_value", "expected"),
-    [(None, 5.0), ("2.5", 2.5), ("invalid", 5.0), ("-1", 5.0)],
+    [
+        (None, 5.0),
+        ("2.5", 2.5),
+        ("0", 0.0),
+        ("invalid", 5.0),
+        ("-1", 5.0),
+        ("nan", 5.0),
+        ("inf", 5.0),
+        ("-inf", 5.0),
+    ],
 )
 def test_breaker_window_has_labelled_env_fallback(monkeypatch, env_value, expected):
     if env_value is None:
