@@ -1,7 +1,12 @@
 """Signal arbitration layer for cross-strategy deduplication and conflict resolution."""
 
+import asyncio
 import logging
+import math
+import os
+import time
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol
 
 from cio.core.cache import AsyncRedisCache, CacheUnavailable
@@ -69,6 +74,35 @@ def _normalise_action(raw: str) -> str:
     return _SIDE_NORMALISE.get(raw.lower(), raw.lower())
 
 
+# Labelled fallback; override with CIO_ARBITER_BREAKER_SECONDS.
+_ARBITER_BREAKER_FALLBACK_SECONDS = 5.0
+
+
+def _breaker_seconds_from_env() -> float:
+    """Return the labelled Redis breaker window, falling back for invalid values."""
+    try:
+        value = float(
+            os.getenv(
+                "CIO_ARBITER_BREAKER_SECONDS",
+                str(_ARBITER_BREAKER_FALLBACK_SECONDS),
+            )
+        )
+    except ValueError:
+        return _ARBITER_BREAKER_FALLBACK_SECONDS
+    return (
+        value
+        if math.isfinite(value) and value >= 0
+        else _ARBITER_BREAKER_FALLBACK_SECONDS
+    )
+
+
+CIO_ARBITER_BREAKER_SECONDS = _breaker_seconds_from_env()
+CIO_ARBITER_BREAKER_OPEN_TOTAL = meter.create_counter(
+    "cio_arbiter_breaker_open_total",
+    description="Number of times the Redis arbiter circuit breaker opens",
+)
+
+
 class SignalArbiter:
     """
     Cross-strategy signal arbitration layer.
@@ -118,6 +152,56 @@ class SignalArbiter:
         self._context_builder = context_builder
         self._enforcer = enforcer
         self._router = router
+
+        self._breaker_open_until: float | None = None
+        self._breaker_seconds = CIO_ARBITER_BREAKER_SECONDS
+        self._clock: Callable[[], float] = time.monotonic
+        # Keep the half-open probe single-flight across concurrent callbacks.
+        self._breaker_lock = asyncio.Lock()
+
+    def _open_breaker(self, now: float) -> None:
+        self._breaker_open_until = now + self._breaker_seconds
+        CIO_ARBITER_BREAKER_OPEN_TOTAL.add(1)
+
+    def _strict_state_unavailable(
+        self,
+        now: float,
+        symbol: str,
+        canonical_action: str,
+        strategy_id: str,
+        correlation_id: str,
+        closing: bool,
+        exc: Exception,
+    ) -> tuple[bool, str]:
+        self._open_breaker(now)
+        return self._state_unavailable(
+            symbol, canonical_action, strategy_id, correlation_id, closing, exc
+        )
+
+    def _breaker_unavailable(
+        self,
+        symbol: str,
+        canonical_action: str,
+        strategy_id: str,
+        correlation_id: str,
+        closing: bool,
+    ) -> tuple[bool, str]:
+        if closing:
+            ARBITER_STATE_UNAVAILABLE.add(1, {"outcome": "passed_closing"})
+            reason = (
+                f"ARBITER_STATE_UNAVAILABLE: circuit breaker open; closing intent {symbol} "
+                f"{canonical_action} from {strategy_id} passes without arbitration"
+            )
+            logger.warning(reason, extra={"correlation_id": correlation_id})
+            return True, reason
+        ARBITER_STATE_UNAVAILABLE.add(1, {"outcome": "refused"})
+        reason = (
+            f"ARBITER_STATE_UNAVAILABLE: circuit breaker open; new entry {symbol} "
+            f"{canonical_action} from {strategy_id} refused until arbitration state is readable "
+            "(closes and reduce-only orders pass)"
+        )
+        logger.warning(reason, extra={"correlation_id": correlation_id})
+        return False, reason
 
     async def run_scheduled_review(self, key: "PositionKey", reason: str) -> None:
         """Runner callback for `PositionReviewLoop` (P1.4-AC7, #135/#175).
@@ -206,13 +290,9 @@ class SignalArbiter:
         # to suppress. Policy is per-subsystem: strict = suppress; lax = warn only.
         if self._evaluator_subscriber is not None:
             for guarded in _PAUSE_GUARD_SUBSYSTEMS:
-                # #193: pass the incoming signal's symbol so a fault the
-                # publisher scoped to a different symbol (e.g. one stuck
-                # position) does not halt decisioning on this one. When
-                # the publisher sent no scope (or this evaluator doesn't
-                # know), is_paused() stays conservative and returns True
-                # exactly like before — the gate is never weakened, only
-                # narrowed when the producer opts in.
+                # #193: pass the incoming signal's symbol so a fault the publisher
+                # scoped to a different symbol does not halt decisioning on this one.
+                # When the publisher sent no scope, is_paused stays conservative.
                 if self._evaluator_subscriber.is_paused(guarded, symbol=symbol):
                     policy = self._pause_policy.get(guarded, "strict")
                     if policy not in ("strict", "lax"):
@@ -247,17 +327,32 @@ class SignalArbiter:
             return True, reason
 
         canonical_action = _normalise_action(action)
+        async with self._breaker_lock:
+            now = self._clock()
+            if self._breaker_open_until is not None:
+                if now < self._breaker_open_until:
+                    return self._breaker_unavailable(
+                        symbol, canonical_action, strategy_id, correlation_id, closing
+                    )
+                self._breaker_open_until = None
 
-        # 1. Deduplication guard (60 s window, same symbol + canonical action)
-        dedup_key = f"arbiter:dedup:{symbol}:{canonical_action}"
-        bias_key = f"arbiter:bias:{symbol}"
-        try:
-            dedup_hit = await self._cache.get_strict(dedup_key)
-            raw_bias = None if dedup_hit else await self._cache.get_strict(bias_key)
-        except CacheUnavailable as exc:
-            return self._state_unavailable(
-                symbol, canonical_action, strategy_id, correlation_id, closing, exc
-            )
+            # 1. Deduplication guard (60 s window, same symbol + canonical action)
+            dedup_key = f"arbiter:dedup:{symbol}:{canonical_action}"
+            bias_key = f"arbiter:bias:{symbol}"
+            try:
+                dedup_hit = await self._cache.get_strict(dedup_key)
+                raw_bias = None if dedup_hit else await self._cache.get_strict(bias_key)
+            except CacheUnavailable as exc:
+                return self._strict_state_unavailable(
+                    now,
+                    symbol,
+                    canonical_action,
+                    strategy_id,
+                    correlation_id,
+                    closing,
+                    exc,
+                )
+
         if dedup_hit:
             reason = (
                 f"SIGNAL_DEDUPLICATED: {symbol} {canonical_action} already published "
@@ -278,14 +373,15 @@ class SignalArbiter:
             except (ValueError, AttributeError):
                 logger.warning(
                     f"ARBITER_BIAS_CORRUPT: malformed bias value for {symbol}: {raw_bias!r}. "
-                    "Resetting bias and allowing signal through.",
+                    "Resetting bias and allowing the incoming signal through.",
                     extra={"correlation_id": correlation_id},
                 )
-                await self._cache.set(bias_key, "", ttl=1)  # expire immediately
+                # Expire malformed arbitration state before recording a fresh bias.
+                await self._cache.set(bias_key, "", ttl=1)
                 stored_action = None
 
         if stored_action and stored_action != canonical_action:
-            # Opposing signal detected within the conflict window
+            # Opposing signal detected within the conflict window.
             if confidence <= stored_conf:
                 reason = (
                     f"signal_conflict_resolved: {symbol} {canonical_action} from "
@@ -296,7 +392,7 @@ class SignalArbiter:
                 logger.info(reason, extra={"correlation_id": correlation_id})
                 return False, reason
             else:
-                # Incoming signal wins — overwrite stored bias
+                # Incoming signal wins and replaces the stored bias.
                 logger.info(
                     f"signal_conflict_resolved: {symbol} {canonical_action} from "
                     f"{strategy_id} (confidence={confidence:.3f}) wins over "
@@ -307,8 +403,13 @@ class SignalArbiter:
 
         # 3. Signal is allowed — record state in Redis
         bias_value = f"{canonical_action}:{confidence:.6f}:{strategy_id}"
-        await self._cache.set(bias_key, bias_value, ttl=_CONFLICT_TTL_SECONDS)
-        await self._cache.set(dedup_key, "1", ttl=_DEDUP_TTL_SECONDS)
+        try:
+            await self._cache.set(bias_key, bias_value, ttl=_CONFLICT_TTL_SECONDS)
+            await self._cache.set(dedup_key, "1", ttl=_DEDUP_TTL_SECONDS)
+        except CacheUnavailable as exc:
+            return self._strict_state_unavailable(
+                now, symbol, canonical_action, strategy_id, correlation_id, closing, exc
+            )
 
         return True, "allowed"
 
