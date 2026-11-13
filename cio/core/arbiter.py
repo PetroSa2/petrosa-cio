@@ -163,6 +163,21 @@ class SignalArbiter:
         self._breaker_open_until = now + self._breaker_seconds
         CIO_ARBITER_BREAKER_OPEN_TOTAL.add(1)
 
+    def _strict_state_unavailable(
+        self,
+        now: float,
+        symbol: str,
+        canonical_action: str,
+        strategy_id: str,
+        correlation_id: str,
+        closing: bool,
+        exc: Exception,
+    ) -> tuple[bool, str]:
+        self._open_breaker(now)
+        return self._state_unavailable(
+            symbol, canonical_action, strategy_id, correlation_id, closing, exc
+        )
+
     def _breaker_unavailable(
         self,
         symbol: str,
@@ -328,9 +343,14 @@ class SignalArbiter:
                 dedup_hit = await self._cache.get_strict(dedup_key)
                 raw_bias = None if dedup_hit else await self._cache.get_strict(bias_key)
             except CacheUnavailable as exc:
-                self._open_breaker(now)
-                return self._state_unavailable(
-                    symbol, canonical_action, strategy_id, correlation_id, closing, exc
+                return self._strict_state_unavailable(
+                    now,
+                    symbol,
+                    canonical_action,
+                    strategy_id,
+                    correlation_id,
+                    closing,
+                    exc,
                 )
 
         if dedup_hit:
@@ -383,8 +403,13 @@ class SignalArbiter:
 
         # 3. Signal is allowed — record state in Redis
         bias_value = f"{canonical_action}:{confidence:.6f}:{strategy_id}"
-        await self._cache.set(bias_key, bias_value, ttl=_CONFLICT_TTL_SECONDS)
-        await self._cache.set(dedup_key, "1", ttl=_DEDUP_TTL_SECONDS)
+        try:
+            await self._cache.set(bias_key, bias_value, ttl=_CONFLICT_TTL_SECONDS)
+            await self._cache.set(dedup_key, "1", ttl=_DEDUP_TTL_SECONDS)
+        except CacheUnavailable as exc:
+            return self._strict_state_unavailable(
+                now, symbol, canonical_action, strategy_id, correlation_id, closing, exc
+            )
 
         return True, "allowed"
 

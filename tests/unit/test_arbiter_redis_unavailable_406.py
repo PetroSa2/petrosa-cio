@@ -337,6 +337,64 @@ def test_breaker_window_has_labelled_env_fallback(monkeypatch, env_value, expect
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed_write", [1, 2])
+@pytest.mark.parametrize("closing", [False, True])
+async def test_unavailable_redis_write_reopens_breaker_and_preserves_intent_safety(
+    monkeypatch, failed_write, closing
+):
+    now = [20.0]
+    unavailable = MagicMock()
+    opens = MagicMock()
+    cache = MagicMock()
+    cache.get_strict = AsyncMock(return_value=None)
+    writes = [0]
+
+    async def write(key: str, value: str, ttl: int = 900):
+        writes[0] += 1
+        if writes[0] == failed_write:
+            raise CacheUnavailable("write connection lost")
+
+    cache.set = AsyncMock(side_effect=write)
+    monkeypatch.setattr(arbiter_module, "ARBITER_STATE_UNAVAILABLE", unavailable)
+    monkeypatch.setattr(arbiter_module, "CIO_ARBITER_BREAKER_OPEN_TOTAL", opens)
+    arbiter = SignalArbiter(cache)
+    arbiter._clock = lambda: now[0]
+    arbiter._breaker_seconds = 5.0
+    action = "close_long" if closing else "buy"
+
+    allowed, reason = await arbiter.check(
+        "BTCUSDT", action, 0.9, "s", "write-failure", closing=closing
+    )
+
+    assert allowed is closing
+    assert "Redis unreachable (write connection lost)" in reason
+    outcome = "passed_closing" if closing else "refused"
+    unavailable.add.assert_called_once_with(1, {"outcome": outcome})
+    opens.add.assert_called_once_with(1)
+    assert arbiter._breaker_open_until == 25.0
+    assert writes[0] == failed_write
+
+    now[0] = 24.999
+    allowed, reason = await arbiter.check(
+        "BTCUSDT", action, 0.9, "s", "breaker-open", closing=closing
+    )
+    assert allowed is closing
+    assert "circuit breaker open" in reason
+    assert cache.get_strict.await_count == 2
+    assert writes[0] == failed_write
+    unavailable.add.assert_called_with(1, {"outcome": outcome})
+    assert unavailable.add.call_count == 2
+
+    now[0] = 25.0
+    allowed, reason = await arbiter.check("ETHUSDT", "sell", 0.9, "s", "recovered")
+    assert (allowed, reason) == (True, "allowed")
+    assert arbiter._breaker_open_until is None
+    assert cache.get_strict.await_count == 4
+    assert writes[0] == failed_write + 2
+    assert opens.add.call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_unreachable_redis_lets_a_closing_intent_through(monkeypatch):
     counter = MagicMock()
     monkeypatch.setattr(arbiter_module, "ARBITER_STATE_UNAVAILABLE", counter)
