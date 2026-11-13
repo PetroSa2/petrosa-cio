@@ -59,13 +59,13 @@ class NATSListener:
         Core message handler.
         Extracts correlation_id and triggers the reasoning loop.
         """
-        # 1. Extract Correlation ID from headers or generate new one
+        # 1. Extract Correlation ID from headers or generate new one.
         correlation_id = msg.headers.get("correlation_id") if msg.headers else None
         if not correlation_id:
             correlation_id = uuid.uuid4().hex
             logger.debug(f"No correlation_id in headers. Generated: {correlation_id}")
 
-        # 2. Parse Payload
+        # 2. Parse payload.
         try:
             payload_raw = msg.data.decode()
             payload = json.loads(payload_raw)
@@ -84,6 +84,7 @@ class NATSListener:
             )
             return
 
+        stage_timing.begin()
         # 3. Signal Arbitration (dedup + conflict resolution)
         if self.arbiter:
             symbol = payload.get("symbol") or ""
@@ -105,32 +106,32 @@ class NATSListener:
             strategy_id_raw = payload.get("strategy_id") or payload.get(
                 "strategy", "unknown"
             )
-            allowed, arb_reason = await self.arbiter.check(
-                symbol=symbol,
-                action=action,
-                confidence=confidence,
-                strategy_id=strategy_id_raw,
-                correlation_id=correlation_id,
-                # petrosa-cio#406: if Redis is unreachable, closes and reduce-only intents still pass.
-                closing=is_closing_intent(payload),
-            )
+            with stage_timing.stage("arbiter"):
+                allowed, arb_reason = await self.arbiter.check(
+                    symbol=symbol,
+                    action=action,
+                    confidence=confidence,
+                    strategy_id=strategy_id_raw,
+                    correlation_id=correlation_id,
+                    # petrosa-cio#406: if Redis is unreachable, closes and reduce-only intents still pass.
+                    closing=is_closing_intent(payload),
+                )
             if not allowed:
                 logger.info(
-                    f"ARBITER_SUPPRESSED: {arb_reason}",
+                    "ARBITER_SUPPRESSED: %s arbiter=%s",
+                    arb_reason,
+                    stage_timing.summary(),
                     extra={"correlation_id": correlation_id},
                 )
                 return
 
         # 4. Assemble Context
-        stage_timing.begin()
         decision_id = uuid.uuid4().hex
-        # petrosa_k8s#1127: generate a synthetic position_id at admission
-        # time so every position gets a unique identifier. The trade engine
-        # echoes this back as client_order_id on position updates; the CIO
-        # listener maps it back to the in-position tracking dict.
+        # petrosa_k8s#1127: generate a synthetic position_id at admission time so
+        # tradeengine can echo it as client_order_id for CIO position correlation.
         position_id = uuid.uuid4().hex[:16]
         try:
-            # For trade.intent.*, we assume TriggerType.TRADE_INTENT
+            # For trade.intent.*, we assume TriggerType.TRADE_INTENT.
             with stage_timing.stage("context"):
                 context = await self.context_builder.build(
                     correlation_id=correlation_id,
@@ -139,7 +140,6 @@ class NATSListener:
                     trigger_type=TriggerType.TRADE_INTENT,
                     payload=payload,
                 )
-            # Attach the position_id to the assembled context
             context.position_id = position_id
         except Exception as e:
             logger.error(
@@ -148,7 +148,7 @@ class NATSListener:
             )
             return
 
-        # 5. Run NurseEnforcer (with Timeout Guard)
+        # 5. Run NurseEnforcer with a timeout guard.
         try:
             with stage_timing.stage("decision"):
                 decision = await self.enforcer.audit(context)
@@ -159,7 +159,7 @@ class NATSListener:
             )
             return
 
-        # 6. Route Output
+        # 6. Route output.
         try:
             with stage_timing.stage("route"):
                 await self.router.route(context, decision)

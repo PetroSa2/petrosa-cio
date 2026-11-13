@@ -21,10 +21,8 @@ async def test_full_nats_to_nats_loop(caplog):
     """
 
     caplog.set_level(logging.INFO)
-    # 1. Setup Mocks
     mock_nc = AsyncMock()
 
-    # Define the mock data payloads
     regime_data = {
         "pair": "BTCUSDT",
         "metric": "regime",
@@ -52,7 +50,7 @@ async def test_full_nats_to_nats_loop(caplog):
         },
         "env_stats": {
             "global_drawdown_pct": 0.02,
-            "drawdown": {"from_peak_pct": 0.0},  # cio#398: a known drawdown
+            "drawdown": {"from_peak_pct": 0.0},
             "open_orders_global": 5,
             "open_orders_symbol": 0,
             "available_capital_usd": 50000.0,
@@ -62,8 +60,6 @@ async def test_full_nats_to_nats_loop(caplog):
     strategy_data = {
         "stats": {
             "win_rate": 0.65,
-            # the closed rounds behind the win rate: without them the net-EV gate has no evidence and the
-            # order is a cold-start probe (petrosa-cio#307)
             "wins": 130,
             "losses": 70,
             "win_rate_delta": 0.05,
@@ -78,7 +74,6 @@ async def test_full_nats_to_nats_loop(caplog):
         },
     }
 
-    # Helper to create a mock response
     def create_mock_response(json_data):
         m = MagicMock(spec=httpx.Response)
         m.status_code = 200
@@ -86,7 +81,6 @@ async def test_full_nats_to_nats_loop(caplog):
         m.raise_for_status.return_value = None
         return m
 
-    # Mock the AsyncClient.get method
     async def mock_get(url, **kwargs):
         url_str = str(url)
         if "analysis/regime" in url_str:
@@ -96,16 +90,12 @@ async def test_full_nats_to_nats_loop(caplog):
         if "analysis/performance" in url_str:
             return create_mock_response(strategy_data)
         if "config/strategies" in url_str:
-            # Wrap parameters for strategy DNA endpoint
             return create_mock_response({"parameters": strategy_data["defaults"]})
         return create_mock_response({})
 
-    # 2. Instantiate the full stack with mocked environment
     mock_cache = MagicMock()
     mock_cache.get = AsyncMock(return_value=None)
     mock_cache.set = AsyncMock()
-    # #199: the context-completeness gate calls cache.delete() on every
-    # healthy cycle to clear a stale streak counter — must be awaitable.
     mock_cache.delete = AsyncMock()
 
     with patch.dict("os.environ", {"LLM_PROVIDER": "mock", "DRY_RUN": "false"}):
@@ -126,15 +116,17 @@ async def test_full_nats_to_nats_loop(caplog):
                 ta_bot_url="http://ta-bot",
                 realtime_strategies_url="http://realtime",
             )
+            mock_arbiter = MagicMock()
+            mock_arbiter.check = AsyncMock(return_value=(True, "allowed"))
 
             listener = NATSListener(
                 nats_client=mock_nc,
                 enforcer=enforcer,
                 context_builder=builder,
                 router=router,
+                arbiter=mock_arbiter,
             )
 
-            # 3. Create a dummy NATS message
             mock_msg = MagicMock()
             mock_msg.subject = "cio.intent.trading.momentum_v1"
             mock_msg.data = json.dumps(
@@ -151,29 +143,21 @@ async def test_full_nats_to_nats_loop(caplog):
             ).encode()
             mock_msg.headers = {"correlation_id": "test-loop-id"}
 
-            # 4. Execute the loop via the listener's handler
             await listener._handle_message(mock_msg)
+            mock_arbiter.check.assert_awaited_once()
 
-            # petrosa-cio#312: the decision line carries the elapsed ms of each stage
             timing = next(
                 r.getMessage()
                 for r in caplog.records
                 if "DECISION_TIMING" in r.getMessage()
             )
             assert (
-                "stages=context=" in timing and "gate=" in timing and "route=" in timing
+                "stages=arbiter=" in timing
+                and "context=" in timing
+                and "gate=" in timing
+                and "route=" in timing
             )
 
-            # 5. Assertions
-            # Verify NATS publish call set.
-            #   1) Legacy signal       (signals.trading.<strategy_id>)
-            #   2) Decision audit copy (cio.decision.audit.<action>, P7.1 / #610)
-            #
-            # petrosa-cio#215: this used to also assert on `trade.execute.<sid>`
-            # (the "Modern decision" path) and `cio.context.gap.<surface>` —
-            # both had zero subscribers anywhere in the ecosystem and were
-            # removed from OutputRouter.route(). See the router docstring and
-            # test_router_context_gap_publish.py for the removal rationale.
             published_subjects = [c.args[0] for c in mock_nc.publish.call_args_list]
             assert "signals.trading.momentum_v1" in published_subjects
             assert "cio.decision.audit.execute" in published_subjects
@@ -182,7 +166,6 @@ async def test_full_nats_to_nats_loop(caplog):
             assert mock_nc.publish.call_count == 2
             assert orchestrator.run.await_count == 1
 
-            # Check Legacy Call (signals.trading.<strategy_id> — matches tradeengine signals.trading.>)
             legacy_call = next(
                 c
                 for c in mock_nc.publish.call_args_list
@@ -190,11 +173,8 @@ async def test_full_nats_to_nats_loop(caplog):
             )
             legacy_payload = json.loads(legacy_call.args[1].decode())
             assert legacy_payload["action"] == "buy"
-            # Verify quantity fix: size / price.
-            # CodeEngine size ~ $5000 (capped), price 50000 -> qty 0.1
             assert legacy_payload["quantity"] == pytest.approx(0.1)
 
-            # Check Audit-Copy Call (cio.decision.audit.execute)
             audit_call = next(
                 c
                 for c in mock_nc.publish.call_args_list
@@ -205,7 +185,5 @@ async def test_full_nats_to_nats_loop(caplog):
             assert audit_payload["strategy_id"] == "momentum_v1"
             assert audit_payload["correlation_id"] == "test-loop-id"
 
-            # Verify Vector Upsert (Audit Path)
             mock_vc.upsert.assert_called_once()
-
             await builder.close()
