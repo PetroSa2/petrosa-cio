@@ -129,6 +129,15 @@ async def test_stale_connection_after_restart_is_retried_and_dedup_holds(
 @pytest.mark.asyncio
 async def test_without_the_retry_the_stale_connection_is_an_error(fake_redis):
     """Control: the same restart with redis-py's from_url default (no retry) fails the read, the #406 symptom."""
+    import redis as redis_pkg
+
+    if int(redis_pkg.__version__.split(".")[0]) >= 8:
+        # Observed 2026-11-24 with redis-py 8.2.0 (requirements allow redis>=5.0.0): even with
+        # Retry(NoBackoff(), 0) the restarted connection no longer surfaces an error, so this control of
+        # the library's old behaviour cannot reproduce #406. The retry/fail-closed tests above still run.
+        pytest.skip(
+            f"redis-py {redis_pkg.__version__} no longer reproduces the stale-connection error"
+        )
     server, url = fake_redis
     kwargs = _redis_client_kwargs()
     kwargs.update(retry=Retry(NoBackoff(), 0), retry_on_error=[])
