@@ -674,14 +674,22 @@ class AutoResumeLoop:
                 if state.get("state") == "running" and self._changed_after_pause(
                     state.get("changed_at"), entry.paused_at
                 ):
-                    # petrosa-cio#420: the pause already ended upstream (e.g. realtime-strategies'
-                    # own expiry); same outcome as a foreign change on the audit path.
-                    logger.warning(
-                        f"AUTO_RESUME_ABORTED_FOREIGN_CHANGE strategy_id={entry.strategy_id} "
-                        f"changed_by={state.get('changed_by')} changed_at={state.get('changed_at')}"
+                    # petrosa-cio#420: the pause already ended upstream (realtime-strategies' own
+                    # expiry, or our resume PUT that landed but timed out here). The strategy is
+                    # running: record it as resumed so cleanup and flap escalation keep working.
+                    now = self.clock()
+                    entry.status = "resumed"
+                    entry.resumed_at = now
+                    entry.attempts = 0
+                    entry.next_attempt_at = 0.0
+                    await self.registry.put(entry)
+                    logger.info(
+                        f"AUTO_RESUME_ENDED_UPSTREAM strategy_id={entry.strategy_id} "
+                        f"changed_by={state.get('changed_by')} changed_at={state.get('changed_at')} "
+                        f"paused_for_s={int(now - entry.paused_at)} flap_count={entry.flap_count}"
                     )
-                    self._metric("aborted_foreign_change")
-                    await self.registry.remove(entry.strategy_id, "foreign_change")
+                    self._metric("ended_upstream")
+                    await self._publish_lifecycle_event("resumed", entry)
                     return
                 if state.get("state") != "paused":
                     raise ValueError(

@@ -1206,8 +1206,8 @@ async def test_resume_request_exception_and_429_default():
 
 
 @pytest.mark.asyncio
-async def test_realtime_pause_ended_upstream_after_our_pause_is_cleared_not_failed():
-    """petrosa-cio#420: realtime-strategies' own expiry ended the pause -> stop tracking, no failure."""
+async def test_realtime_pause_ended_upstream_is_recorded_as_resumed_not_failed():
+    """petrosa-cio#420: realtime-strategies ended the pause -> resumed (flap tracking kept), no failure."""
     clock = FakeClock()
     cache = FakeCache()
     registry = LLMPauseRegistry(cache, clock=clock)
@@ -1242,7 +1242,48 @@ async def test_realtime_pause_ended_upstream_after_our_pause_is_cleared_not_fail
     for entry in (expired, no_time, earlier, bad_time):
         await loop._resume_one(entry)
 
-    assert await registry.get("expired") is None
+    ended = await registry.get("expired")
+    assert ended.status == "resumed"
+    assert ended.resumed_at == clock.now
+    assert ended.attempts == 0
     http.request.assert_not_awaited()
     for strategy_id in ("no-time", "earlier", "bad-time"):
         assert (await registry.get(strategy_id)).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_realtime_pause_ended_upstream_keeps_flap_escalation():
+    """petrosa-cio#420 review: a re-pause after an upstream end must still count as a flap."""
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    changed_at = datetime.fromtimestamp(entry.paused_at + 1800, UTC).isoformat()
+    clock.now = entry.paused_at + 2400
+    http = MagicMock(
+        get=AsyncMock(
+            return_value=response(
+                200,
+                {
+                    "success": True,
+                    "data": {
+                        "state": "running",
+                        "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
+                        "changed_at": changed_at,
+                    },
+                },
+            )
+        ),
+        request=AsyncMock(),
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    await loop._resume_one(entry)
+    clock.now += 60
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+
+    again = await registry.get("iceberg_detector")
+    assert again.flap_count == 1
+    assert again.min_pause_seconds == 3600
