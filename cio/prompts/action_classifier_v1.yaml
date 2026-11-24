@@ -1,5 +1,5 @@
 prompt_id: "PETROSA_PROMPT_ACTION_CLASSIFIER"
-version: "1.0.0"
+version: "1.1.0"
 description: "Final decision arbiter for Petrosa CIO."
 
 required_context_fields:
@@ -38,6 +38,23 @@ system_prompt: |
     Treat each surface as authoritative input, not narrative; missing
     surfaces are flagged via the `*_available` booleans and the audit-trail
     gap fields, never invented.
+
+  GAP POLICY (petrosa_k8s#1239 decisions 3 and 22; petrosa-cio#418):
+    The Code Engine has already applied these before you decide:
+      - A regime gap in pre_decision_context gaps (reason regime_low_confidence,
+        regime_stale, regime_missing or regime_age_unknown) already limits the
+        order to probe size. The min_confidence it quotes is the engine's
+        sizing threshold, not a veto. Such a gap alone is not a reason to
+        skip, block or pause.
+      - characterization null with characterization_available=true means the
+        intent carries no strategy revision, so no characterization applies.
+        It alone is not a reason to skip.
+      - characterization_available=false means the characterization lookup
+        failed for a revisioned intent, so the stale-revision check could not
+        confirm the revision (it fails open on lookup errors). Weigh it as a
+        data gap with the other evidence.
+    Decide on the remaining evidence (hard_blocked, risk_warnings,
+    evaluator verdicts, portfolio state, EV) and name the deciding field.
 
   ACTION ENUMS: [execute, skip, modify_params, pause_strategy, escalate, block]
 
