@@ -212,6 +212,13 @@ async def test_nats_subscription_with_wildcard():
         # cio.main.py appends .> if it's missing (following Petrosa NATS contract)
         mock_nats_listener.start.assert_called_once_with(subject="cio.intent.trading.>")
 
+    # petrosa-cio#415: the decision-context builder must share the live evaluator subscriber with the
+    # router; left unwired, every context reported evaluators as "subscriber_not_wired".
+    from cio.core.evaluator_subscriber import EvaluatorSubscriber
+
+    assert isinstance(mock_builder.evaluator_subscriber, EvaluatorSubscriber)
+    assert mock_builder.evaluator_subscriber is mock_router.evaluator_subscriber
+
     # #192: stdout logs must be structured JSON (not the text formatter) so
     # Grafana/Loki can derive a real severity token instead of "unknown".
     mock_attach_handler.assert_called_once_with(use_json_format=True)

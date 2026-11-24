@@ -526,6 +526,10 @@ async def main():
     evaluator_subscriber = EvaluatorSubscriber(nats_client=nc)
     app.state.evaluator_subscriber = evaluator_subscriber
     router.evaluator_subscriber = evaluator_subscriber
+    # petrosa-cio#415: the context builder is built before the subscriber, so wire it here too. Without this
+    # every decision context carried a `subscriber_not_wired` gap (evaluator_verdicts_available=False), and the
+    # LLM skipped net-EV-passed signals citing "evaluators not wired".
+    builder.evaluator_subscriber = evaluator_subscriber
 
     arbiter = None
     if os.getenv("SIGNAL_ARBITRATION_ENABLED", "true").lower() in ("true", "1", "yes"):
