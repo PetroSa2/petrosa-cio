@@ -16,7 +16,9 @@ PROMPT = (
 
 
 def _standard_prompt() -> str:
-    return select_system_prompt(yaml.safe_load(PROMPT.read_text()), "standard")
+    """The live (``standard``) system prompt with whitespace collapsed, so line wrapping is irrelevant."""
+    text = select_system_prompt(yaml.safe_load(PROMPT.read_text()), "standard")
+    return " ".join(text.split())
 
 
 def test_regime_gap_is_priced_in_at_probe_size_not_a_veto():
@@ -28,21 +30,23 @@ def test_regime_gap_is_priced_in_at_probe_size_not_a_veto():
         "regime_age_unknown",
     ):
         assert reason in prompt
-    assert "probe size" in prompt
-    assert "pre_decision_context gaps" in prompt
-    assert (
-        "Such a gap alone is not a reason to\n        skip, block or pause." in prompt
-    )
+    assert "A regime gap in pre_decision_context gaps" in prompt
+    assert "already limits the order to probe size" in prompt
+    assert "Such a gap alone is not a reason to skip, block or pause." in prompt
 
 
 def test_characterization_without_revision_is_not_a_skip_reason_and_fetch_failure_is_a_gap():
     prompt = _standard_prompt()
-    assert "characterization null with characterization_available=true" in prompt
-    assert "It alone is not a reason to skip." in prompt
     assert (
-        "characterization_available=false means the characterization lookup\n        failed"
+        "characterization null with characterization_available=true means the intent carries no strategy revision"
         in prompt
     )
+    assert "It alone is not a reason to skip." in prompt
+    assert (
+        "characterization_available=false means the characterization lookup failed"
+        in prompt
+    )
+    assert "Weigh it as a data gap with the other evidence." in prompt
 
 
 def test_gap_policy_keeps_the_prompt_context_contract():
