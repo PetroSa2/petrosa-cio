@@ -1203,3 +1203,91 @@ async def test_resume_request_exception_and_429_default():
     http.request = AsyncMock(return_value=response(429, {}))
     await loop._resume_one(entry)
     assert (await registry.get("doji")).next_attempt_at == 1300
+
+
+@pytest.mark.asyncio
+async def test_realtime_pause_ended_upstream_is_recorded_as_resumed_not_failed():
+    """petrosa-cio#420: realtime-strategies ended the pause -> resumed (flap tracking kept), no failure."""
+    clock = FakeClock(datetime(2026, 11, 24, 17, 0, tzinfo=UTC).timestamp())
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    paused_at = datetime(2026, 11, 24, 15, 23, 26, tzinfo=UTC).timestamp()
+    expired = PauseEntry("expired", "realtime-strategies", "paused", paused_at, 0, 0)
+    no_time = PauseEntry("no-time", "realtime-strategies", "paused", paused_at, 0, 0)
+    earlier = PauseEntry("earlier", "realtime-strategies", "paused", paused_at, 0, 0)
+    bad_time = PauseEntry("bad-time", "realtime-strategies", "paused", paused_at, 0, 0)
+    for entry in (expired, no_time, earlier, bad_time):
+        await registry.put(entry)
+
+    def running(changed_at):
+        data = {"state": "running", "changed_by": "realtime-strategies:expiry"}
+        if changed_at is not None:
+            data["changed_at"] = changed_at
+        return response(200, {"success": True, "data": data})
+
+    http = MagicMock(
+        get=AsyncMock(
+            side_effect=[
+                running("2026-11-24T15:53:22.406848+00:00"),
+                running(None),
+                running("2026-11-24T15:00:00"),
+                running("not-a-time"),
+            ]
+        ),
+        request=AsyncMock(),
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    for entry in (expired, no_time, earlier, bad_time):
+        await loop._resume_one(entry)
+
+    ended = await registry.get("expired")
+    assert ended.status == "resumed"
+    # The upstream end time, not when CIO noticed (FakeClock is later).
+    assert ended.resumed_at == min(
+        clock.now,
+        datetime.fromisoformat("2026-11-24T15:53:22.406848+00:00").timestamp(),
+    )
+    assert ended.attempts == 0
+    http.request.assert_not_awaited()
+    for strategy_id in ("no-time", "earlier", "bad-time"):
+        assert (await registry.get(strategy_id)).attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_realtime_pause_ended_upstream_keeps_flap_escalation():
+    """petrosa-cio#420 review: a re-pause after an upstream end must still count as a flap."""
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    changed_at = datetime.fromtimestamp(entry.paused_at + 1800, UTC).isoformat()
+    clock.now = entry.paused_at + 2400
+    http = MagicMock(
+        get=AsyncMock(
+            return_value=response(
+                200,
+                {
+                    "success": True,
+                    "data": {
+                        "state": "running",
+                        "changed_by": "petrosa-cio:lifecycle:iceberg_detector",
+                        "changed_at": changed_at,
+                    },
+                },
+            )
+        ),
+        request=AsyncMock(),
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    await loop._resume_one(entry)
+    clock.now += 60
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+
+    again = await registry.get("iceberg_detector")
+    assert again.flap_count == 1
+    assert again.min_pause_seconds == 3600

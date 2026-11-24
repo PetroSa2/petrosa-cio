@@ -464,6 +464,24 @@ class AutoResumeLoop:
                 logger.warning(f"AUTO_RESUME_TICK_FAILED exc_type={type(exc).__name__}")
 
     @staticmethod
+    def _parse_changed_at(changed_at: object) -> float:
+        """``changed_at`` (ISO 8601, naive = UTC) as epoch seconds; ``-inf`` when absent or invalid."""
+        if not isinstance(changed_at, str):
+            return float("-inf")
+        try:
+            changed = datetime.fromisoformat(changed_at)
+        except ValueError:
+            return float("-inf")
+        if changed.tzinfo is None:
+            changed = changed.replace(tzinfo=UTC)
+        return changed.timestamp()
+
+    @classmethod
+    def _changed_after_pause(cls, changed_at: object, paused_at: float) -> bool:
+        """True when ``changed_at`` is a valid time later than ``paused_at`` (epoch seconds)."""
+        return cls._parse_changed_at(changed_at) > paused_at
+
+    @staticmethod
     def _metric(result: str) -> None:
         try:
             from cio.core.metrics import AUTO_RESUME_EVENTS
@@ -658,6 +676,31 @@ class AutoResumeLoop:
                     raise ValueError(
                         "realtime-strategies state data missing fields: state,changed_by"
                     )
+                if state.get("state") == "running" and self._changed_after_pause(
+                    state.get("changed_at"), entry.paused_at
+                ):
+                    # petrosa-cio#420: the pause already ended upstream (realtime-strategies' own
+                    # expiry, or our resume PUT that landed but timed out here). The strategy is
+                    # running: record it as resumed so cleanup and flap escalation keep working.
+                    # changed_by is deliberately not checked: whoever ended it (expiry, CIO's own
+                    # late-landing PUT, an operator), the strategy runs and that counts as resumed.
+                    # resumed_at is when it ended upstream, not when CIO noticed (flap window).
+                    now = min(
+                        self.clock(), self._parse_changed_at(state.get("changed_at"))
+                    )
+                    entry.status = "resumed"
+                    entry.resumed_at = now
+                    entry.attempts = 0
+                    entry.next_attempt_at = 0.0
+                    await self.registry.put(entry)
+                    logger.info(
+                        f"AUTO_RESUME_ENDED_UPSTREAM strategy_id={entry.strategy_id} "
+                        f"changed_by={state.get('changed_by')} changed_at={state.get('changed_at')} "
+                        f"paused_for_s={int(now - entry.paused_at)} flap_count={entry.flap_count}"
+                    )
+                    self._metric("ended_upstream")
+                    await self._publish_lifecycle_event("resumed", entry)
+                    return
                 if state.get("state") != "paused":
                     raise ValueError(
                         f"realtime-strategies state field state={state.get('state')!r} "
