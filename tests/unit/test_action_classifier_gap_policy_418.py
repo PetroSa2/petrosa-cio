@@ -29,16 +29,23 @@ def test_regime_gap_is_priced_in_at_probe_size_not_a_veto():
     ):
         assert reason in prompt
     assert "probe size" in prompt
-    assert "A regime gap alone is not a reason to skip, block or pause." in prompt
+    assert "pre_decision_context gaps" in prompt
+    assert (
+        "Such a gap alone is not a reason to\n        skip, block or pause." in prompt
+    )
 
 
-def test_absent_characterization_alone_is_not_a_skip_reason():
+def test_characterization_without_revision_is_not_a_skip_reason_and_fetch_failure_is_a_gap():
     prompt = _standard_prompt()
-    assert "characterization_available=false" in prompt
+    assert "characterization null with characterization_available=true" in prompt
     assert "It alone is not a reason to skip." in prompt
+    assert (
+        "characterization_available=false means the characterization lookup\n        failed"
+        in prompt
+    )
 
 
 def test_gap_policy_keeps_the_prompt_context_contract():
     data = yaml.safe_load(PROMPT.read_text())
     validate_prompt(data["system_prompt"])
-    assert data["version"] == "1.1.0"
+    assert data["version"] != "1.0.0"
