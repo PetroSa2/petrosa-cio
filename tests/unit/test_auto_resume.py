@@ -1203,3 +1203,46 @@ async def test_resume_request_exception_and_429_default():
     http.request = AsyncMock(return_value=response(429, {}))
     await loop._resume_one(entry)
     assert (await registry.get("doji")).next_attempt_at == 1300
+
+
+@pytest.mark.asyncio
+async def test_realtime_pause_ended_upstream_after_our_pause_is_cleared_not_failed():
+    """petrosa-cio#420: realtime-strategies' own expiry ended the pause -> stop tracking, no failure."""
+    clock = FakeClock()
+    cache = FakeCache()
+    registry = LLMPauseRegistry(cache, clock=clock)
+    paused_at = datetime(2026, 11, 24, 15, 23, 26, tzinfo=UTC).timestamp()
+    expired = PauseEntry("expired", "realtime-strategies", "paused", paused_at, 0, 0)
+    no_time = PauseEntry("no-time", "realtime-strategies", "paused", paused_at, 0, 0)
+    earlier = PauseEntry("earlier", "realtime-strategies", "paused", paused_at, 0, 0)
+    bad_time = PauseEntry("bad-time", "realtime-strategies", "paused", paused_at, 0, 0)
+    for entry in (expired, no_time, earlier, bad_time):
+        await registry.put(entry)
+
+    def running(changed_at):
+        data = {"state": "running", "changed_by": "realtime-strategies:expiry"}
+        if changed_at is not None:
+            data["changed_at"] = changed_at
+        return response(200, {"success": True, "data": data})
+
+    http = MagicMock(
+        get=AsyncMock(
+            side_effect=[
+                running("2026-11-24T15:53:22.406848+00:00"),
+                running(None),
+                running("2026-11-24T15:00:00"),
+                running("not-a-time"),
+            ]
+        ),
+        request=AsyncMock(),
+    )
+    loop = build_loop(clock, cache, registry, http=http)
+    loop.service_urls["realtime-strategies"] = "http://realtime-strategies"
+
+    for entry in (expired, no_time, earlier, bad_time):
+        await loop._resume_one(entry)
+
+    assert await registry.get("expired") is None
+    http.request.assert_not_awaited()
+    for strategy_id in ("no-time", "earlier", "bad-time"):
+        assert (await registry.get(strategy_id)).attempts == 1

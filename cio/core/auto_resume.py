@@ -464,6 +464,19 @@ class AutoResumeLoop:
                 logger.warning(f"AUTO_RESUME_TICK_FAILED exc_type={type(exc).__name__}")
 
     @staticmethod
+    def _changed_after_pause(changed_at: object, paused_at: float) -> bool:
+        """True when ``changed_at`` (ISO 8601) is a valid time later than ``paused_at`` (epoch seconds)."""
+        if not isinstance(changed_at, str):
+            return False
+        try:
+            changed = datetime.fromisoformat(changed_at)
+        except ValueError:
+            return False
+        if changed.tzinfo is None:
+            changed = changed.replace(tzinfo=UTC)
+        return changed.timestamp() > paused_at
+
+    @staticmethod
     def _metric(result: str) -> None:
         try:
             from cio.core.metrics import AUTO_RESUME_EVENTS
@@ -658,6 +671,18 @@ class AutoResumeLoop:
                     raise ValueError(
                         "realtime-strategies state data missing fields: state,changed_by"
                     )
+                if state.get("state") == "running" and self._changed_after_pause(
+                    state.get("changed_at"), entry.paused_at
+                ):
+                    # petrosa-cio#420: the pause already ended upstream (e.g. realtime-strategies'
+                    # own expiry); same outcome as a foreign change on the audit path.
+                    logger.warning(
+                        f"AUTO_RESUME_ABORTED_FOREIGN_CHANGE strategy_id={entry.strategy_id} "
+                        f"changed_by={state.get('changed_by')} changed_at={state.get('changed_at')}"
+                    )
+                    self._metric("aborted_foreign_change")
+                    await self.registry.remove(entry.strategy_id, "foreign_change")
+                    return
                 if state.get("state") != "paused":
                     raise ValueError(
                         f"realtime-strategies state field state={state.get('state')!r} "
