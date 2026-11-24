@@ -50,8 +50,9 @@ system_prompt: |
         intent carries no strategy revision, so no characterization applies.
         It alone is not a reason to skip.
       - characterization_available=false means the characterization lookup
-        failed for a revisioned intent and the stale-revision check did not
-        run. Weigh it as a data gap with the other evidence.
+        failed for a revisioned intent, so the stale-revision check could not
+        confirm the revision (it fails open on lookup errors). Weigh it as a
+        data gap with the other evidence.
     Decide on the remaining evidence (hard_blocked, risk_warnings,
     evaluator verdicts, portfolio state, EV) and name the deciding field.
 
