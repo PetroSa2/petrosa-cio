@@ -1208,7 +1208,7 @@ async def test_resume_request_exception_and_429_default():
 @pytest.mark.asyncio
 async def test_realtime_pause_ended_upstream_is_recorded_as_resumed_not_failed():
     """petrosa-cio#420: realtime-strategies ended the pause -> resumed (flap tracking kept), no failure."""
-    clock = FakeClock()
+    clock = FakeClock(datetime(2026, 11, 24, 17, 0, tzinfo=UTC).timestamp())
     cache = FakeCache()
     registry = LLMPauseRegistry(cache, clock=clock)
     paused_at = datetime(2026, 11, 24, 15, 23, 26, tzinfo=UTC).timestamp()
@@ -1244,7 +1244,11 @@ async def test_realtime_pause_ended_upstream_is_recorded_as_resumed_not_failed()
 
     ended = await registry.get("expired")
     assert ended.status == "resumed"
-    assert ended.resumed_at == clock.now
+    # The upstream end time, not when CIO noticed (FakeClock is later).
+    assert ended.resumed_at == min(
+        clock.now,
+        datetime.fromisoformat("2026-11-24T15:53:22.406848+00:00").timestamp(),
+    )
     assert ended.attempts == 0
     http.request.assert_not_awaited()
     for strategy_id in ("no-time", "earlier", "bad-time"):

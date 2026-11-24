@@ -464,17 +464,22 @@ class AutoResumeLoop:
                 logger.warning(f"AUTO_RESUME_TICK_FAILED exc_type={type(exc).__name__}")
 
     @staticmethod
-    def _changed_after_pause(changed_at: object, paused_at: float) -> bool:
-        """True when ``changed_at`` (ISO 8601) is a valid time later than ``paused_at`` (epoch seconds)."""
+    def _parse_changed_at(changed_at: object) -> float:
+        """``changed_at`` (ISO 8601, naive = UTC) as epoch seconds; ``-inf`` when absent or invalid."""
         if not isinstance(changed_at, str):
-            return False
+            return float("-inf")
         try:
             changed = datetime.fromisoformat(changed_at)
         except ValueError:
-            return False
+            return float("-inf")
         if changed.tzinfo is None:
             changed = changed.replace(tzinfo=UTC)
-        return changed.timestamp() > paused_at
+        return changed.timestamp()
+
+    @classmethod
+    def _changed_after_pause(cls, changed_at: object, paused_at: float) -> bool:
+        """True when ``changed_at`` is a valid time later than ``paused_at`` (epoch seconds)."""
+        return cls._parse_changed_at(changed_at) > paused_at
 
     @staticmethod
     def _metric(result: str) -> None:
@@ -677,7 +682,12 @@ class AutoResumeLoop:
                     # petrosa-cio#420: the pause already ended upstream (realtime-strategies' own
                     # expiry, or our resume PUT that landed but timed out here). The strategy is
                     # running: record it as resumed so cleanup and flap escalation keep working.
-                    now = self.clock()
+                    # changed_by is deliberately not checked: whoever ended it (expiry, CIO's own
+                    # late-landing PUT, an operator), the strategy runs and that counts as resumed.
+                    # resumed_at is when it ended upstream, not when CIO noticed (flap window).
+                    now = min(
+                        self.clock(), self._parse_changed_at(state.get("changed_at"))
+                    )
                     entry.status = "resumed"
                     entry.resumed_at = now
                     entry.attempts = 0
