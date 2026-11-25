@@ -7,11 +7,11 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from test_orchestrator_persona_concurrency import _make_context
 
 import cio.core.spend_tracker as spend_tracker
 from cio.core.orchestrator import Orchestrator
 from cio.core.spend_tracker import LlmSpendTracker
-from test_orchestrator_persona_concurrency import _make_context
 
 ACTION = "PETROSA_PROMPT_ACTION_CLASSIFIER"
 
