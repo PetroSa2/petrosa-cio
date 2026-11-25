@@ -200,16 +200,15 @@ def _primary_attempts(has_distinct_fallback: bool) -> int:
         return LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK_DEFAULT
 
 
-def _fallback_extra_body() -> dict[str, Any] | None:
-    """Provider-specific request fields for the fallback route only.
+def _extra_body_from_env(name: str) -> dict[str, Any] | None:
+    """A JSON object from env ``name``, forwarded to litellm as ``extra_body``.
 
-    ``LLM_FALLBACK_EXTRA_BODY`` is a JSON object forwarded to litellm as
-    ``extra_body``, e.g. ``{"chat_template_kwargs": {"enable_thinking": false}}``
-    so a reasoning-capable NVIDIA NIM fallback answers in ~1-2s instead of
-    spending 8-18s thinking (live-measured 2026-09-28). Invalid JSON is logged
-    and ignored rather than breaking the fallback.
+    For example ``{"chat_template_kwargs": {"enable_thinking": false}}``, so a
+    reasoning-capable NVIDIA NIM model answers in ~1-2s instead of spending
+    8-18s thinking (live-measured 2026-09-28). Invalid JSON is logged and
+    ignored rather than breaking the route.
     """
-    raw = os.getenv("LLM_FALLBACK_EXTRA_BODY")
+    raw = os.getenv(name)
     if raw is None or not raw.strip():
         return None
     try:
@@ -217,13 +216,28 @@ def _fallback_extra_body() -> dict[str, Any] | None:
     except json.JSONDecodeError:
         value = None
     if not isinstance(value, dict):
-        logger.error("LLM_FALLBACK_EXTRA_BODY must be a JSON object; ignoring it")
+        logger.error(f"{name} must be a JSON object; ignoring it")
         return None
     return value
 
 
+def _fallback_extra_body() -> dict[str, Any] | None:
+    """Provider-specific request fields for the fallback route (``LLM_FALLBACK_EXTRA_BODY``)."""
+    return _extra_body_from_env("LLM_FALLBACK_EXTRA_BODY")
+
+
 def _fallback_call_kwargs() -> dict[str, Any]:
     extra_body = _fallback_extra_body()
+    return {"extra_body": extra_body} if extra_body else {}
+
+
+def _primary_call_kwargs() -> dict[str, Any]:
+    """Provider-specific request fields for the primary route (``LLM_EXTRA_BODY``).
+
+    petrosa-cio#362: only the fallback could disable thinking, so the reasoning
+    primary timed out on ~99% of calls while the fallback answered.
+    """
+    extra_body = _extra_body_from_env("LLM_EXTRA_BODY")
     return {"extra_body": extra_body} if extra_body else {}
 
 
@@ -979,6 +993,7 @@ class LiteLLMClient(CIO_LLM_Client):
                         response_format=self._response_format_for_completion(
                             litellm, routing_primary
                         ),
+                        **_primary_call_kwargs(),
                     )
 
             # Success on primary
@@ -1018,7 +1033,8 @@ class LiteLLMClient(CIO_LLM_Client):
 
             _record_llm_call("primary", "failure")
             logger.warning(
-                "Primary LLM failed; attempting fallback",
+                "Primary LLM failed; attempting fallback: "
+                f"{_transport_error_summary(primary_error)}",
                 extra={
                     "prompt_id": prompt_id,
                     "error": _transport_error_summary(primary_error),

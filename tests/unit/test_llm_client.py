@@ -1823,3 +1823,52 @@ def test_recovery_returns_none_when_repaired_json_still_invalid():
         llm_client_module._recover_validated_response('{"value" "x"', _FakeResponse)
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_primary_extra_body_sent_on_primary_leg_only(monkeypatch):
+    """petrosa-cio#362: LLM_EXTRA_BODY reaches the primary call; the fallback keeps its own."""
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    litellm_patch, fake_litellm = _runtime_with_distinct_exceptions(
+        [TimeoutError(), _mock_litellm_response('{"ok": true}')]
+    )
+    primary_extra = {"chat_template_kwargs": {"enable_thinking": False}}
+    fallback_extra = {"chat_template_kwargs": {"enable_thinking": False}, "x": 1}
+    env = {
+        **_DISTINCT_ROUTES_ENV,
+        "LLM_EXTRA_BODY": json.dumps(primary_extra),
+        "LLM_FALLBACK_EXTRA_BODY": json.dumps(fallback_extra),
+    }
+
+    with patch.dict(os.environ, env), litellm_patch:
+        result = await client.complete("test", "system", {})
+
+    assert result.error is None
+    primary_call, fallback_call = fake_litellm.acompletion.await_args_list
+    assert primary_call.kwargs["extra_body"] == primary_extra
+    assert fallback_call.kwargs["extra_body"] == fallback_extra
+
+
+@pytest.mark.parametrize("raw", ["not json", "[1, 2]", '"str"', "  "])
+def test_invalid_or_blank_primary_extra_body_is_ignored(monkeypatch, caplog, raw):
+    monkeypatch.setenv("LLM_EXTRA_BODY", raw)
+    assert llm_client_module._primary_call_kwargs() == {}
+    if raw.strip():
+        assert "LLM_EXTRA_BODY must be a JSON object" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_primary_failure_warning_names_the_error_in_its_text(monkeypatch, caplog):
+    """petrosa-cio#362 AC3: the error class is in the log text, not only in `extra`."""
+    client = LiteLLMClient()
+    monkeypatch.setattr(llm_client_module, "LLM_RETRY_MAX_BACKOFF_SECONDS", 0)
+    litellm_patch, _ = _runtime_with_distinct_exceptions(
+        [TimeoutError(), _mock_litellm_response('{"ok": true}')]
+    )
+    with patch.dict(os.environ, _DISTINCT_ROUTES_ENV), litellm_patch:
+        await client.complete("test", "system", {})
+    line = next(
+        r.getMessage() for r in caplog.records if "Primary LLM failed" in r.getMessage()
+    )
+    assert "error_class=timeout" in line
