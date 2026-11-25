@@ -99,6 +99,8 @@ class Orchestrator:
             )
         # FR63: track whether ceiling triggered the bypass so period-reset can restore it.
         self._ceiling_triggered_bypass = False
+        # petrosa-cio#423: the UTC period in which the ceiling triggered the bypass.
+        self._ceiling_bypass_period: object | None = None
 
     async def _calibration_status(
         self, context: TriggerContext
@@ -199,6 +201,11 @@ class Orchestrator:
                 thought_trace="NON_ACTIONABLE_INTENT",
             )
             return decision
+
+        # petrosa-cio#423: the bypass path never reaches the post-LLM ceiling check, so a
+        # ceiling-triggered bypass is re-checked here or it would never end.
+        if self._ceiling_triggered_bypass:
+            await self._check_spend_ceiling(context.correlation_id)
 
         logger.info(
             f"🧠 STARTING REASONING LOOP | Provider: {provider_name} | CID: {context.correlation_id} | Use LLM: {self.use_llm_reasoning}",
@@ -743,10 +750,16 @@ class Orchestrator:
         """
         tracker = LlmSpendTracker.instance()
         breached, total_cost, projected = tracker.check_ceiling()
+        period = tracker._current.period_date
 
-        if not breached and self._ceiling_triggered_bypass:
+        if (
+            not breached
+            and self._ceiling_triggered_bypass
+            and period != self._ceiling_bypass_period
+        ):
             # New period: projected spend reset below ceiling — restore LLM mode.
             self._ceiling_triggered_bypass = False
+            self._ceiling_bypass_period = None
             self.use_llm_reasoning = True
             logger.info(
                 "FR63: New UTC period — LLM reasoning re-enabled after ceiling reset.",
@@ -758,6 +771,7 @@ class Orchestrator:
             # Transition to deterministic fallback for the rest of the period.
             self.use_llm_reasoning = False
             self._ceiling_triggered_bypass = True
+            self._ceiling_bypass_period = period
             logger.warning(
                 "FR63: LLM spend ceiling breached — switching to deterministic bypass (FR13).",
                 extra={
