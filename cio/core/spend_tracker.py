@@ -21,6 +21,10 @@ from datetime import UTC, date, datetime
 # Defaults match Claude Haiku pricing. Override via env to match actual model.
 _INPUT_COST_PER_MILLION = float(os.getenv("LLM_COST_INPUT_PER_MILLION", "0.25"))
 _OUTPUT_COST_PER_MILLION = float(os.getenv("LLM_COST_OUTPUT_PER_MILLION", "1.25"))
+# petrosa-cio#423: the projection never extrapolates from less than this much of the day.
+# A linear projection from the first minutes after midnight multiplied a few cents by
+# ~1,400 and tripped the ceiling every night.
+_MIN_PROJECTION_SECONDS = float(os.getenv("LLM_SPEND_MIN_PROJECTION_SECONDS", "3600"))
 
 # Prompt-id → human-readable decision type label.
 DECISION_TYPE_LABELS: dict[str, str] = {
@@ -77,14 +81,17 @@ class PeriodSpend:
         b.call_count += 1
 
     def projected_daily_usd(self) -> float:
-        """Linearly project current spend to a full UTC day based on elapsed time."""
+        """Linearly project current spend to a full UTC day based on elapsed time.
+
+        The elapsed time is floored at ``_MIN_PROJECTION_SECONDS`` (petrosa-cio#423),
+        so early-morning calls are projected over at least that window.
+        """
         now = datetime.now(UTC)
         period_start = datetime(now.year, now.month, now.day, tzinfo=UTC)
         elapsed_seconds = (now - period_start).total_seconds()
-        if elapsed_seconds < 60:
-            return self.total_cost_usd
         daily_seconds = 86_400.0
-        return self.total_cost_usd * (daily_seconds / elapsed_seconds)
+        window = min(daily_seconds, max(elapsed_seconds, _MIN_PROJECTION_SECONDS, 1.0))
+        return self.total_cost_usd * (daily_seconds / window)
 
     def ceiling_breached(self) -> bool:
         return self.projected_daily_usd() >= self.ceiling_usd_per_day
