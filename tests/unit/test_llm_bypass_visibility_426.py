@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry.metrics import CallbackOptions
 from test_spend_ceiling_recovery_423 import ACTION, clock  # noqa: F401 (fixture)
 
 from cio.apps.dashboard_api import router as dashboard_router
@@ -32,7 +33,10 @@ def _endpoint() -> dict:
 
 
 def _gauge(reason: str) -> float | None:
-    values = {obs.attributes["reason"]: obs.value for obs in _observe_llm_bypass(None)}
+    values = {
+        (obs.attributes or {})["reason"]: obs.value
+        for obs in _observe_llm_bypass(CallbackOptions())
+    }
     return values.get(reason)
 
 
