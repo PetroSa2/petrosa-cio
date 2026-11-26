@@ -513,7 +513,13 @@ class AutoResumeLoop:
         )
 
     async def _publish_lifecycle_event(
-        self, event: str, entry: PauseEntry, *, evidence: dict[str, Any] | None = None
+        self,
+        event: str,
+        entry: PauseEntry,
+        *,
+        evidence: dict[str, Any] | None = None,
+        changed_by: str | None = None,
+        changed_at: str | None = None,
     ) -> None:
         payload = {
             "event": event,
@@ -528,6 +534,10 @@ class AutoResumeLoop:
             else entry.guarded_evidence,
             "renewal_count": entry.renewal_count,
         }
+        if event == "resumed":
+            # Who ended the pause: CIO's resume, or realtime-strategies' own expiry (#422).
+            payload["changed_by"] = changed_by
+            payload["changed_at"] = changed_at
         try:
             await self.nats_client.publish(
                 f"cio.lifecycle.pause.{event}.{entry.strategy_id}",
@@ -556,9 +566,47 @@ class AutoResumeLoop:
         )
         if not renewed:
             return False
+        if entry.service == "realtime-strategies":
+            await self._extend_upstream_pause(entry)
         await self._publish_lifecycle_event("renewed", entry, evidence=current)
         self._metric("renewed")
         return True
+
+    async def _extend_upstream_pause(self, entry: PauseEntry) -> bool:
+        """Move realtime-strategies' own pause expiry to the entry's (#422).
+
+        realtime-strategies ends a pause by itself at ``expires_at``; without this a renewal only
+        changes CIO's registry and the strategy runs again at the old expiry.
+        """
+        base_url = self.service_urls.get(entry.service)
+        detail = "unroutable"
+        if base_url:
+            try:
+                response = await self.http_client.put(
+                    f"{base_url}/api/v1/strategies/{entry.strategy_id}/state",
+                    json={
+                        "state": "paused",
+                        "reason": f"CIO_PAUSE_RENEWED: {entry.pause_reason}",
+                        "changed_by": f"petrosa-cio:lifecycle:{entry.strategy_id}",
+                        "expires_at": entry.expires_at,
+                    },
+                )
+                body_failed, _ = OutputRouter._response_reports_failure(response)
+                if 200 <= response.status_code < 300 and not body_failed:
+                    logger.info(
+                        f"AUTO_RESUME_UPSTREAM_EXTENDED strategy_id={entry.strategy_id} "
+                        f"expires_at={entry.expires_at}"
+                    )
+                    return True
+                detail = f"status={response.status_code}"
+            except Exception as exc:
+                detail = f"exc_type={type(exc).__name__}"
+        logger.warning(
+            f"AUTO_RESUME_UPSTREAM_EXTEND_FAILED strategy_id={entry.strategy_id} "
+            f"detail={detail}"
+        )
+        self._metric("upstream_extend_failed")
+        return False
 
     async def tick(self) -> None:
         now = self.clock()
@@ -699,7 +747,12 @@ class AutoResumeLoop:
                         f"paused_for_s={int(now - entry.paused_at)} flap_count={entry.flap_count}"
                     )
                     self._metric("ended_upstream")
-                    await self._publish_lifecycle_event("resumed", entry)
+                    await self._publish_lifecycle_event(
+                        "resumed",
+                        entry,
+                        changed_by=state.get("changed_by"),
+                        changed_at=state.get("changed_at"),
+                    )
                     return
                 if state.get("state") != "paused":
                     raise ValueError(
@@ -845,7 +898,12 @@ class AutoResumeLoop:
             f"paused_for_s={int(now - entry.paused_at)} flap_count={entry.flap_count}"
         )
         self._metric("succeeded")
-        await self._publish_lifecycle_event("resumed", entry)
+        await self._publish_lifecycle_event(
+            "resumed",
+            entry,
+            changed_by="petrosa-cio:auto_resume",
+            changed_at=datetime.fromtimestamp(now, UTC).isoformat(),
+        )
 
     async def _record_failure(self, entry: PauseEntry, detail: str) -> None:
         entry.attempts += 1
@@ -871,10 +929,24 @@ class AutoResumeLoop:
         entry.gave_up_at = self.clock()
         entry.gave_up_reason = reason
         entry.next_attempt_at = entry.gave_up_at + MAX_PAUSE_SECONDS
+        if entry.service == "realtime-strategies":
+            # realtime-strategies ends the pause by itself at its expiry, so the strategy is not
+            # left paused (#422); CIO only stops tracking it.
+            until = (
+                datetime.fromtimestamp(entry.expires_at, UTC).isoformat()
+                if entry.expires_at is not None
+                else "<unknown>"
+            )
+            outcome = (
+                f"realtime-strategies ends the pause at its own expiry ({until}) and the "
+                "strategy runs again; CIO stops auto-resume tracking"
+            )
+        else:
+            outcome = "strategy left paused, re-enable manually"
         justification = (
             f"AUTO_RESUME_GAVE_UP strategy_id={entry.strategy_id} reason={reason} "
-            f"attempts={entry.attempts} flap_count={entry.flap_count} — strategy left paused, "
-            f"detail={detail or '<none>'} re-enable manually"
+            f"attempts={entry.attempts} flap_count={entry.flap_count} — {outcome}, "
+            f"detail={detail or '<none>'}"
         )
         await self.registry.put(entry)
         logger.error(justification)
