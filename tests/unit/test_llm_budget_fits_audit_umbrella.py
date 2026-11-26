@@ -29,9 +29,13 @@ def test_audit_timeout_uses_default_for_invalid_configuration(monkeypatch):
 
 
 def test_llm_budget_fits_inside_audit_umbrella():
+    # The primary timeout is derived from latency (#427); its maximum must keep the invariant.
+    primary_max = llm_client_module._primary_timeout_max_seconds()
+    assert primary_max >= LLM_CALL_TIMEOUT_SECONDS
+    attempts = max(LLM_RETRY_ATTEMPTS, llm_client_module._primary_attempts(True))
     worst_case_single_call = (
-        LLM_CALL_TIMEOUT_SECONDS * LLM_RETRY_ATTEMPTS
-        + LLM_RETRY_MAX_BACKOFF_SECONDS * (LLM_RETRY_ATTEMPTS - 1)
+        primary_max * attempts
+        + LLM_RETRY_MAX_BACKOFF_SECONDS * (attempts - 1)
         + LLM_CALL_TIMEOUT_SECONDS
     )
 

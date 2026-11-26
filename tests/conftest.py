@@ -28,6 +28,17 @@ def reset_shared_portfolio_tracker():
     portfolio_tracker._positions.clear()
 
 
+@pytest.fixture(autouse=True)
+def reset_primary_timeout():
+    """The derived primary LLM timeout (#427) learns from every primary call in the process; a
+    test must start from the labelled constant, not another test's latencies."""
+    from cio.clients.llm_client import PRIMARY_TIMEOUT
+
+    PRIMARY_TIMEOUT.reset()
+    yield
+    PRIMARY_TIMEOUT.reset()
+
+
 @pytest.fixture
 def mock_nats_client():
     """Mock for nats.aio.client.Client."""
