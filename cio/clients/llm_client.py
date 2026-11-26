@@ -58,65 +58,77 @@ async def _acompletion_with_timeout(
 
 # petrosa-cio#427: the primary route's timeout follows its measured latency (operator rule:
 # dynamic parameters). The constants below are labelled fallbacks and bounds, not the value.
-PRIMARY_TIMEOUT_WINDOW = 50  # recent primary calls kept
+PRIMARY_TIMEOUT_WINDOW = 50  # recent successful primary calls kept, per prompt
 PRIMARY_TIMEOUT_MIN_SAMPLES = (
     20  # below this, LLM_CALL_TIMEOUT_SECONDS applies (fallback)
 )
 PRIMARY_TIMEOUT_QUANTILE = 0.95
 PRIMARY_TIMEOUT_MARGIN = 1.25
 PRIMARY_TIMEOUT_MIN_SECONDS = 3.0
-PRIMARY_TIMEOUT_BUDGET_SHARE = (
-    0.9  # of each sequential stage's share of the audit budget
-)
+PRIMARY_TIMEOUT_BUDGET_SHARE = 0.95  # headroom inside the audit budget
 PRIMARY_TIMEOUT_LOG_STEP_SECONDS = 0.5
 
 
 def _primary_timeout_max_seconds() -> float:
-    """The largest primary timeout that keeps every sequential LLM stage, with its worst-case
-    fallback (one overload retry), inside NurseEnforcer's audit budget (#427)."""
+    """The largest primary timeout that keeps the audit-budget invariant (#427).
+
+    The invariant (``tests/unit/test_llm_budget_fits_audit_umbrella.py``) is, per sequential LLM
+    stage, primary timeout x attempts + backoff x (attempts - 1) + one fallback call, times the
+    stages, below NurseEnforcer's audit timeout. Solved for the primary timeout with the larger of
+    the duplicate-route and configured with-fallback attempts.
+    """
     try:
         # Late imports: both modules import this one.
         from cio.apps.nurse.enforcer import AUDIT_TIMEOUT_SECONDS
         from cio.core.orchestrator import SEQUENTIAL_LLM_STAGES
-
-        per_stage = (
-            PRIMARY_TIMEOUT_BUDGET_SHARE
-            * AUDIT_TIMEOUT_SECONDS
-            / max(SEQUENTIAL_LLM_STAGES, 1)
+    except Exception as exc:
+        logger.warning(
+            "LLM_PRIMARY_TIMEOUT budget unavailable; using the fixed timeout "
+            f"exc_type={type(exc).__name__}"
         )
-    except Exception:
         return LLM_CALL_TIMEOUT_SECONDS
-    worst_fallback = (
-        2 * LLM_CALL_TIMEOUT_SECONDS + FALLBACK_OVERLOAD_RETRY_DELAY_SECONDS
+    attempts = max(LLM_RETRY_ATTEMPTS, _primary_attempts(True))
+    per_stage = (
+        PRIMARY_TIMEOUT_BUDGET_SHARE
+        * AUDIT_TIMEOUT_SECONDS
+        / max(SEQUENTIAL_LLM_STAGES, 1)
     )
-    return max(LLM_CALL_TIMEOUT_SECONDS, per_stage - worst_fallback)
+    room = (
+        per_stage
+        - LLM_RETRY_MAX_BACKOFF_SECONDS * (attempts - 1)
+        - LLM_CALL_TIMEOUT_SECONDS
+    )
+    return max(LLM_CALL_TIMEOUT_SECONDS, room / attempts)
 
 
 class PrimaryTimeout:
-    """The primary route's call timeout from its recent latencies (#427).
+    """The primary route's call timeout from its recent successful latencies, per prompt (#427).
 
-    A timed-out call is kept as a sample at the timeout it had (its latency is at least that),
-    so while more than 5% of calls time out the p95 is the timeout itself and the next value is
-    larger by the margin, up to the budget maximum; with fewer timeouts it settles at
-    p95 x margin. Until enough samples exist ``LLM_CALL_TIMEOUT_SECONDS`` applies.
+    Only successful calls are samples (a timed-out call's latency is unknown; counting it at its
+    timeout would ratchet the value to the maximum on a fast/slow route). The value is the p95 of
+    the prompt's last calls x the margin, within the bounds; until the prompt has enough samples
+    ``LLM_CALL_TIMEOUT_SECONDS`` applies.
     """
 
     def __init__(self) -> None:
-        self._samples: deque[float] = deque(maxlen=PRIMARY_TIMEOUT_WINDOW)
-        self._logged: float | None = None
+        self._samples: dict[str, deque[float]] = {}
+        self._logged: dict[str, float] = {}
 
     def reset(self) -> None:
         self._samples.clear()
-        self._logged = None
+        self._logged.clear()
 
-    def record(self, seconds: float) -> None:
+    def record(self, prompt_id: str, seconds: float) -> None:
         if seconds > 0:
-            self._samples.append(seconds)
+            self._samples.setdefault(
+                prompt_id, deque(maxlen=PRIMARY_TIMEOUT_WINDOW)
+            ).append(seconds)
 
-    def current(self) -> float:
-        if len(self._samples) < PRIMARY_TIMEOUT_MIN_SAMPLES:
+    def current(self, prompt_id: str) -> float:
+        samples = self._samples.get(prompt_id)
+        if samples is None or len(samples) < PRIMARY_TIMEOUT_MIN_SAMPLES:
             return LLM_CALL_TIMEOUT_SECONDS
-        ordered = sorted(self._samples)
+        ordered = sorted(samples)
         index = min(
             len(ordered) - 1, math.ceil(PRIMARY_TIMEOUT_QUANTILE * len(ordered)) - 1
         )
@@ -125,14 +137,12 @@ class PrimaryTimeout:
         value = min(
             upper, max(PRIMARY_TIMEOUT_MIN_SECONDS, p95 * PRIMARY_TIMEOUT_MARGIN)
         )
-        if (
-            self._logged is None
-            or abs(value - self._logged) >= PRIMARY_TIMEOUT_LOG_STEP_SECONDS
-        ):
-            self._logged = value
+        logged = self._logged.get(prompt_id)
+        if logged is None or abs(value - logged) >= PRIMARY_TIMEOUT_LOG_STEP_SECONDS:
+            self._logged[prompt_id] = value
             logger.info(
-                f"LLM_PRIMARY_TIMEOUT derived_s={value:.2f} p95_s={p95:.2f} "
-                f"samples={len(ordered)} max_s={upper:.2f}"
+                f"LLM_PRIMARY_TIMEOUT prompt_id={prompt_id} derived_s={value:.2f} "
+                f"p95_s={p95:.2f} samples={len(ordered)} max_s={upper:.2f}"
             )
         return value
 
@@ -1071,33 +1081,25 @@ class LiteLLMClient(CIO_LLM_Client):
                 ),
             ):
                 with attempt:
-                    primary_timeout = PRIMARY_TIMEOUT.current()
+                    primary_timeout = PRIMARY_TIMEOUT.current(prompt_id)
                     call_started = time.perf_counter()
-                    try:
-                        response = await _acompletion_with_timeout(
-                            litellm,
-                            call_timeout=primary_timeout,
-                            model=routing_primary,
-                            api_base=api_base,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": json.dumps(user_context)},
-                            ],
-                            response_format=self._response_format_for_completion(
-                                litellm, routing_primary
-                            ),
-                            **_primary_call_kwargs(),
-                        )
-                    except Exception as call_error:
-                        # A timed-out call's latency is at least its timeout (#427).
-                        if _classify_transport_error(
-                            call_error
-                        ) == "timeout" or "timeout" in (
-                            type(call_error).__name__.lower()
-                        ):
-                            PRIMARY_TIMEOUT.record(primary_timeout)
-                        raise
-                    PRIMARY_TIMEOUT.record(time.perf_counter() - call_started)
+                    response = await _acompletion_with_timeout(
+                        litellm,
+                        call_timeout=primary_timeout,
+                        model=routing_primary,
+                        api_base=api_base,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": json.dumps(user_context)},
+                        ],
+                        response_format=self._response_format_for_completion(
+                            litellm, routing_primary
+                        ),
+                        **_primary_call_kwargs(),
+                    )
+                    PRIMARY_TIMEOUT.record(
+                        prompt_id, time.perf_counter() - call_started
+                    )
 
             # Success on primary
             self._record_success()
