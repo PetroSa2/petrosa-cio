@@ -33,6 +33,10 @@ LOCK_TTL_SECONDS = 120
 FREEZE_KEY_PREFIX = "cio:freeze:"
 MIN_PAUSE_SECONDS = 1800
 MAX_PAUSE_SECONDS = 14400
+# petrosa-cio#422: realtime-strategies ends a pause by itself at the expires_at CIO sends. CIO
+# sends its own expiry plus this backstop, so CIO's renew / resume decision (LLM-health gate,
+# guarded evidence) runs first; the backstop only ends the pause if CIO stops deciding.
+UPSTREAM_BACKSTOP_SECONDS = MIN_PAUSE_SECONDS
 QUIET_PERIOD_SECONDS = 600
 REPAUSE_WINDOW_SECONDS = 3600
 MAX_FLAPS = 3
@@ -559,6 +563,7 @@ class AutoResumeLoop:
         )
         if not current:
             return False
+        previous_paused_at = entry.paused_at
         renewed = await self.registry.renew_pause(
             entry,
             reason="guarded evaluator verdict remains unhealthy",
@@ -566,18 +571,28 @@ class AutoResumeLoop:
         )
         if not renewed:
             return False
-        if entry.service == "realtime-strategies":
+        if entry.service == "realtime-strategies" and not (
             await self._extend_upstream_pause(entry)
+        ):
+            # The upstream pause still ends at its old expiry; keep paused_at at the old pause so
+            # the precheck recognises that end (changed_at after paused_at) instead of failing.
+            entry.paused_at = previous_paused_at
+            await self.registry.put(entry)
         await self._publish_lifecycle_event("renewed", entry, evidence=current)
         self._metric("renewed")
         return True
 
     async def _extend_upstream_pause(self, entry: PauseEntry) -> bool:
-        """Move realtime-strategies' own pause expiry to the entry's (#422).
+        """Move realtime-strategies' own pause expiry to the entry's plus the backstop (#422).
 
         realtime-strategies ends a pause by itself at ``expires_at``; without this a renewal only
         changes CIO's registry and the strategy runs again at the old expiry.
         """
+        upstream_expires_at = (
+            entry.expires_at + UPSTREAM_BACKSTOP_SECONDS
+            if entry.expires_at is not None
+            else None
+        )
         base_url = self.service_urls.get(entry.service)
         detail = "unroutable"
         if base_url:
@@ -588,14 +603,14 @@ class AutoResumeLoop:
                         "state": "paused",
                         "reason": f"CIO_PAUSE_RENEWED: {entry.pause_reason}",
                         "changed_by": f"petrosa-cio:lifecycle:{entry.strategy_id}",
-                        "expires_at": entry.expires_at,
+                        "expires_at": upstream_expires_at,
                     },
                 )
                 body_failed, _ = OutputRouter._response_reports_failure(response)
                 if 200 <= response.status_code < 300 and not body_failed:
                     logger.info(
                         f"AUTO_RESUME_UPSTREAM_EXTENDED strategy_id={entry.strategy_id} "
-                        f"expires_at={entry.expires_at}"
+                        f"expires_at={entry.expires_at} upstream_expires_at={upstream_expires_at}"
                     )
                     return True
                 detail = f"status={response.status_code}"
@@ -901,7 +916,8 @@ class AutoResumeLoop:
         await self._publish_lifecycle_event(
             "resumed",
             entry,
-            changed_by="petrosa-cio:auto_resume",
+            changed_by=payload.get("changed_by")
+            or f"petrosa-cio:resume:{entry.strategy_id}",
             changed_at=datetime.fromtimestamp(now, UTC).isoformat(),
         )
 
@@ -930,16 +946,19 @@ class AutoResumeLoop:
         entry.gave_up_reason = reason
         entry.next_attempt_at = entry.gave_up_at + MAX_PAUSE_SECONDS
         if entry.service == "realtime-strategies":
-            # realtime-strategies ends the pause by itself at its expiry, so the strategy is not
-            # left paused (#422); CIO only stops tracking it.
+            # realtime-strategies ends a CIO pause by itself at the expiry CIO sent (#422), so
+            # "left paused" would be false; the upstream state is not re-read here.
             until = (
-                datetime.fromtimestamp(entry.expires_at, UTC).isoformat()
+                datetime.fromtimestamp(
+                    entry.expires_at + UPSTREAM_BACKSTOP_SECONDS, UTC
+                ).isoformat()
                 if entry.expires_at is not None
                 else "<unknown>"
             )
             outcome = (
-                f"realtime-strategies ends the pause at its own expiry ({until}) and the "
-                "strategy runs again; CIO stops auto-resume tracking"
+                "CIO stops auto-resume tracking; realtime-strategies ends a CIO pause at its "
+                f"own expiry (CIO last asked for {until}), upstream state not re-verified, "
+                f"check /api/v1/strategies/{entry.strategy_id}/state"
             )
         else:
             outcome = "strategy left paused, re-enable manually"
