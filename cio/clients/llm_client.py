@@ -64,7 +64,6 @@ PRIMARY_TIMEOUT_MIN_SAMPLES = (
 )
 PRIMARY_TIMEOUT_QUANTILE = 0.95
 PRIMARY_TIMEOUT_MARGIN = 1.25
-PRIMARY_TIMEOUT_MIN_SECONDS = 3.0
 PRIMARY_TIMEOUT_BUDGET_SHARE = 0.95  # headroom inside the audit budget
 PRIMARY_TIMEOUT_LOG_STEP_SECONDS = 0.5
 
@@ -76,6 +75,10 @@ def _primary_timeout_max_seconds() -> float:
     stage, primary timeout x attempts + backoff x (attempts - 1) + one fallback call, times the
     stages, below NurseEnforcer's audit timeout. Solved for the primary timeout with the larger of
     the duplicate-route and configured with-fallback attempts.
+
+    Not covered (they exceed the per-stage budget already at the fixed timeout): the fallback's
+    overload retry and the schema-fallback leg. A deadline handed into ``complete()`` is the
+    real bound for those (follow-up ticket).
     """
     try:
         # Late imports: both modules import this one.
@@ -134,9 +137,9 @@ class PrimaryTimeout:
         )
         p95 = ordered[index]
         upper = _primary_timeout_max_seconds()
-        value = min(
-            upper, max(PRIMARY_TIMEOUT_MIN_SECONDS, p95 * PRIMARY_TIMEOUT_MARGIN)
-        )
+        # Floored at the fixed timeout: the value only lengthens. Successes are the only
+        # samples, so a value below the fixed timeout could never learn that the route slowed.
+        value = min(upper, max(LLM_CALL_TIMEOUT_SECONDS, p95 * PRIMARY_TIMEOUT_MARGIN))
         logged = self._logged.get(prompt_id)
         if logged is None or abs(value - logged) >= PRIMARY_TIMEOUT_LOG_STEP_SECONDS:
             self._logged[prompt_id] = value

@@ -27,9 +27,9 @@ def test_fewer_than_min_samples_use_the_labelled_constant():
 
 
 def test_with_samples_the_timeout_is_p95_times_margin():
-    # 19 calls at 4 s and one at 8 s: p95 (19th of 20 sorted) is 4 s.
-    timeout = _filled([4.0] * 19 + [7.0])
-    assert timeout.current(P) == pytest.approx(4.0 * llm.PRIMARY_TIMEOUT_MARGIN)
+    # 19 calls at 6 s and one at 7 s: p95 (19th of 20 sorted) is 6 s.
+    timeout = _filled([6.0] * 19 + [7.0])
+    assert timeout.current(P) == pytest.approx(6.0 * llm.PRIMARY_TIMEOUT_MARGIN)
     # 6.4 s median, p95 6.9 s (the 2026-11-25 route): above the fixed 7 s.
     timeout = _filled([6.4] * 18 + [6.9] * 2)
     assert timeout.current(P) == pytest.approx(6.9 * llm.PRIMARY_TIMEOUT_MARGIN)
@@ -44,20 +44,34 @@ def test_a_latency_spike_cannot_raise_it_above_the_budget_maximum():
     assert upper == pytest.approx((0.95 * 60 / 2 - 3 - 7) / 2)
 
 
-def test_a_fast_route_is_bounded_below():
-    assert _filled([0.2] * 50).current(P) == llm.PRIMARY_TIMEOUT_MIN_SECONDS
+def test_it_never_drops_below_the_fixed_timeout():
+    """Only successes are samples, so a value below the fixed timeout could never learn that
+    the route slowed (review of #431): the derived value only lengthens."""
+    assert _filled([0.2] * 50).current(P) == llm.LLM_CALL_TIMEOUT_SECONDS
+
+
+def test_the_ceiling_follows_the_configured_attempts(monkeypatch):
+    two = llm._primary_timeout_max_seconds()
+    monkeypatch.setenv("LLM_PRIMARY_ATTEMPTS_WITH_FALLBACK", "3")
+    three = llm._primary_timeout_max_seconds()
+    assert three < two
+    assert three == pytest.approx(
+        max(llm.LLM_CALL_TIMEOUT_SECONDS, (0.95 * 60 / 2 - 3 * 2 - 7) / 3)
+    )
 
 
 def test_the_window_forgets_old_samples():
-    timeout = _filled([10.0] * 50 + [2.0] * llm.PRIMARY_TIMEOUT_WINDOW)
-    assert timeout.current(P) == llm.PRIMARY_TIMEOUT_MIN_SECONDS
+    timeout = _filled([9.0] * 50 + [6.0] * llm.PRIMARY_TIMEOUT_WINDOW)
+    assert timeout.current(P) == pytest.approx(7.5)
 
 
 def test_each_prompt_has_its_own_window():
     timeout = _filled([2.0] * 50, "PETROSA_PROMPT_REGIME_ANALYST")
     for _ in range(50):
         timeout.record(P, 6.0)
-    assert timeout.current("PETROSA_PROMPT_REGIME_ANALYST") == pytest.approx(3.0)
+    assert timeout.current("PETROSA_PROMPT_REGIME_ANALYST") == pytest.approx(
+        llm.LLM_CALL_TIMEOUT_SECONDS
+    )
     assert timeout.current(P) == pytest.approx(7.5)
     assert (
         timeout.current("PETROSA_PROMPT_HEALTH_PROBE") == llm.LLM_CALL_TIMEOUT_SECONDS
