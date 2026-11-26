@@ -39,6 +39,23 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _upstream_backstop_seconds() -> int:
+    """How long after CIO's own expiry realtime-strategies ends a pause by itself (#422).
+
+    Imported late: auto_resume imports this module.
+    """
+    from cio.core.auto_resume import UPSTREAM_BACKSTOP_SECONDS
+
+    return UPSTREAM_BACKSTOP_SECONDS
+
+
+def _first_upstream_pause_seconds() -> int:
+    """The registry's first-pause length plus the upstream backstop (#422)."""
+    from cio.core.auto_resume import MIN_PAUSE_SECONDS
+
+    return MIN_PAUSE_SECONDS + _upstream_backstop_seconds()
+
+
 def _emit_final_decision_metrics(action: ActionType, strategy_id: str) -> None:
     """Record the action after routing has resolved the final decision."""
     if not strategy_id:
@@ -833,7 +850,11 @@ class OutputRouter:
                         "reason": "CIO_PAUSE: "
                         + (decision.justification or "automated pause"),
                         "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
-                        "expires_at": datetime.now(UTC).timestamp() + 1800,
+                        # The first-pause length plus the backstop; _align_realtime_pause_expiry
+                        # moves it to the registry's (escalated or kept) expiry once the pause is
+                        # recorded (#422).
+                        "expires_at": datetime.now(UTC).timestamp()
+                        + _first_upstream_pause_seconds(),
                     }
                     url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
                 elif use_application_config:
@@ -996,6 +1017,10 @@ class OutputRouter:
                                     reason=pause_reason,
                                     guarded_evidence=evidence,
                                 )
+                                if entry is not None and use_lifecycle_endpoint:
+                                    await self._align_realtime_pause_expiry(
+                                        url, payload, entry, correlation_id
+                                    )
                                 if entry is not None:
                                     await self.nats_client.publish(
                                         f"cio.lifecycle.pause.paused.{strategy_id}",
@@ -1390,6 +1415,57 @@ class OutputRouter:
         if body.get("success"):
             return False, None
         return True, body.get("error")
+
+    async def _align_realtime_pause_expiry(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        entry: Any,
+        correlation_id: str | None,
+    ) -> None:
+        """Send the registry's expiry (plus the backstop) to realtime-strategies when it differs
+        from the one sent (#422).
+
+        realtime-strategies ends a pause by itself at ``expires_at``. An escalated pause (after a
+        flap) or one already in force carries another expiry than the first-pause length. An
+        entry whose own expiry has passed (CIO's resume is pending) keeps the expiry just sent.
+        """
+        expires_at = getattr(entry, "expires_at", None)
+        sent = payload.get("expires_at")
+        if (
+            getattr(entry, "status", None) != "paused"
+            or not isinstance(expires_at, int | float)
+            or not isinstance(sent, int | float)
+            or expires_at <= datetime.now(UTC).timestamp()
+        ):
+            return
+        target = expires_at + _upstream_backstop_seconds()
+        if abs(target - sent) <= 5:
+            return
+        aligned = {**payload, "expires_at": target}
+        try:
+            response = await self.http_client.put(url, json=aligned)
+            failed, _ = self._response_reports_failure(response)
+            if response.status_code >= 400 or failed:
+                detail = f"status={response.status_code}"
+            else:
+                logger.info(
+                    "PAUSE_EXPIRY_ALIGNED strategy_id=%s expires_at=%s min_pause_s=%s",
+                    entry.strategy_id,
+                    target,
+                    getattr(entry, "min_pause_seconds", None),
+                    extra={"correlation_id": correlation_id},
+                )
+                return
+        except Exception as exc:
+            detail = f"exc_type={type(exc).__name__}"
+        logger.warning(
+            "PAUSE_EXPIRY_ALIGN_FAILED strategy_id=%s expires_at=%s %s",
+            entry.strategy_id,
+            target,
+            detail,
+            extra={"correlation_id": correlation_id},
+        )
 
     @staticmethod
     def _bounded_text(value: Any, limit: int = 2000) -> str:

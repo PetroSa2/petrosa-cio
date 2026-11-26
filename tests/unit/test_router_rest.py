@@ -1517,3 +1517,120 @@ async def test_ta_bot_pauses_are_unaffected_by_the_realtime_shadow_default(caplo
     registry.remove.assert_awaited_once()  # the pause registry is used for a TA-bot strategy
     post.assert_awaited_once()  # a TA-bot pause is a config POST, as before
     assert post.await_args.args[0] == "http://ta-bot/api/v1/config/application"
+
+
+def _ok_put_response():
+    put_response = MagicMock(status_code=200, text="")
+    put_response.json.return_value = {"success": True}
+    return put_response
+
+
+async def _route_realtime_pause(
+    entry_expires_at, min_pause, *, status="paused", first_min=None
+):
+    import time as _time
+
+    import cio.core.auto_resume as auto_resume
+
+    registry = AsyncMock()
+    registry.record_pause.return_value = PauseEntry(
+        "iceberg_detector",
+        "realtime-strategies",
+        status,
+        _time.time(),
+        _time.time(),
+        min_pause,
+        expires_at=entry_expires_at(_time.time()),
+    )
+    router = _pause_router("apply", pause_registry=registry)
+    started = _time.time()
+    with (
+        patch.object(auto_resume, "MIN_PAUSE_SECONDS", first_min or 1800),
+        patch.object(
+            router.http_client,
+            "put",
+            new_callable=AsyncMock,
+            return_value=_ok_put_response(),
+        ) as put,
+    ):
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+    return put, started, registry, auto_resume.UPSTREAM_BACKSTOP_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_first_realtime_pause_sends_the_registry_min_pause_once_422():
+    """The registry's first-pause length (patched to 900 s here) plus the backstop, sent once."""
+    put, started, registry, backstop = await _route_realtime_pause(
+        lambda now: now + 900, 900, first_min=900
+    )
+    put.assert_awaited_once()
+    sent = put.await_args.kwargs["json"]["expires_at"]
+    assert started + 900 + backstop - 1 <= sent <= started + 900 + backstop + 5
+    assert registry.record_pause.await_args.args[0] == "iceberg_detector"
+
+
+@pytest.mark.asyncio
+async def test_escalated_realtime_pause_sends_the_escalated_expiry_422():
+    """A flapped strategy's second pause (3600 s) reaches realtime-strategies, plus the backstop."""
+    put, started, _, backstop = await _route_realtime_pause(
+        lambda now: now + 3600, 3600
+    )
+    assert put.await_count == 2
+    first, aligned = (call.kwargs["json"] for call in put.await_args_list)
+    assert aligned["state"] == "paused"
+    assert aligned["changed_by"] == first["changed_by"]
+    assert started + 3600 + backstop - 1 <= aligned["expires_at"]
+    assert aligned["expires_at"] <= started + 3600 + backstop + 5
+    assert put.await_args_list[1].args[0] == (
+        "http://realtime/api/v1/strategies/iceberg_detector/state"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pause_alignment_skips_past_or_non_paused_entries_422():
+    put, _, _, _ = await _route_realtime_pause(lambda now: now - 60, 1800)
+    put.assert_awaited_once()
+    put, _, _, _ = await _route_realtime_pause(
+        lambda now: now + 7200, 7200, status="gave_up"
+    )
+    put.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pause_alignment_failure_is_logged_not_raised_422(caplog):
+    router = _pause_router("apply", pause_registry=AsyncMock())
+    entry = PauseEntry(
+        "iceberg_detector",
+        "realtime-strategies",
+        "paused",
+        0,
+        0,
+        3600,
+        expires_at=datetime.now(UTC).timestamp() + 3600,
+    )
+    payload = {"state": "paused", "expires_at": datetime.now(UTC).timestamp() + 1800}
+    bad = MagicMock(status_code=503, text="")
+    bad.json.return_value = {"success": False}
+    with patch.object(router.http_client, "put", new_callable=AsyncMock) as put:
+        put.return_value = bad
+        await router._align_realtime_pause_expiry("http://u", payload, entry, "c")
+        put.side_effect = TimeoutError()
+        await router._align_realtime_pause_expiry("http://u", payload, entry, "c")
+    messages = [
+        r.getMessage()
+        for r in caplog.records
+        if "PAUSE_EXPIRY_ALIGN_FAILED" in r.getMessage()
+    ]
+    assert len(messages) == 2
+    assert messages[0].endswith("status=503")
+    assert messages[1].endswith("exc_type=TimeoutError")
+
+
+def test_no_constant_1800_left_on_the_realtime_pause_path_422():
+    import inspect
+    import re
+
+    import cio.core.router as router_module
+
+    source = inspect.getsource(router_module.OutputRouter)
+    assert not re.search(r"timestamp\(\)\s*\+\s*1800", source)
