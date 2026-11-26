@@ -124,9 +124,12 @@ async def get_llm_spend() -> dict:
     per-day ceiling, and distance-to-ceiling so the operator dashboard SPA
     can render the LlmSpendPane (AC1/AC2 of petrosa-data-manager#170).
     """
+    from cio.core.orchestrator import llm_mode_snapshot
     from cio.core.spend_tracker import LlmSpendTracker
 
-    return LlmSpendTracker.instance().period_snapshot()
+    # petrosa-cio#426: ceiling_breached is about the current projection; after a breach the
+    # projection decays while CIO stays bypassed, so the mode is reported separately.
+    return {**LlmSpendTracker.instance().period_snapshot(), **llm_mode_snapshot()}
 
 
 @router.get("/evaluator/verdicts")

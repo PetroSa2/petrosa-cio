@@ -2,7 +2,10 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING
+import weakref
+from typing import TYPE_CHECKING, Any
+
+from opentelemetry.metrics import CallbackOptions, Observation
 
 from cio.clients.factory import ClientFactory
 from cio.core import stage_timing
@@ -17,6 +20,7 @@ from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.llm_fallback import llm_fallback_mode
+from cio.core.metrics import meter
 from cio.core.net_ev import gate_enforced, prefilter_mode
 from cio.core.portfolio_tracker import PortfolioTracker
 from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
@@ -52,6 +56,53 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 SEQUENTIAL_LLM_STAGES = 2
+
+
+BYPASS_REASONS = ("env", "ceiling")
+
+# petrosa-cio#426: the orchestrator serving decisions, read by /api/dashboard/llm-spend and the
+# bypass gauge at request / scrape time (a weak reference: tests build many orchestrators).
+_LIVE_ORCHESTRATOR: "weakref.ref[Orchestrator] | None" = None
+
+
+def llm_mode_snapshot() -> dict[str, Any]:
+    """Whether the live orchestrator calls the LLM, and why not if it doesn't (#426).
+
+    ``bypass_reason`` is ``env`` (NURSE_USE_LLM_REASONING=false), ``ceiling`` (FR63 spend
+    ceiling) or None; ``bypass_since`` is the UTC ISO time the bypass began. All None before an
+    orchestrator exists.
+    """
+    orchestrator = _LIVE_ORCHESTRATOR() if _LIVE_ORCHESTRATOR is not None else None
+    if orchestrator is None:
+        return {"use_llm_reasoning": None, "bypass_reason": None, "bypass_since": None}
+    reason = orchestrator.bypass_reason
+    since = orchestrator._bypass_since if reason is not None else None
+    return {
+        "use_llm_reasoning": bool(orchestrator.use_llm_reasoning),
+        "bypass_reason": reason,
+        "bypass_since": (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))
+            if since is not None
+            else None
+        ),
+    }
+
+
+def _observe_llm_bypass(_options: CallbackOptions) -> list[Observation]:
+    """1 for the active bypass reason, 0 for the others (#426)."""
+    reason = llm_mode_snapshot()["bypass_reason"]
+    return [
+        Observation(1.0 if reason == candidate else 0.0, {"reason": candidate})
+        for candidate in BYPASS_REASONS
+    ]
+
+
+# OpenTelemetry like every exported CIO metric (CIO serves no Prometheus /metrics).
+meter.create_observable_gauge(
+    "petrosa_cio_llm_bypass_active",
+    callbacks=[_observe_llm_bypass],
+    description="1 while CIO decides without the LLM (deterministic bypass), by reason: env or ceiling",
+)
 
 
 class Orchestrator:
@@ -101,6 +152,19 @@ class Orchestrator:
         self._ceiling_triggered_bypass = False
         # petrosa-cio#423: the UTC period in which the ceiling triggered the bypass.
         self._ceiling_bypass_period: object | None = None
+        # petrosa-cio#426: when the current bypass began (epoch seconds), for the dashboard.
+        self._bypass_since: float | None = (
+            None if self.use_llm_reasoning else time.time()
+        )
+        global _LIVE_ORCHESTRATOR
+        _LIVE_ORCHESTRATOR = weakref.ref(self)
+
+    @property
+    def bypass_reason(self) -> str | None:
+        """``env``, ``ceiling`` or None while the LLM is in use (#426)."""
+        if self.use_llm_reasoning:
+            return None
+        return "ceiling" if self._ceiling_triggered_bypass else "env"
 
     async def _calibration_status(
         self, context: TriggerContext
@@ -761,6 +825,7 @@ class Orchestrator:
             self._ceiling_triggered_bypass = False
             self._ceiling_bypass_period = None
             self.use_llm_reasoning = True
+            self._bypass_since = None
             logger.info(
                 "FR63: New UTC period — LLM reasoning re-enabled after ceiling reset.",
                 extra={"total_cost_usd": total_cost, "correlation_id": correlation_id},
@@ -772,6 +837,7 @@ class Orchestrator:
             self.use_llm_reasoning = False
             self._ceiling_triggered_bypass = True
             self._ceiling_bypass_period = period
+            self._bypass_since = time.time()
             logger.warning(
                 "FR63: LLM spend ceiling breached — switching to deterministic bypass (FR13).",
                 extra={
