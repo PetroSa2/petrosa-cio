@@ -39,11 +39,21 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-def _min_pause_seconds() -> int:
-    """The registry's first-pause length (imported late: auto_resume imports this module)."""
+def _upstream_backstop_seconds() -> int:
+    """How long after CIO's own expiry realtime-strategies ends a pause by itself (#422).
+
+    Imported late: auto_resume imports this module.
+    """
+    from cio.core.auto_resume import UPSTREAM_BACKSTOP_SECONDS
+
+    return UPSTREAM_BACKSTOP_SECONDS
+
+
+def _first_upstream_pause_seconds() -> int:
+    """The registry's first-pause length plus the upstream backstop (#422)."""
     from cio.core.auto_resume import MIN_PAUSE_SECONDS
 
-    return MIN_PAUSE_SECONDS
+    return MIN_PAUSE_SECONDS + _upstream_backstop_seconds()
 
 
 def _emit_final_decision_metrics(action: ActionType, strategy_id: str) -> None:
@@ -840,10 +850,11 @@ class OutputRouter:
                         "reason": "CIO_PAUSE: "
                         + (decision.justification or "automated pause"),
                         "changed_by": f"petrosa-cio:lifecycle:{strategy_id}",
-                        # The first-pause length; _align_realtime_pause_expiry moves it to the
-                        # registry's (escalated or kept) expiry once the pause is recorded (#422).
+                        # The first-pause length plus the backstop; _align_realtime_pause_expiry
+                        # moves it to the registry's (escalated or kept) expiry once the pause is
+                        # recorded (#422).
                         "expires_at": datetime.now(UTC).timestamp()
-                        + _min_pause_seconds(),
+                        + _first_upstream_pause_seconds(),
                     }
                     url = f"{base_url}/api/v1/strategies/{strategy_id}/state"
                 elif use_application_config:
@@ -1412,20 +1423,24 @@ class OutputRouter:
         entry: Any,
         correlation_id: str | None,
     ) -> None:
-        """Send the registry's expiry to realtime-strategies when it differs from the one sent (#422).
+        """Send the registry's expiry (plus the backstop) to realtime-strategies when it differs
+        from the one sent (#422).
 
         realtime-strategies ends a pause by itself at ``expires_at``. An escalated pause (after a
-        flap) or one already in force carries a later expiry than the first-pause length.
+        flap) or one already in force carries another expiry than the first-pause length. An
+        entry whose own expiry has passed (CIO's resume is pending) keeps the expiry just sent.
         """
-        target = getattr(entry, "expires_at", None)
+        expires_at = getattr(entry, "expires_at", None)
         sent = payload.get("expires_at")
         if (
             getattr(entry, "status", None) != "paused"
-            or not isinstance(target, int | float)
+            or not isinstance(expires_at, int | float)
             or not isinstance(sent, int | float)
-            or target <= datetime.now(UTC).timestamp()
-            or abs(target - sent) <= 5
+            or expires_at <= datetime.now(UTC).timestamp()
         ):
+            return
+        target = expires_at + _upstream_backstop_seconds()
+        if abs(target - sent) <= 5:
             return
         aligned = {**payload, "expires_at": target}
         try:

@@ -1525,10 +1525,12 @@ def _ok_put_response():
     return put_response
 
 
-async def _route_realtime_pause(entry_expires_at, min_pause, *, status="paused"):
+async def _route_realtime_pause(
+    entry_expires_at, min_pause, *, status="paused", first_min=None
+):
     import time as _time
 
-    from cio.core.auto_resume import MIN_PAUSE_SECONDS
+    import cio.core.auto_resume as auto_resume
 
     registry = AsyncMock()
     registry.record_pause.return_value = PauseEntry(
@@ -1542,36 +1544,43 @@ async def _route_realtime_pause(entry_expires_at, min_pause, *, status="paused")
     )
     router = _pause_router("apply", pause_registry=registry)
     started = _time.time()
-    with patch.object(
-        router.http_client,
-        "put",
-        new_callable=AsyncMock,
-        return_value=_ok_put_response(),
-    ) as put:
+    with (
+        patch.object(auto_resume, "MIN_PAUSE_SECONDS", first_min or 1800),
+        patch.object(
+            router.http_client,
+            "put",
+            new_callable=AsyncMock,
+            return_value=_ok_put_response(),
+        ) as put,
+    ):
         await router.route(_pause_context("iceberg_detector"), _pause_decision())
-    return put, started, registry, MIN_PAUSE_SECONDS
+    return put, started, registry, auto_resume.UPSTREAM_BACKSTOP_SECONDS
 
 
 @pytest.mark.asyncio
 async def test_first_realtime_pause_sends_the_registry_min_pause_once_422():
-    put, started, registry, min_pause = await _route_realtime_pause(
-        lambda now: now + 1800, 1800
+    """The registry's first-pause length (patched to 900 s here) plus the backstop, sent once."""
+    put, started, registry, backstop = await _route_realtime_pause(
+        lambda now: now + 900, 900, first_min=900
     )
     put.assert_awaited_once()
     sent = put.await_args.kwargs["json"]["expires_at"]
-    assert started + min_pause - 1 <= sent <= started + min_pause + 5
+    assert started + 900 + backstop - 1 <= sent <= started + 900 + backstop + 5
     assert registry.record_pause.await_args.args[0] == "iceberg_detector"
 
 
 @pytest.mark.asyncio
 async def test_escalated_realtime_pause_sends_the_escalated_expiry_422():
-    """A flapped strategy's second pause lasts 3600 s upstream, not the first-pause 1800 s."""
-    put, started, _, _ = await _route_realtime_pause(lambda now: now + 3600, 3600)
+    """A flapped strategy's second pause (3600 s) reaches realtime-strategies, plus the backstop."""
+    put, started, _, backstop = await _route_realtime_pause(
+        lambda now: now + 3600, 3600
+    )
     assert put.await_count == 2
     first, aligned = (call.kwargs["json"] for call in put.await_args_list)
     assert aligned["state"] == "paused"
     assert aligned["changed_by"] == first["changed_by"]
-    assert started + 3599 <= aligned["expires_at"] <= started + 3605
+    assert started + 3600 + backstop - 1 <= aligned["expires_at"]
+    assert aligned["expires_at"] <= started + 3600 + backstop + 5
     assert put.await_args_list[1].args[0] == (
         "http://realtime/api/v1/strategies/iceberg_detector/state"
     )
@@ -1619,8 +1628,9 @@ async def test_pause_alignment_failure_is_logged_not_raised_422(caplog):
 
 def test_no_constant_1800_left_on_the_realtime_pause_path_422():
     import inspect
+    import re
 
     import cio.core.router as router_module
 
     source = inspect.getsource(router_module.OutputRouter)
-    assert "timestamp() + 1800" not in source
+    assert not re.search(r"timestamp\(\)\s*\+\s*1800", source)
