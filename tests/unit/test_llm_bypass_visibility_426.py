@@ -8,11 +8,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from prometheus_client import REGISTRY
 from test_spend_ceiling_recovery_423 import ACTION, clock  # noqa: F401 (fixture)
 
 from cio.apps.dashboard_api import router as dashboard_router
-from cio.core.orchestrator import Orchestrator
+from cio.core.orchestrator import Orchestrator, _observe_llm_bypass
 from cio.core.spend_tracker import LlmSpendTracker
 
 
@@ -33,9 +32,8 @@ def _endpoint() -> dict:
 
 
 def _gauge(reason: str) -> float | None:
-    return REGISTRY.get_sample_value(
-        "petrosa_cio_llm_bypass_active", {"reason": reason}
-    )
+    values = {obs.attributes["reason"]: obs.value for obs in _observe_llm_bypass(None)}
+    return values.get(reason)
 
 
 @pytest.mark.asyncio
@@ -87,8 +85,10 @@ def test_env_disabled_llm_shows_reason_env():
 
 
 def test_the_latest_orchestrator_is_reported():
-    _orchestrator({"NURSE_USE_LLM_REASONING": "false"})
+    first = _orchestrator({"NURSE_USE_LLM_REASONING": "false"})
     live = _orchestrator()
     assert live.bypass_reason is None
     assert _endpoint()["bypass_reason"] is None
     assert _gauge("env") == 0.0
+    # The older one is still alive (not merely garbage-collected) and still bypassed.
+    assert first.bypass_reason == "env"

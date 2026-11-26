@@ -1,12 +1,11 @@
 import asyncio
-import functools
 import logging
 import os
 import time
 import weakref
 from typing import TYPE_CHECKING, Any
 
-from prometheus_client import Gauge
+from opentelemetry.metrics import CallbackOptions, Observation
 
 from cio.clients.factory import ClientFactory
 from cio.core import stage_timing
@@ -21,6 +20,7 @@ from cio.core.context_gate import apply_context_gate
 from cio.core.engine import CodeEngine
 from cio.core.leverage_arbiter import arbitrate_leverage
 from cio.core.llm_fallback import llm_fallback_mode
+from cio.core.metrics import meter
 from cio.core.net_ev import gate_enforced, prefilter_mode
 from cio.core.portfolio_tracker import PortfolioTracker
 from cio.core.portfolio_tracker import portfolio_tracker as _default_portfolio_tracker
@@ -88,19 +88,21 @@ def llm_mode_snapshot() -> dict[str, Any]:
     }
 
 
-def _bypass_active(reason: str) -> float:
-    return 1.0 if llm_mode_snapshot()["bypass_reason"] == reason else 0.0
+def _observe_llm_bypass(_options: CallbackOptions) -> list[Observation]:
+    """1 for the active bypass reason, 0 for the others (#426)."""
+    reason = llm_mode_snapshot()["bypass_reason"]
+    return [
+        Observation(1.0 if reason == candidate else 0.0, {"reason": candidate})
+        for candidate in BYPASS_REASONS
+    ]
 
 
-LLM_BYPASS_ACTIVE = Gauge(
+# OpenTelemetry like every exported CIO metric (CIO serves no Prometheus /metrics).
+meter.create_observable_gauge(
     "petrosa_cio_llm_bypass_active",
-    "1 while CIO decides without the LLM (deterministic bypass), by reason: env or ceiling",
-    ["reason"],
+    callbacks=[_observe_llm_bypass],
+    description="1 while CIO decides without the LLM (deterministic bypass), by reason: env or ceiling",
 )
-for _reason in BYPASS_REASONS:
-    LLM_BYPASS_ACTIVE.labels(reason=_reason).set_function(
-        functools.partial(_bypass_active, _reason)
-    )
 
 
 class Orchestrator:
