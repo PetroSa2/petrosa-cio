@@ -1441,6 +1441,18 @@ class OutputRouter:
             return
         target = expires_at + _upstream_backstop_seconds()
         if abs(target - sent) <= 5:
+            # petrosa-cio#433: the expiry already sent is the right one; log it, so every
+            # successful realtime pause shows what realtime-strategies received.
+            logger.info(
+                "PAUSE_EXPIRY_CONFIRMED strategy_id=%s expires_at=%s paused_at=%s "
+                "min_pause_s=%s flap_count=%s",
+                entry.strategy_id,
+                sent,
+                getattr(entry, "paused_at", None),
+                getattr(entry, "min_pause_seconds", None),
+                getattr(entry, "flap_count", None),
+                extra={"correlation_id": correlation_id},
+            )
             return
         aligned = {**payload, "expires_at": target}
         try:
@@ -1450,10 +1462,13 @@ class OutputRouter:
                 detail = f"status={response.status_code}"
             else:
                 logger.info(
-                    "PAUSE_EXPIRY_ALIGNED strategy_id=%s expires_at=%s min_pause_s=%s",
+                    "PAUSE_EXPIRY_ALIGNED strategy_id=%s expires_at=%s paused_at=%s "
+                    "min_pause_s=%s flap_count=%s",
                     entry.strategy_id,
                     target,
+                    getattr(entry, "paused_at", None),
                     getattr(entry, "min_pause_seconds", None),
+                    getattr(entry, "flap_count", None),
                     extra={"correlation_id": correlation_id},
                 )
                 return

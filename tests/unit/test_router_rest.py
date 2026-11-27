@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cio.core.auto_resume import PauseEntry
-from cio.core.router import OutputRouter
+from cio.core.router import OutputRouter, _upstream_backstop_seconds
 from cio.models import (
     ActionType,
     ActivationRecommendation,
@@ -1594,6 +1594,40 @@ async def test_pause_alignment_skips_past_or_non_paused_entries_422():
         lambda now: now + 7200, 7200, status="gave_up"
     )
     put.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_matching_expiry_is_logged_as_confirmed_433(caplog):
+    """petrosa-cio#433: a successful realtime pause logs the expiry realtime-strategies received."""
+    router = _pause_router("apply", pause_registry=AsyncMock())
+    now = datetime.now(UTC).timestamp()
+    entry = PauseEntry(
+        "iceberg_detector",
+        "realtime-strategies",
+        "paused",
+        now,
+        now,
+        1800,
+        flap_count=0,
+        expires_at=now + 1800,
+    )
+    sent = now + 1800 + _upstream_backstop_seconds()
+    with (
+        caplog.at_level("INFO"),
+        patch.object(router.http_client, "put", new_callable=AsyncMock) as put,
+    ):
+        await router._align_realtime_pause_expiry(
+            "http://u", {"state": "paused", "expires_at": sent}, entry, "c"
+        )
+    put.assert_not_awaited()
+    (message,) = [
+        r.getMessage()
+        for r in caplog.records
+        if "PAUSE_EXPIRY_CONFIRMED" in r.getMessage()
+    ]
+    assert f"expires_at={sent}" in message
+    assert f"paused_at={now}" in message
+    assert "min_pause_s=1800" in message and "flap_count=0" in message
 
 
 @pytest.mark.asyncio

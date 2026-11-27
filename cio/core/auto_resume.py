@@ -242,7 +242,19 @@ class LLMPauseRegistry:
     async def remove(self, strategy_id: str, reason: str) -> None:
         try:
             existing = await self.store.get(strategy_id)
-            if isinstance(existing, str) and PauseEntry.from_json(existing) is not None:
+            entry = (
+                PauseEntry.from_json(existing) if isinstance(existing, str) else None
+            )
+            if entry is not None:
+                if entry.status == "resumed" and reason.startswith("non_llm_pause"):
+                    # petrosa-cio#433: a resumed entry holds no pause, only the flap history
+                    # (resumed_at, flap_count) that the next record_pause escalates from.
+                    # tick() removes it as "stable" once REPAUSE_WINDOW_SECONDS has passed.
+                    logger.info(
+                        f"AUTO_RESUME_FLAP_HISTORY_KEPT strategy_id={strategy_id} "
+                        f"reason={reason} flap_count={entry.flap_count}"
+                    )
+                    return
                 await self.store.delete(strategy_id)
                 logger.info(
                     f"AUTO_RESUME_CLEARED strategy_id={strategy_id} reason={reason}"

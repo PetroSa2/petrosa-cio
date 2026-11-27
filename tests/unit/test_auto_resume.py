@@ -1542,3 +1542,44 @@ async def test_cio_resume_event_names_the_writer_cio_sent_422():
     [event] = _published(nats, "resumed")
     assert event["changed_by"] == "petrosa-cio:lifecycle:iceberg_detector"
     assert event["changed_at"] == datetime.fromtimestamp(clock.now, UTC).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_policy_pause_keeps_the_flap_history_of_a_resumed_strategy_433():
+    """petrosa-cio#433: resume, LLM policy pause, re-pause within the window counts as a flap."""
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    clock.now += 1900
+    entry.status = "resumed"
+    entry.resumed_at = clock.now
+    await registry.put(entry)
+
+    clock.now += 120  # production: resume 05:33, policy pause, re-pause 05:35
+    await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+
+    entry = await registry.get("iceberg_detector")
+    assert entry is not None
+    assert entry.status == "paused"
+    assert entry.flap_count == 1
+    assert entry.min_pause_seconds == auto_resume_module.MIN_PAUSE_SECONDS * 2
+    assert entry.expires_at == clock.now + auto_resume_module.MIN_PAUSE_SECONDS * 2
+
+
+@pytest.mark.asyncio
+async def test_other_removals_still_delete_the_entry_433():
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("paused_one", "realtime-strategies")
+    await registry.remove("paused_one", "non_llm_pause action=fail_safe")
+    assert await registry.get("paused_one") is None  # an active pause is superseded
+
+    await registry.record_pause("resumed_one", "realtime-strategies")
+    entry = await registry.get("resumed_one")
+    entry.status = "resumed"
+    entry.resumed_at = clock.now
+    await registry.put(entry)
+    await registry.remove("resumed_one", "stable")
+    assert await registry.get("resumed_one") is None  # tick's cleanup still works
