@@ -253,6 +253,19 @@ class LLMPauseRegistry:
                     # entry holds no pause, only the resumed_at/flap_count the next record_pause
                     # escalates from (tick() removes it as "stable" after REPAUSE_WINDOW_SECONDS).
                     # A flapped pause keeps its escalated expiry; record_pause updates it in place.
+                    if entry.status != "resumed":
+                        # The policy pause starts now: never shorter than a full escalated
+                        # pause, with fresh resume attempts (review of #434).
+                        now = self.clock()
+                        entry.paused_at = now
+                        entry.expires_at = max(
+                            entry.expires_at or 0.0, now + entry.min_pause_seconds
+                        )
+                        entry.next_recheck_at = entry.expires_at
+                        entry.attempts = 0
+                        entry.next_attempt_at = 0.0
+                        if not await self.put(entry):
+                            return
                     logger.info(
                         f"AUTO_RESUME_FLAP_HISTORY_KEPT strategy_id={strategy_id} "
                         f"reason={reason} status={entry.status} flap_count={entry.flap_count}"

@@ -1608,7 +1608,8 @@ async def test_every_successful_realtime_pause_logs_the_sent_expiry_433(caplog):
     (message,) = [
         r.getMessage() for r in caplog.records if "PAUSE_EXPIRY_SENT" in r.getMessage()
     ]
-    assert f"strategy_id=iceberg_detector expires_at={sent} sent_at=" in message
+    assert f"strategy_id=iceberg_detector expires_at={sent} paused_at=" in message
+    assert "min_pause_s=1800 flap_count=0 registry_status=paused" in message
 
 
 class _DictStore:

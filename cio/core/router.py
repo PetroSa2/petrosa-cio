@@ -986,17 +986,6 @@ class OutputRouter:
                                 strategy_id,
                                 extra={"correlation_id": correlation_id},
                             )
-                            if use_lifecycle_endpoint:
-                                # petrosa-cio#433: every successful realtime pause records the
-                                # expiry realtime-strategies received; PAUSE_EXPIRY_ALIGNED
-                                # follows when the registry's expiry replaces it.
-                                logger.info(
-                                    "PAUSE_EXPIRY_SENT strategy_id=%s expires_at=%s sent_at=%s",
-                                    strategy_id,
-                                    payload.get("expires_at"),
-                                    datetime.now(UTC).timestamp(),
-                                    extra={"correlation_id": correlation_id},
-                                )
                             if self.cache and not use_lifecycle_endpoint:
                                 freeze_key = f"cio:freeze:{strategy_id}"
                                 await self.cache.set(freeze_key, "LOCKED", ttl=1800)
@@ -1028,6 +1017,10 @@ class OutputRouter:
                                     reason=pause_reason,
                                     guarded_evidence=evidence,
                                 )
+                                if use_lifecycle_endpoint:
+                                    self._log_pause_expiry_sent(
+                                        strategy_id, payload, entry, correlation_id
+                                    )
                                 if entry is not None and use_lifecycle_endpoint:
                                     await self._align_realtime_pause_expiry(
                                         url, payload, entry, correlation_id
@@ -1048,6 +1041,10 @@ class OutputRouter:
                                             }
                                         ).encode(),
                                     )
+                            elif use_lifecycle_endpoint:
+                                self._log_pause_expiry_sent(
+                                    strategy_id, payload, None, correlation_id
+                                )
                     except Exception as e:
                         # #209 (AC4): several httpx exceptions (and some
                         # connection-reset errors) stringify to "" — logging
@@ -1426,6 +1423,29 @@ class OutputRouter:
         if body.get("success"):
             return False, None
         return True, body.get("error")
+
+    @staticmethod
+    def _log_pause_expiry_sent(
+        strategy_id: str,
+        payload: dict[str, Any],
+        entry: Any,
+        correlation_id: str | None,
+    ) -> None:
+        """petrosa-cio#433: record the expiry each successful realtime pause sent upstream.
+
+        PAUSE_EXPIRY_ALIGNED follows when the registry's expiry replaces it.
+        """
+        logger.info(
+            "PAUSE_EXPIRY_SENT strategy_id=%s expires_at=%s paused_at=%s min_pause_s=%s "
+            "flap_count=%s registry_status=%s",
+            strategy_id,
+            payload.get("expires_at"),
+            getattr(entry, "paused_at", None),
+            getattr(entry, "min_pause_seconds", None),
+            getattr(entry, "flap_count", None),
+            getattr(entry, "status", None),
+            extra={"correlation_id": correlation_id},
+        )
 
     async def _align_realtime_pause_expiry(
         self,

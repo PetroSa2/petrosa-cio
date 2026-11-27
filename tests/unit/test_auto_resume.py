@@ -1608,4 +1608,34 @@ async def test_a_policy_pause_keeps_an_escalated_pause_433():
     assert entry.status == "paused"
     assert entry.flap_count == 1
     assert entry.min_pause_seconds == escalated.min_pause_seconds
-    assert entry.expires_at == escalated.expires_at
+    assert entry.expires_at == clock.now + escalated.min_pause_seconds  # restarted, not cut
+    assert entry.expires_at > escalated.expires_at
+
+
+@pytest.mark.asyncio
+async def test_a_policy_pause_on_an_expired_escalated_pause_restarts_it_433():
+    """Review of #434: a kept escalated pause whose expiry passed restarts at the policy pause."""
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    entry.status = "resumed"
+    entry.resumed_at = clock.now + 1900
+    clock.now += 2000
+    await registry.put(entry)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    escalated = await registry.get("iceberg_detector")
+    escalated.attempts = 3
+    escalated.next_attempt_at = clock.now + 99
+    await registry.put(escalated)
+
+    clock.now = escalated.expires_at + 100  # the escalated expiry has passed
+    await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+
+    entry = await registry.get("iceberg_detector")
+    assert entry.status == "paused" and entry.flap_count == 1
+    assert entry.paused_at == clock.now
+    assert entry.expires_at == clock.now + entry.min_pause_seconds
+    assert entry.next_recheck_at == entry.expires_at
+    assert entry.attempts == 0 and entry.next_attempt_at == 0.0
