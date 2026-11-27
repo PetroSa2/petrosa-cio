@@ -246,13 +246,16 @@ class LLMPauseRegistry:
                 PauseEntry.from_json(existing) if isinstance(existing, str) else None
             )
             if entry is not None:
-                if entry.status == "resumed" and reason.startswith("non_llm_pause"):
-                    # petrosa-cio#433: a resumed entry holds no pause, only the flap history
-                    # (resumed_at, flap_count) that the next record_pause escalates from.
-                    # tick() removes it as "stable" once REPAUSE_WINDOW_SECONDS has passed.
+                if reason.startswith("non_llm_pause") and (
+                    entry.status == "resumed" or entry.flap_count > 0
+                ):
+                    # petrosa-cio#433: a policy pause must not erase flap history. A resumed
+                    # entry holds no pause, only the resumed_at/flap_count the next record_pause
+                    # escalates from (tick() removes it as "stable" after REPAUSE_WINDOW_SECONDS).
+                    # A flapped pause keeps its escalated expiry; record_pause updates it in place.
                     logger.info(
                         f"AUTO_RESUME_FLAP_HISTORY_KEPT strategy_id={strategy_id} "
-                        f"reason={reason} flap_count={entry.flap_count}"
+                        f"reason={reason} status={entry.status} flap_count={entry.flap_count}"
                     )
                     return
                 await self.store.delete(strategy_id)

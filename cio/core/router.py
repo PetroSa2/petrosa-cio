@@ -986,6 +986,17 @@ class OutputRouter:
                                 strategy_id,
                                 extra={"correlation_id": correlation_id},
                             )
+                            if use_lifecycle_endpoint:
+                                # petrosa-cio#433: every successful realtime pause records the
+                                # expiry realtime-strategies received; PAUSE_EXPIRY_ALIGNED
+                                # follows when the registry's expiry replaces it.
+                                logger.info(
+                                    "PAUSE_EXPIRY_SENT strategy_id=%s expires_at=%s sent_at=%s",
+                                    strategy_id,
+                                    payload.get("expires_at"),
+                                    datetime.now(UTC).timestamp(),
+                                    extra={"correlation_id": correlation_id},
+                                )
                             if self.cache and not use_lifecycle_endpoint:
                                 freeze_key = f"cio:freeze:{strategy_id}"
                                 await self.cache.set(freeze_key, "LOCKED", ttl=1800)
@@ -1441,18 +1452,6 @@ class OutputRouter:
             return
         target = expires_at + _upstream_backstop_seconds()
         if abs(target - sent) <= 5:
-            # petrosa-cio#433: the expiry already sent is the right one; log it, so every
-            # successful realtime pause shows what realtime-strategies received.
-            logger.info(
-                "PAUSE_EXPIRY_CONFIRMED strategy_id=%s expires_at=%s paused_at=%s "
-                "min_pause_s=%s flap_count=%s",
-                entry.strategy_id,
-                sent,
-                getattr(entry, "paused_at", None),
-                getattr(entry, "min_pause_seconds", None),
-                getattr(entry, "flap_count", None),
-                extra={"correlation_id": correlation_id},
-            )
             return
         aligned = {**payload, "expires_at": target}
         try:

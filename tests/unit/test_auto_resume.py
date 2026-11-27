@@ -1583,3 +1583,29 @@ async def test_other_removals_still_delete_the_entry_433():
     await registry.put(entry)
     await registry.remove("resumed_one", "stable")
     assert await registry.get("resumed_one") is None  # tick's cleanup still works
+
+
+@pytest.mark.asyncio
+async def test_a_policy_pause_keeps_an_escalated_pause_433():
+    """Review of #434: a policy pause during a flapped pause keeps its escalation and expiry."""
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    entry.status = "resumed"
+    entry.resumed_at = clock.now + 1900
+    clock.now += 2000
+    await registry.put(entry)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    escalated = await registry.get("iceberg_detector")
+    assert escalated.flap_count == 1
+
+    clock.now += 120  # a second policy pause while the escalated pause is in force
+    await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+
+    entry = await registry.get("iceberg_detector")
+    assert entry.status == "paused"
+    assert entry.flap_count == 1
+    assert entry.min_pause_seconds == escalated.min_pause_seconds
+    assert entry.expires_at == escalated.expires_at

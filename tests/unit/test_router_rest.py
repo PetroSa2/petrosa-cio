@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from cio.core.auto_resume import PauseEntry
-from cio.core.router import OutputRouter, _upstream_backstop_seconds
+from cio.core.router import OutputRouter
 from cio.models import (
     ActionType,
     ActivationRecommendation,
@@ -1597,37 +1597,74 @@ async def test_pause_alignment_skips_past_or_non_paused_entries_422():
 
 
 @pytest.mark.asyncio
-async def test_a_matching_expiry_is_logged_as_confirmed_433(caplog):
+async def test_every_successful_realtime_pause_logs_the_sent_expiry_433(caplog):
     """petrosa-cio#433: a successful realtime pause logs the expiry realtime-strategies received."""
-    router = _pause_router("apply", pause_registry=AsyncMock())
-    now = datetime.now(UTC).timestamp()
-    entry = PauseEntry(
+    with caplog.at_level("INFO"):
+        put, started, _, backstop = await _route_realtime_pause(
+            lambda now: now + 1800, 1800
+        )
+    put.assert_awaited_once()
+    sent = put.await_args.kwargs["json"]["expires_at"]
+    (message,) = [
+        r.getMessage() for r in caplog.records if "PAUSE_EXPIRY_SENT" in r.getMessage()
+    ]
+    assert f"strategy_id=iceberg_detector expires_at={sent} sent_at=" in message
+
+
+class _DictStore:
+    def __init__(self):
+        self.values: dict[str, str] = {}
+
+    async def get(self, key):
+        return self.values.get(key)
+
+    async def put(self, key, value):
+        self.values[key] = value
+
+    async def delete(self, key):
+        self.values.pop(key, None)
+
+    async def all(self):
+        return dict(self.values)
+
+
+@pytest.mark.asyncio
+async def test_a_policy_pause_after_a_resume_sends_the_escalated_expiry_433():
+    """petrosa-cio#433, end to end: resume, then an LLM policy pause within the window escalates."""
+    import time as _time
+
+    import cio.core.auto_resume as auto_resume
+    from cio.core.auto_resume import LLMPauseRegistry
+
+    registry = LLMPauseRegistry(_DictStore())
+    now = _time.time()
+    resumed = PauseEntry(
         "iceberg_detector",
         "realtime-strategies",
-        "paused",
-        now,
-        now,
+        "resumed",
+        now - 2000,
+        now - 2000,
         1800,
-        flap_count=0,
-        expires_at=now + 1800,
+        resumed_at=now - 120,
     )
-    sent = now + 1800 + _upstream_backstop_seconds()
-    with (
-        caplog.at_level("INFO"),
-        patch.object(router.http_client, "put", new_callable=AsyncMock) as put,
-    ):
-        await router._align_realtime_pause_expiry(
-            "http://u", {"state": "paused", "expires_at": sent}, entry, "c"
-        )
-    put.assert_not_awaited()
-    (message,) = [
-        r.getMessage()
-        for r in caplog.records
-        if "PAUSE_EXPIRY_CONFIRMED" in r.getMessage()
-    ]
-    assert f"expires_at={sent}" in message
-    assert f"paused_at={now}" in message
-    assert "min_pause_s=1800" in message and "flap_count=0" in message
+    await registry.put(resumed)
+    router = _pause_router("apply", pause_registry=registry)
+    with patch.object(
+        router.http_client,
+        "put",
+        new_callable=AsyncMock,
+        return_value=_ok_put_response(),
+    ) as put:
+        await router.route(_pause_context("iceberg_detector"), _pause_decision())
+
+    entry = await registry.get("iceberg_detector")
+    assert entry is not None and entry.flap_count == 1
+    assert entry.min_pause_seconds == auto_resume.MIN_PAUSE_SECONDS * 2
+    assert put.await_count == 2  # the first-pause expiry, then the escalated one
+    aligned = put.await_args_list[1].kwargs["json"]["expires_at"]
+    assert (
+        abs(aligned - (entry.expires_at + auto_resume.UPSTREAM_BACKSTOP_SECONDS)) <= 1
+    )
 
 
 @pytest.mark.asyncio
