@@ -1016,6 +1016,7 @@ class OutputRouter:
                                     service,
                                     reason=pause_reason,
                                     guarded_evidence=evidence,
+                                    restart=not is_llm_unavailable,
                                 )
                                 if use_lifecycle_endpoint:
                                     self._log_pause_expiry_sent(

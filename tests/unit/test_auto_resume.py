@@ -1602,13 +1602,15 @@ async def test_a_policy_pause_keeps_an_escalated_pause_433():
 
     clock.now += 120  # a second policy pause while the escalated pause is in force
     await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
-    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    await registry.record_pause("iceberg_detector", "realtime-strategies", restart=True)
 
     entry = await registry.get("iceberg_detector")
     assert entry.status == "paused"
     assert entry.flap_count == 1
     assert entry.min_pause_seconds == escalated.min_pause_seconds
-    assert entry.expires_at == clock.now + escalated.min_pause_seconds  # restarted, not cut
+    assert (
+        entry.expires_at == clock.now + escalated.min_pause_seconds
+    )  # restarted, not cut
     assert entry.expires_at > escalated.expires_at
 
 
@@ -1631,7 +1633,10 @@ async def test_a_policy_pause_on_an_expired_escalated_pause_restarts_it_433():
 
     clock.now = escalated.expires_at + 100  # the escalated expiry has passed
     await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
-    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    untouched = await registry.get("iceberg_detector")  # the PUT has not succeeded yet
+    assert untouched.paused_at == escalated.paused_at
+    assert untouched.attempts == 3
+    await registry.record_pause("iceberg_detector", "realtime-strategies", restart=True)
 
     entry = await registry.get("iceberg_detector")
     assert entry.status == "paused" and entry.flap_count == 1
@@ -1639,3 +1644,29 @@ async def test_a_policy_pause_on_an_expired_escalated_pause_restarts_it_433():
     assert entry.expires_at == clock.now + entry.min_pause_seconds
     assert entry.next_recheck_at == entry.expires_at
     assert entry.attempts == 0 and entry.next_attempt_at == 0.0
+
+
+@pytest.mark.asyncio
+async def test_a_policy_pause_still_clears_a_gave_up_entry_433():
+    """Review of #434: only resumed and flapped paused entries are kept, as on main otherwise."""
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    entry.status = "gave_up"
+    entry.flap_count = 3
+    entry.gave_up_at = clock.now
+    await registry.put(entry)
+    await registry.remove("iceberg_detector", "non_llm_pause action=pause_strategy")
+    assert await registry.get("iceberg_detector") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unavailable_re_touch_does_not_restart_a_pause_433():
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    first = await registry.record_pause("iceberg_detector", "realtime-strategies")
+    clock.now += 600
+    again = await registry.record_pause("iceberg_detector", "realtime-strategies")
+    assert again.paused_at == first.paused_at
+    assert again.expires_at == first.expires_at

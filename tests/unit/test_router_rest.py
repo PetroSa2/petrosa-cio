@@ -1600,10 +1600,12 @@ async def test_pause_alignment_skips_past_or_non_paused_entries_422():
 async def test_every_successful_realtime_pause_logs_the_sent_expiry_433(caplog):
     """petrosa-cio#433: a successful realtime pause logs the expiry realtime-strategies received."""
     with caplog.at_level("INFO"):
-        put, started, _, backstop = await _route_realtime_pause(
+        put, started, registry, backstop = await _route_realtime_pause(
             lambda now: now + 1800, 1800
         )
     put.assert_awaited_once()
+    # an LLM policy pause, registered only after the PUT succeeded, restarts a pause in force
+    assert registry.record_pause.await_args.kwargs["restart"] is True
     sent = put.await_args.kwargs["json"]["expires_at"]
     (message,) = [
         r.getMessage() for r in caplog.records if "PAUSE_EXPIRY_SENT" in r.getMessage()
