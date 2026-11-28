@@ -827,9 +827,9 @@ class OutputRouter:
                 if is_llm_unavailable:
                     await self.pause_registry.touch_unavailable(strategy_id)
                 else:
-                    await self.pause_registry.remove(
-                        strategy_id, "non_llm_pause action=pause_strategy"
-                    )
+                    from cio.core.auto_resume import POLICY_PAUSE_REASON
+
+                    await self.pause_registry.remove(strategy_id, POLICY_PAUSE_REASON)
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
             # returns None and logs when the strategy can't be routed).
             base_url = self._resolve_base_url_for_dispatch(

@@ -39,6 +39,10 @@ MAX_PAUSE_SECONDS = 14400
 UPSTREAM_BACKSTOP_SECONDS = MIN_PAUSE_SECONDS
 QUIET_PERIOD_SECONDS = 600
 REPAUSE_WINDOW_SECONDS = 3600
+# petrosa-cio#433: the router's removal reason for an LLM policy pause. Only this one keeps a
+# flapped pause (record_pause restarts it); a fail-safe pause has no expiry and must never be
+# auto-resumed, so it still clears the entry.
+POLICY_PAUSE_REASON = "non_llm_pause action=pause_strategy"
 MAX_FLAPS = 3
 MAX_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 300
@@ -248,7 +252,11 @@ class LLMPauseRegistry:
             if entry is not None:
                 if reason.startswith("non_llm_pause") and (
                     entry.status == "resumed"
-                    or (entry.status == "paused" and entry.flap_count > 0)
+                    or (
+                        entry.status == "paused"
+                        and entry.flap_count > 0
+                        and reason == POLICY_PAUSE_REASON
+                    )
                 ):
                     # petrosa-cio#433: a policy pause must not erase flap history. A resumed
                     # entry holds no pause, only the resumed_at/flap_count the next record_pause

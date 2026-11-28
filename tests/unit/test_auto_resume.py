@@ -1670,3 +1670,28 @@ async def test_an_unavailable_re_touch_does_not_restart_a_pause_433():
     again = await registry.record_pause("iceberg_detector", "realtime-strategies")
     assert again.paused_at == first.paused_at
     assert again.expires_at == first.expires_at
+
+
+@pytest.mark.asyncio
+async def test_a_fail_safe_still_clears_a_flapped_pause_433():
+    """Review of #434: a fail-safe pause has no expiry, so CIO must never auto-resume it."""
+    clock = FakeClock()
+    registry = LLMPauseRegistry(FakeCache(), clock=clock)
+    await registry.record_pause("iceberg_detector", "realtime-strategies")
+    entry = await registry.get("iceberg_detector")
+    entry.flap_count = 1
+    await registry.put(entry)
+    await registry.remove("iceberg_detector", "non_llm_pause action=fail_safe")
+    assert await registry.get("iceberg_detector") is None
+
+
+def test_the_router_removes_with_the_policy_pause_reason_433():
+    import inspect
+
+    import cio.core.router as router_module
+
+    source = inspect.getsource(router_module.OutputRouter)
+    assert "remove(strategy_id, POLICY_PAUSE_REASON)" in source
+    assert (
+        auto_resume_module.POLICY_PAUSE_REASON == "non_llm_pause action=pause_strategy"
+    )
