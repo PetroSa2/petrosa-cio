@@ -39,6 +39,10 @@ MAX_PAUSE_SECONDS = 14400
 UPSTREAM_BACKSTOP_SECONDS = MIN_PAUSE_SECONDS
 QUIET_PERIOD_SECONDS = 600
 REPAUSE_WINDOW_SECONDS = 3600
+# petrosa-cio#433: the router's removal reason for an LLM policy pause. Only this one keeps a
+# flapped pause (record_pause restarts it); a fail-safe pause has no expiry and must never be
+# auto-resumed, so it still clears the entry.
+POLICY_PAUSE_REASON = "non_llm_pause action=pause_strategy"
 MAX_FLAPS = 3
 MAX_ATTEMPTS = 3
 RETRY_BASE_SECONDS = 300
@@ -242,7 +246,28 @@ class LLMPauseRegistry:
     async def remove(self, strategy_id: str, reason: str) -> None:
         try:
             existing = await self.store.get(strategy_id)
-            if isinstance(existing, str) and PauseEntry.from_json(existing) is not None:
+            entry = (
+                PauseEntry.from_json(existing) if isinstance(existing, str) else None
+            )
+            if entry is not None:
+                if reason.startswith("non_llm_pause") and (
+                    entry.status == "resumed"
+                    or (
+                        entry.status == "paused"
+                        and entry.flap_count > 0
+                        and reason == POLICY_PAUSE_REASON
+                    )
+                ):
+                    # petrosa-cio#433: a policy pause must not erase flap history. A resumed
+                    # entry holds no pause, only the resumed_at/flap_count the next record_pause
+                    # escalates from (tick() removes it as "stable" after REPAUSE_WINDOW_SECONDS).
+                    # A flapped pause is left as is here: the PUT may still fail. record_pause
+                    # (restart=True) restarts it once the policy pause was applied.
+                    logger.info(
+                        f"AUTO_RESUME_FLAP_HISTORY_KEPT strategy_id={strategy_id} "
+                        f"reason={reason} status={entry.status} flap_count={entry.flap_count}"
+                    )
+                    return
                 await self.store.delete(strategy_id)
                 logger.info(
                     f"AUTO_RESUME_CLEARED strategy_id={strategy_id} reason={reason}"
@@ -266,7 +291,13 @@ class LLMPauseRegistry:
         *,
         reason: str = "",
         guarded_evidence: dict[str, Any] | None = None,
+        restart: bool = False,
     ) -> PauseEntry | None:
+        """Register an applied pause.
+
+        ``restart`` (an LLM policy pause, petrosa-cio#433): a pause already in force starts again
+        now, never shorter than its escalated length, with fresh resume attempts.
+        """
         try:
             now = self.clock()
             entry = await self.get(strategy_id)
@@ -305,6 +336,14 @@ class LLMPauseRegistry:
                 entry.pause_reason = reason
                 entry.guarded_evidence = dict(guarded_evidence or {})
             elif entry.status == "paused":
+                if restart:
+                    entry.paused_at = now
+                    entry.expires_at = max(
+                        entry.expires_at or 0.0, now + entry.min_pause_seconds
+                    )
+                    entry.next_recheck_at = entry.expires_at
+                    entry.attempts = 0
+                    entry.next_attempt_at = 0.0
                 entry.last_unavailable_at = now
                 entry.service = service
                 entry.pause_reason = reason or entry.pause_reason

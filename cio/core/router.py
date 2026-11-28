@@ -827,9 +827,9 @@ class OutputRouter:
                 if is_llm_unavailable:
                     await self.pause_registry.touch_unavailable(strategy_id)
                 else:
-                    await self.pause_registry.remove(
-                        strategy_id, "non_llm_pause action=pause_strategy"
-                    )
+                    from cio.core.auto_resume import POLICY_PAUSE_REASON
+
+                    await self.pause_registry.remove(strategy_id, POLICY_PAUSE_REASON)
             # a. Resolve the base URL via TargetServiceResolver (petrosa-cio#200:
             # returns None and logs when the strategy can't be routed).
             base_url = self._resolve_base_url_for_dispatch(
@@ -1016,7 +1016,12 @@ class OutputRouter:
                                     service,
                                     reason=pause_reason,
                                     guarded_evidence=evidence,
+                                    restart=not is_llm_unavailable,
                                 )
+                                if use_lifecycle_endpoint:
+                                    self._log_pause_expiry_sent(
+                                        strategy_id, payload, entry, correlation_id
+                                    )
                                 if entry is not None and use_lifecycle_endpoint:
                                     await self._align_realtime_pause_expiry(
                                         url, payload, entry, correlation_id
@@ -1037,6 +1042,10 @@ class OutputRouter:
                                             }
                                         ).encode(),
                                     )
+                            elif use_lifecycle_endpoint:
+                                self._log_pause_expiry_sent(
+                                    strategy_id, payload, None, correlation_id
+                                )
                     except Exception as e:
                         # #209 (AC4): several httpx exceptions (and some
                         # connection-reset errors) stringify to "" — logging
@@ -1416,6 +1425,29 @@ class OutputRouter:
             return False, None
         return True, body.get("error")
 
+    @staticmethod
+    def _log_pause_expiry_sent(
+        strategy_id: str,
+        payload: dict[str, Any],
+        entry: Any,
+        correlation_id: str | None,
+    ) -> None:
+        """petrosa-cio#433: record the expiry each successful realtime pause sent upstream.
+
+        PAUSE_EXPIRY_ALIGNED follows when the registry's expiry replaces it.
+        """
+        logger.info(
+            "PAUSE_EXPIRY_SENT strategy_id=%s expires_at=%s paused_at=%s min_pause_s=%s "
+            "flap_count=%s registry_status=%s",
+            strategy_id,
+            payload.get("expires_at"),
+            getattr(entry, "paused_at", None),
+            getattr(entry, "min_pause_seconds", None),
+            getattr(entry, "flap_count", None),
+            getattr(entry, "status", None),
+            extra={"correlation_id": correlation_id},
+        )
+
     async def _align_realtime_pause_expiry(
         self,
         url: str,
@@ -1450,10 +1482,13 @@ class OutputRouter:
                 detail = f"status={response.status_code}"
             else:
                 logger.info(
-                    "PAUSE_EXPIRY_ALIGNED strategy_id=%s expires_at=%s min_pause_s=%s",
+                    "PAUSE_EXPIRY_ALIGNED strategy_id=%s expires_at=%s paused_at=%s "
+                    "min_pause_s=%s flap_count=%s",
                     entry.strategy_id,
                     target,
+                    getattr(entry, "paused_at", None),
                     getattr(entry, "min_pause_seconds", None),
+                    getattr(entry, "flap_count", None),
                     extra={"correlation_id": correlation_id},
                 )
                 return
